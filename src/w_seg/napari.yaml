@@ -1,0 +1,63 @@
+name: w-seg
+display_name: W Seg
+# use 'hidden' to remove plugin from napari hub search results
+visibility: public
+# see https://napari.org/stable/plugins/technical_references/manifest.html#fields for valid categories
+# categories: []
+contributions:
+  commands:
+    - id: w-seg.get_reader
+      python_name: w_seg._reader:napari_get_reader
+      title: Open data with W Seg
+    - id: w-seg.write_multiple
+      python_name: w_seg._writer:write_multiple
+      title: Save multi-layer data with W Seg
+    - id: w-seg.write_single_image
+      python_name: w_seg._writer:write_single_image
+      title: Save image data with W Seg
+    - id: w-seg.make_sample_data
+      python_name: w_seg._sample_data:make_sample_data
+      title: Load sample data from W Seg
+    - id: w-seg.make_container_widget
+      python_name: w_seg:ImageThreshold
+      title: Make threshold Container widget
+    - id: w-seg.make_magic_widget
+      python_name: w_seg:threshold_magic_widget
+      title: Make threshold magic widget
+    - id: w-seg.make_function_widget
+      python_name: w_seg:threshold_autogenerate_widget
+      title: Make threshold function widget
+    - id: w-seg.make_qwidget
+      python_name: w_seg:ExampleQWidget
+      title: Make example QWidget
+  readers:
+    - command: w-seg.get_reader
+      accepts_directories: false
+      filename_patterns: ['*.npy']
+  writers:
+    - command: w-seg.write_multiple
+      layer_types: ['image*','labels*']
+      filename_extensions: []
+    - command: w-seg.write_single_image
+      layer_types: ['image']
+      filename_extensions: ['.npy']
+  sample_data:
+    - command: w-seg.make_sample_data
+      display_name: W Seg
+      key: unique_id.1
+  widgets:
+    - command: w-seg.make_container_widget
+      display_name: Container Threshold
+    - command: w-seg.make_magic_widget
+      display_name: Magic Threshold
+    - command: w-seg.make_function_widget
+      autogenerate: true
+      display_name: Autogenerate Threshold
+    - command: w-seg.make_qwidget
+      display_name: Example QWidget
+  menus:
+    napari/layers/segment:
+      - command: w-seg.make_container_widget
+      - command: w-seg.make_magic_widget
+      - command: w-seg.make_function_widget
+      - command: w-seg.make_qwidget

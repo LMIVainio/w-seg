@@ -1,0 +1,18 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v2.1.2
+_src_path: /tmp/napari-template
+display_name: W Seg
+email: leo.vainio@helsinki.fi
+full_name: Leo Vainio
+github_repository_url: provide later
+github_username_or_organization: LMIVainio
+include_reader_plugin: true
+include_sample_data_plugin: true
+include_widget_plugin: true
+include_writer_plugin: true
+install_dependabot: true
+install_precommit: true
+license: MIT
+module_name: w_seg
+plugin_name: w-seg
+short_description: A simple CNN based segmentation tool
