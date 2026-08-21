@@ -3,7 +3,7 @@ This module is an example of a barebones numpy reader plugin for napari.
 
 It implements the Reader specification, but your plugin may choose to
 implement multiple readers or even other plugin contributions. see:
-https://napari.org/stable/plugins/building_a_plugin/guides.html#readers
+https://napari.org/stable/plugins/guides.html?#readers
 """
 
 import numpy as np
@@ -29,20 +29,8 @@ def napari_get_reader(path):
         # so we are only going to look at the first file.
         path = path[0]
 
-    # the get_reader function should make as many checks as possible
-    # (without loading the full file) to determine if it can read
-    # the path. Here, we check the dtype of the array by loading
-    # it with memmap, so that we don't actually load the full array into memory.
-    # We pretend that this reader can only read integer arrays.
-    try:
-        arr = np.load(path, mmap_mode='r')
-        if arr.dtype != np.int_:
-            return None
-    # napari_get_reader should never raise an exception, because napari
-    # raises its own specific errors depending on what plugins are
-    # available for the given path, so we catch
-    # the OSError that np.load might raise if the file is malformed
-    except OSError:
+    # if we know we cannot read the file, we immediately return None.
+    if not path.endswith('.npy'):
         return None
 
     # otherwise we return the *function* that can read ``path``.

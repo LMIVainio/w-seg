@@ -1,0 +1,42 @@
+name: w-seg-napari
+display_name: Plant segmentation
+# use 'hidden' to remove plugin from napari hub search results
+visibility: public
+# see https://napari.org/stable/plugins/manifest.html for valid categories
+categories: ["Annotation", "Segmentation", "Acquisition"]
+contributions:
+  commands:
+    - id: w-seg-napari.w_seg_master_widget
+      python_name: w_seg_napari._widget:w_seg_master_widget
+      title: "W-Seg: Segmentation tool"
+    - id: w-seg-napari.get_reader
+      python_name: w_seg_napari._reader:napari_get_reader
+      title: Open data with Plant segmentation
+    - id: w-seg-napari.write_multiple
+      python_name: w_seg_napari._writer:write_multiple
+      title: Save multi-layer data with Plant segmentation
+    - id: w-seg-napari.write_single_image
+      python_name: w_seg_napari._writer:write_single_image
+      title: Save image data with Plant segmentation
+    - id: w-seg-napari.make_sample_data
+      python_name: w_seg_napari._sample_data:make_sample_data
+      title: Load sample data from Plant segmentation
+  readers:
+    - command: w-seg-napari.get_reader
+      accepts_directories: false
+      filename_patterns: ['*.npy']
+  writers:
+    - command: w-seg-napari.write_multiple
+      layer_types: ['image*','labels*']
+      filename_extensions: [".tif", ".tiff"]
+    - command: w-seg-napari.write_single_image
+      layer_types: ['image', 'labels']
+      filename_extensions: ['.tif', '.tiff']
+  sample_data:
+    - command: w-seg-napari.make_sample_data
+      display_name: Plant segmentation
+      key: unique_id.1
+  widgets:
+    - command: w-seg-napari.w_seg_master_widget
+      display_name: "W-Seg: Pipeline"
+      autogenerate: false

@@ -1,6 +1,6 @@
 import numpy as np
 
-from w_seg._widget import (
+from w_seg_napari._widget import (
     ExampleQWidget,
     ImageThreshold,
     threshold_autogenerate_widget,
@@ -9,7 +9,7 @@ from w_seg._widget import (
 
 
 def test_threshold_autogenerate_widget():
-    # because our 'widget' is a pure function, we can call it and
+    # because our "widget" is a pure function, we can call it and
     # test it independently of napari
     im_data = np.random.random((100, 100))
     thresholded = threshold_autogenerate_widget(im_data, 0.5)
@@ -27,7 +27,7 @@ def test_threshold_magic_widget(make_napari_viewer):
     # our widget will be a MagicFactory or FunctionGui instance
     my_widget = threshold_magic_widget()
 
-    # if we 'call' this object, it'll execute our function
+    # if we "call" this object, it'll execute our function
     thresholded = my_widget(viewer.layers[0], 0.5)
     assert thresholded.shape == layer.data.shape
     # etc.
@@ -39,7 +39,7 @@ def test_image_threshold_widget(make_napari_viewer):
     my_widget = ImageThreshold(viewer)
 
     # because we saved our widgets as attributes of the container
-    # we can set their values without having to 'interact' with the viewer
+    # we can set their values without having to "interact" with the viewer
     my_widget._image_layer_combo.value = layer
     my_widget._threshold_slider.value = 0.5
 

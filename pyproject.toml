@@ -1,7 +1,7 @@
 [project]
-name = "w-seg"
-dynamic = ["version"]
-description = "A simple CNN based segmentation tool"
+name = "w-seg-napari"
+version = "0.2.9"
+description = "Segmentation tool for plant tissue plastic sections stained with toluidine blue"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -30,10 +30,19 @@ requires-python = ">=3.10"
 # or any other Qt bindings directly (e.g. PyQt5, PySide2).
 # See best practices: https://napari.org/stable/plugins/building_a_plugin/best_practices.html
 dependencies = [
+    "napari",
     "numpy",
     "magicgui",
     "qtpy",
+    "keras>=3.0.0",
+    "torch",
     "scikit-image",
+    "pillow",
+    "torchvision",
+    "python-elf",
+    "kornia",
+    "pandas",
+    "shapely",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +60,7 @@ dev = [
 ]
 
 [project.entry-points."napari.manifest"]
-w-seg = "w_seg:napari.yaml"
+w-seg-napari = "w_seg_napari:napari.yaml"
 
 
 
@@ -69,7 +78,7 @@ where = ["src"]
 "*" = ["*.yaml"]
 
 [tool.setuptools_scm]
-write_to = "src/w_seg/_version.py"
+write_to = "src/w_seg_napari/_version.py"
 fallback_version = "0.0.1+nogit"
 
 [tool.pytest.ini_options]

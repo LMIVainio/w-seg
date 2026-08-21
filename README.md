@@ -25,16 +25,16 @@ https://napari.org/stable/plugins/index.html
 
 ## Installation
 
-You can install `w-seg` via [pip]:
+You can install `w-seg-napari` via [pip]:
 
 ```bash
-pip install w-seg
+pip install w-seg-napari
 ```
 
 If napari is not already installed, you can install `w-seg` with napari and Qt via:
 
 ```bash
-pip install "w-seg[all]"
+pip install "w-seg-napari[all]"
 ```
 
 
