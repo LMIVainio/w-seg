@@ -17,7 +17,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from scipy.ndimage import binary_erosion
+from scipy.ndimage import distance_transform_edt, label
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -48,26 +48,32 @@ class CellClassifierManager:
     def create_annotation_layer_data(
         self, labels_layer: np.ndarray, erosion_steps: int = 1
     ) -> np.ndarray:
-        """
-        Erodes each unique cell label individually by `erosion_steps` before setting
-        the interior to 1. Preserves cell separation regardless of label proximity.
-        """
-        if labels_layer is None:
-            return None
-        print('[w-seg] generating annotation layer...')
-        annotated_labels = np.zeros_like(labels_layer, dtype=np.uint32)
-        unique_ids = np.unique(labels_layer)
-        unique_ids = unique_ids[unique_ids != 0]
+        """Finds all connected components, erodes each via EDT, and labels all remaining interiors as 1."""
+        if labels_layer is None or not np.any(labels_layer):
+            return np.zeros_like(labels_layer, dtype=np.uint32)
 
-        for cell_id in unique_ids:
-            cell_mask = labels_layer == cell_id
-            eroded_mask = binary_erosion(cell_mask, iterations=erosion_steps)
+        # 1. Label all connected foreground components (structure=ones includes diagonals)
+        lbls, num_features = label(
+            labels_layer > 0, structure=np.ones((3, 3), dtype=bool)
+        )
 
-            # Fallback for very small/thin cells so they don't vanish completely
-            if not np.any(eroded_mask):
-                eroded_mask = cell_mask
+        # 2. Compute Euclidean Distance Transform from component edges
+        dist = distance_transform_edt(lbls > 0)
 
-            annotated_labels[eroded_mask] = 1
+        # 3. Threshold distance to erode, and mark all interiors as 1
+        annotated_labels = (dist > erosion_steps).astype(np.uint32)
+
+        # Optional: Fast fallback to keep small components that completely vanished
+        vanished = (lbls > 0) & (annotated_labels == 0)
+        if np.any(vanished):
+            # Restore components where no pixels survived
+            survived_ids = np.unique(lbls[annotated_labels == 1])
+            all_ids = np.arange(1, num_features + 1)
+            lost_ids = np.setdiff1d(all_ids, survived_ids)
+
+            if len(lost_ids) > 0:
+                # Re-insert original pixels for components that disappeared
+                annotated_labels[np.isin(lbls, lost_ids)] = 1
 
         return annotated_labels
 

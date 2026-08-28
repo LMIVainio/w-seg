@@ -93,6 +93,20 @@ def main_tabbed_widget(viewer: 'napari.Viewer') -> QWidget:
     tabs.addTab(tab2, '2. Curation')
     tabs.addTab(tab3, '3. Cell Morphology')
 
+    # 5. Connect Tab 1 signal directly to Tab 3
+    if hasattr(tab1, 'model_changed') and hasattr(
+        tab3, 'update_model_selection'
+    ):
+        tab1.model_changed.connect(tab3.update_model_selection)
+
+        # Retrieve current initial weight and push to Tab 3
+        initial_weight = (
+            tab1.combo_weights.currentData()
+            or tab1.combo_weights.currentText()
+        )
+        if initial_weight:
+            tab3.update_model_selection(initial_weight)
+
     main_widget = QWidget()
     main_layout = QVBoxLayout()
     main_layout.setContentsMargins(0, 0, 0, 0)

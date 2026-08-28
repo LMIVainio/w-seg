@@ -1,5 +1,6 @@
 import napari
 import torch
+from qtpy.QtCore import Signal
 
 # from PyQt6.QtWidgets import (
 #    QWidget, QVBoxLayout, QGroupBox, QComboBox,
@@ -29,6 +30,8 @@ from w_seg_napari._wsegutils import CurationWidget
 
 
 class Tab1Pipeline(QScrollArea):
+    model_changed = Signal(str)
+
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
@@ -85,6 +88,7 @@ class Tab1Pipeline(QScrollArea):
         )
 
         self.btn_reload.clicked.connect(self._on_reload_clicked)
+        self.combo_weights.currentTextChanged.connect(self._emit_model_change)
 
         layout.addWidget(QLabel('Generator Architecture:'))
         layout.addWidget(self.combo_generator)
@@ -97,6 +101,11 @@ class Tab1Pipeline(QScrollArea):
         # Trigger default model load on init
         self._on_reload_clicked()
         return model_group
+
+    def _emit_model_change(self, text: str):
+        selected_weight = self.combo_weights.currentData() or text
+        if selected_weight:
+            self.model_changed.emit(selected_weight)
 
     def _on_reload_clicked(self):
         selected_weight_identifier = (
@@ -121,6 +130,8 @@ class Tab1Pipeline(QScrollArea):
                 f'Active: {self.combo_weights.currentText()} ({self.device.upper()})'
             )
             self.viewer.status = f'[w-seg] Successfully loaded {self.combo_weights.currentText()}'
+            # Send signal to morphology widget
+            self.model_changed.emit(selected_weight_identifier)
         except (RuntimeError, ValueError, TypeError, OSError) as e:
             self.status_label.setText('❌ Error loading model!')
             self.viewer.status = f'[w-seg] Failed to load model: {str(e)}'
@@ -307,3 +318,12 @@ class Tab3Analysis(QScrollArea):
                 self.cell_wall_classification.signal_layer.choices = (
                     image_layers
                 )
+
+    def update_model_selection(self, model_weight_name: str):
+        """Called when Tab1 changes the active model weights"""
+        is_arabidopsis = 'arabidopsis' in model_weight_name.lower()
+        # Update checkbox
+        if hasattr(self, 'morphology_widget') and hasattr(
+            self.morphology_widget, 'radial_symmetry'
+        ):
+            self.morphology_widget.radial_symmetry.value = is_arabidopsis

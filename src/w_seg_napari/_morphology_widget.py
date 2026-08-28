@@ -193,6 +193,123 @@ def get_safe_padded_bbox(
     return (r0, r1, c0, c1)
 
 
+def add_radial_features(
+    df: pd.DataFrame,
+    center_coords: tuple[float, float] | np.ndarray | None = None,
+    enabled: bool = True,
+    y_col: str = 'centroid-0',
+    x_col: str = 'centroid-1',
+    pixel_scale: float = 1.0,
+    angle_unit: str = 'degrees',
+    fill_value: float = 0.0,
+) -> pd.DataFrame:
+    """Computes and appends distance and angle relative to a center point to a DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing cell centroids (e.g., regionprops output).
+    center_coords : tuple or np.ndarray, optional
+        (y, x) coordinates of the center point in pixels.
+    enabled : bool
+        If False or center_coords is None, fills radial features with `fill_value`.
+    y_col : str
+        Column name for Y centroid coordinate. Default 'centroid-0'.
+    x_col : str
+        Column name for X centroid coordinate. Default 'centroid-1'.
+    pixel_scale : float
+        Physical units per pixel (e.g., µm/px) to scale distances.
+    angle_unit : str
+        'degrees' (0 to 360) or 'radians' (-pi to +pi).
+    fill_value : float
+        Value to fill columns with when disabled (default 0.0).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with added 'distance_from_center' and 'angle_from_center' columns.
+    """
+    df = df.copy()
+
+    # Define standardized feature names
+    dist_col = 'distance_from_center'
+    angle_col = 'angle_from_center'
+
+    # Handle disabled case or missing center point while maintaining column schema
+    if not enabled or center_coords is None or len(center_coords) < 2:
+        df[dist_col] = fill_value
+        df[angle_col] = fill_value
+        return df
+    print('[w-seg] Extracting polar coordinates')
+    # Extract coordinates
+    y_center, x_center = center_coords[0], center_coords[1]
+    y_cells = df[y_col].values
+    x_cells = df[x_col].values
+
+    # 1. Delta coordinates relative to center
+    dy = y_cells - y_center
+    dx = x_cells - x_center
+
+    # 2. Euclidean Distance (scaled by pixel resolution)
+    distances = np.hypot(dy, dx) * pixel_scale
+
+    # 3. Angle in polar space (arctan2 handles quadrants automatically)
+    # Note: -dy reverses image Y-axis (where top-left is 0,0) to standard Cartesian Y-axis
+    angles_rad = np.arctan2(-dy, dx)
+
+    if angle_unit == 'degrees':
+        angles = np.degrees(angles_rad)
+        # Convert [-180, 180] range to intuitive [0, 360] range
+        angles = np.mod(angles, 360.0)
+    else:
+        angles = angles_rad
+
+    # Assign columns back to DataFrame
+    df[dist_col] = distances
+    df[angle_col] = angles
+
+    return df
+
+
+def resolve_center_coords(
+    df: pd.DataFrame,
+    center_coords: tuple[float, float] | np.ndarray | None = None,
+    y_col: str = 'centroid-0',
+    x_col: str = 'centroid-1',
+) -> np.ndarray:
+    """Returns provided center coordinates, or calculates the average centroid of all cells if unspecified.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing cell centroids.
+    center_coords : tuple, np.ndarray, or None
+        User-specified center point coordinates (y, x).
+    y_col : str
+        Column name for Y centroid coordinate. Default 'centroid-0'.
+    x_col : str
+        Column name for X centroid coordinate. Default 'centroid-1'.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (2,) containing (y_center, x_center).
+    """
+    if center_coords is not None and len(center_coords) >= 2:
+        return np.array([center_coords[0], center_coords[1]])
+
+    if df.empty or y_col not in df or x_col not in df:
+        raise ValueError(
+            f"DataFrame must contain '{y_col}' and '{x_col}' columns to estimate center."
+        )
+
+    # Geometric mean of all cell centroids
+    mean_y = float(df[y_col].mean())
+    mean_x = float(df[x_col].mean())
+
+    return np.array([mean_y, mean_x])
+
+
 def sample_cell_wall(
     cell_id: int,
     labels_layer: np.ndarray,
@@ -643,6 +760,8 @@ def measure_cell_morphology(
     num_workers: int = 8,
     clear_borders: bool = True,
     invert_signal: bool = False,
+    center_coords: tuple = None,
+    radial_symmetry: bool = False,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -810,6 +929,20 @@ def measure_cell_morphology(
             0.0,  # Fallback value when perimeter is 0 or invalid
         )
 
+    # Check if center point is defined
+    if center_coords is None and radial_symmetry:
+        print('[w-seg] calculating center point')
+        center_coords = resolve_center_coords(df_combined)
+
+    # Calculate distance from center point
+    df_combined = add_radial_features(
+        df_combined,
+        center_coords=center_coords,
+        enabled=radial_symmetry,
+        pixel_scale=pixel_spacing,
+        angle_unit='degrees',
+    )
+
     # Finally build and return spatial features for each cell
     print('[w-seg] Extracting spatial features for all cells...')
     df_final = extract_spatial_feature_matrix(
@@ -835,12 +968,14 @@ class MorphologyWidget(Container):
         super().__init__(labels=True)
         self.viewer = viewer
 
-        #
-
-        # Internal state caches (replaces shared_state dict)
+        # Internal state caches
         self.cached_df = None
         self.cached_labels_data = None
         self.cached_feature_extraction_config = None
+
+        # Center point tracking
+        self.center_layer_name = 'Center point'
+        self.center_coords = None  # (y, x) coordinates of the center point
 
         # ---------------------------------------------------------------------
         # 1. Instantiate UI Controls
@@ -886,7 +1021,7 @@ class MorphologyWidget(Container):
         self.num_workers = SpinBox(
             label='Parallel Threads:', value=8, min=1, max=32
         )
-
+        # Checkboxes for boolean options
         self.clear_borders = CheckBox(label='Clear Border Cells:', value=False)
         self.invert_signal = CheckBox(
             label='Invert Signal Polarity (1 - S):', value=True
@@ -894,7 +1029,10 @@ class MorphologyWidget(Container):
         self.show_processed_signal = CheckBox(
             label='Show Processed Signal Image:', value=False
         )
-
+        self.radial_symmetry = CheckBox(
+            label='Use Radial Symmetry and center point:', value=True
+        )
+        self.set_center_point_btn = PushButton(text='Set Center Point')
         self.run_btn = PushButton(text='Measure Cell Walls & Morphology')
 
         # Visualization controls
@@ -918,7 +1056,16 @@ class MorphologyWidget(Container):
         self.inspect_cell_id = SpinBox(
             label='Label ID to Inspect:', value=1, min=1, max=99999
         )
-        self.draw_rays_btn = PushButton(text='Draw Debug Rays')
+        self.draw_rays_btn = PushButton(text='Draw Sampling Rays')
+
+        # Connect center point button to callback and layer visibility toggle
+        self.radial_symmetry.changed.connect(self._on_radial_symmetry_toggled)
+        # Connect push button to activate interactive point selection in Napari
+        self.set_center_point_btn.changed.connect(
+            self._enable_center_point_picking
+        )
+        # Initialize state sync
+        self._on_radial_symmetry_toggled(self.radial_symmetry.value)
 
         # ---------------------------------------------------------------------
         # 2. Add Controls to Widget Container
@@ -938,6 +1085,8 @@ class MorphologyWidget(Container):
                 self.clear_borders,
                 self.invert_signal,
                 self.show_processed_signal,
+                self.radial_symmetry,
+                self.set_center_point_btn,
                 self.run_btn,
                 self.feature_to_plot,
                 self.colormap,
@@ -994,6 +1143,8 @@ class MorphologyWidget(Container):
             expand_labs_dist=self.expand_labs_dist.value,
             num_workers=self.num_workers.value,
             invert_signal=self.invert_signal.value,
+            center_coords=self.center_coords,
+            radial_symmetry=self.radial_symmetry,
             clear_borders=self.clear_borders.value,
         )
 
@@ -1020,7 +1171,7 @@ class MorphologyWidget(Container):
         numeric_cols = [
             c
             for c in df_results.select_dtypes(include=[np.number]).columns
-            if c != 'label_id'
+            if c not in ['label_id', 'bbox-0', 'bbox-1', 'bbox-2', 'bbox-3']
         ]
         self.feature_to_plot.choices = numeric_cols
         if 'mean_wall_thickness' in numeric_cols:
@@ -1077,6 +1228,82 @@ class MorphologyWidget(Container):
             show_processed_signal=self.show_processed_signal.value,
         )
 
+    def _on_radial_symmetry_toggled(self, value=None):
+        """Enable/disable the center point button based on checkbox"""
+        enabled = (
+            bool(value) if value is not None else self.radial_symmetry.value
+        )
+        self.set_center_point_btn.enabled = enabled
+        if self.center_layer_name in self.viewer.layers:
+            self.viewer.layers[self.center_layer_name].visible = enabled
+
+    def _ensure_center_point_layer(self):
+        """Create aor get the dedicate Points layer for center point selection."""
+        if self.viewer is None:
+            return
+
+        if self.center_layer_name in self.viewer.layers:
+            layer = self.viewer.layers[self.center_layer_name]
+            layer.visible = True
+            return layer
+
+        return self.viewer.add_points(
+            data=np.empty((0, 2)),
+            name=self.center_layer_name,
+            size=7,
+            face_color='green',
+            symbol='cross',
+            opacity=0.8,
+        )
+
+    def _enable_center_point_picking(self, *args):
+        """Set active layer to Center Point layer and attach click listener."""
+        layer = self._ensure_center_point_layer()
+        self.viewer.layers.selection.active = layer
+
+        # Ensure we don't attach duplicate callbacks
+        if self._on_center_point_clicked not in layer.mouse_drag_callbacks:
+            layer.mouse_drag_callbacks.append(self._on_center_point_clicked)
+
+        # Set layer mode to select so standard point adding doesn't fight our callback
+        layer.mode = 'select'
+
+    def _on_point_added(self, event):
+        """Enforce single point behavior without triggering infinite recursion."""
+        if self.center_layer_name not in self.viewer.layers:
+            return
+
+        layer = self.viewer.layers[self.center_layer_name]
+
+        if len(layer.data) > 1:
+            # Block events while updating layer.data to prevent infinite recursion
+            with layer.events.data.blocker():
+                layer.data = layer.data[-1:]
+
+        if len(layer.data) > 0:
+            self.center_coords = layer.data[0]
+
+    def _on_center_point_clicked(self, layer, event):
+        """Single-point picker that bypasses event-loop recursion."""
+        # Only handle left clicks
+        if event.button != 1:
+            return
+
+        yield  # Wait until mouse release / click completes
+
+        # Get spatial cursor position (y, x) from world coordinates
+        cursor_pos = self.viewer.cursor.position
+        if len(cursor_pos) == 3:
+            coords = np.array([[cursor_pos[1], cursor_pos[2]]])
+        else:
+            coords = np.array([[cursor_pos[0], cursor_pos[1]]])
+
+        # Directly overwrite layer data with the single new point
+        # Modifying layer.data here will NOT trigger mouse_drag_callbacks!
+        layer.data = coords
+        self.center_coords = coords[0]
+        print(f'Center point set at (y, x): {self.center_coords}')
+
     def refresh_layer_choices(self, event=None):
         if self.viewer is None:
             return
@@ -1113,6 +1340,7 @@ class MorphologyWidget(Container):
             'sample_step': int(self.sample_step.value),
             'max_rays': int(self.max_rays.value),
             'offset': float(self.offset.value),
+            'radial_sym': bool(self.radial_symmetry),
         }
         # print(f"DEBUG] Feature extraction config: {fe_config}")
         return fe_config
@@ -1140,5 +1368,7 @@ class MorphologyWidget(Container):
             self.max_rays.value = int(config['max_rays'])
         if 'offset' in config:
             self.offset.value = float(config['offset'])
+        if 'radial_sym' in config:
+            self.radial_symmetry = bool(config['radial_sym'])
 
         print(f'[DEBUG] Updated UI widgets with config: {config}')
