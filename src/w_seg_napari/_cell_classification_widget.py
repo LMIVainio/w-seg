@@ -17,7 +17,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from scipy.ndimage import distance_transform_edt, label
+from scipy.ndimage import binary_dilation, generate_binary_structure
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -48,34 +48,51 @@ class CellClassifierManager:
     def create_annotation_layer_data(
         self, labels_layer: np.ndarray, erosion_steps: int = 1
     ) -> np.ndarray:
-        """Finds all connected components, erodes each via EDT, and labels all remaining interiors as 1."""
+        """Creates an annotation layer from labels layer.
+
+        Converts all labels to 1 (binary mask) and protects touching labels from
+        merging by separating shared boundaries.
+        """
         if labels_layer is None or not np.any(labels_layer):
             return np.zeros_like(labels_layer, dtype=np.uint32)
 
-        # 1. Label all connected foreground components (structure=ones includes diagonals)
-        lbls, num_features = label(
-            labels_layer > 0, structure=np.ones((3, 3), dtype=bool)
-        )
+        ndim = labels_layer.ndim
+        # 8-connectivity for 2D, 26-connectivity for 3D
+        struct_full = generate_binary_structure(ndim, ndim)
 
-        # 2. Compute Euclidean Distance Transform from component edges
-        dist = distance_transform_edt(lbls > 0)
+        # 1. Detect boundary pixels where adjacent label IDs differ (excluding background)
+        touching_boundaries = np.zeros_like(labels_layer, dtype=bool)
 
-        # 3. Threshold distance to erode, and mark all interiors as 1
-        annotated_labels = (dist > erosion_steps).astype(np.uint32)
+        # Fast vector check along each spatial axis
+        for axis in range(ndim):
+            slice1 = [slice(None)] * ndim
+            slice2 = [slice(None)] * ndim
 
-        # Optional: Fast fallback to keep small components that completely vanished
-        vanished = (lbls > 0) & (annotated_labels == 0)
-        if np.any(vanished):
-            # Restore components where no pixels survived
-            survived_ids = np.unique(lbls[annotated_labels == 1])
-            all_ids = np.arange(1, num_features + 1)
-            lost_ids = np.setdiff1d(all_ids, survived_ids)
+            slice1[axis] = slice(0, -1)
+            slice2[axis] = slice(1, None)
 
-            if len(lost_ids) > 0:
-                # Re-insert original pixels for components that disappeared
-                annotated_labels[np.isin(lbls, lost_ids)] = 1
+            val1 = labels_layer[tuple(slice1)]
+            val2 = labels_layer[tuple(slice2)]
 
-        return annotated_labels
+            # Find pixels where labels differ and neither is background (0)
+            diff_mask = (val1 != val2) & (val1 != 0) & (val2 != 0)
+
+            # Mark both sides of the interface as boundary
+            touching_boundaries[tuple(slice1)] |= diff_mask
+            touching_boundaries[tuple(slice2)] |= diff_mask
+
+        # 2. Expand boundary thickness according to erosion_steps
+        if erosion_steps > 1:
+            touching_boundaries = binary_dilation(
+                touching_boundaries,
+                structure=struct_full,
+                iterations=erosion_steps - 1,
+            )
+
+        # 3. Create binary foreground mask and carve out the boundaries
+        fg_mask = (labels_layer > 0) & (~touching_boundaries)
+
+        return fg_mask.astype(np.uint32)
 
     def extract_training_data(
         self,

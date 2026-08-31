@@ -1,6 +1,6 @@
 [project]
 name = "w-seg-napari"
-version = "0.2.9"
+version = "0.3.0"
 description = "Segmentation tool for plant tissue plastic sections stained with toluidine blue"
 readme = "README.md"
 license = "MIT"

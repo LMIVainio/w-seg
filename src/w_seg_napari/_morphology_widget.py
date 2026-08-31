@@ -2,7 +2,6 @@ import concurrent.futures
 import sys
 from concurrent.futures import as_completed
 
-# from typing import Dict, Tuple
 import napari
 import numpy as np
 import pandas as pd
@@ -14,6 +13,7 @@ from magicgui.widgets import (
     PushButton,
     SpinBox,
 )
+from napari.utils.colormaps import DirectLabelColormap
 from scipy.ndimage import (
     binary_erosion,
     find_objects,
@@ -21,6 +21,7 @@ from scipy.ndimage import (
     label,
     map_coordinates,
 )
+from scipy.spatial import Delaunay
 from skimage.color import rgb2gray
 from skimage.measure import find_contours, regionprops_table
 from skimage.segmentation import (
@@ -31,6 +32,7 @@ from skimage.segmentation import (
 
 from w_seg_napari._wsegutils import (
     apply_feature_colormap,
+    build_cell_contact_graph,
     extract_spatial_feature_matrix,
 )
 
@@ -317,7 +319,9 @@ def sample_cell_wall(
     cell_wall_signal: np.ndarray,
     raw_signal_image: np.ndarray | None = None,
     bbox: tuple[int, int, int, int] | None = None,
-    search_radius: int = 12,
+    max_search_radius: int = 30,
+    min_search_radius: int = 4,
+    radius_scale: float = 0.33,
     sample_step: int = 3,
     max_rays: int = np.inf,
     offset: float = 0.5,
@@ -326,7 +330,7 @@ def sample_cell_wall(
     verbose: bool = False,
 ) -> dict:
     """
-    Single Source of Truth: Measures wall thickness and geometry vectors using
+    Measures wall thickness and geometry vectors using
     preprocessed signal, and samples real color values from raw_signal_image.
     """
     H, W = labels_layer.shape[:2]
@@ -337,7 +341,7 @@ def sample_cell_wall(
         if len(y_indices) == 0:
             return None
 
-        pad = search_radius + (2 * search_radius) + erode_labs
+        pad = int(max_search_radius + (1.1 * max_search_radius) + erode_labs)
         raw_bbox = (
             y_indices.min(),
             x_indices.min(),
@@ -361,6 +365,13 @@ def sample_cell_wall(
     cell_mask = sub_labels == cell_id
     if not np.any(cell_mask):
         return None
+
+    # Calculate adaptive search radius
+    lumen_area = np.sum(cell_mask)
+    eq_radius = np.sqrt(lumen_area / np.pi)
+    adaptive_search_radius = float(
+        np.clip(eq_radius * radius_scale, min_search_radius, max_search_radius)
+    )
 
     # Fallback if raw image is not supplied
     if raw_signal_image is None:
@@ -399,7 +410,7 @@ def sample_cell_wall(
     )
     isolated_wall_signal = np.where(valid_region_mask, sub_wall_signal, 0.0)
 
-    # --- Contour Extraction (FIX: Run on LOCAL sub-array) ---
+    # --- Contour Extraction ---
     contours = find_contours(sub_expanded == cell_id, level=0.5)
     if not contours:
         return {
@@ -443,7 +454,12 @@ def sample_cell_wall(
         step = max(1, int(sample_step))
         sample_indices = np.arange(0, n_points, step, dtype=int)
 
-    t = np.linspace(-search_radius, search_radius, search_radius * 4)
+    # Dynamic t-vector generation based on adaptive search radius
+    # Maintain ~4 sub-pixel samples per pixel lenght along the ray
+    num_samples = int(np.ceil(adaptive_search_radius * 8))
+    t = np.linspace(
+        -adaptive_search_radius, adaptive_search_radius, num_samples
+    )
     center_idx = len(t) // 2
 
     thicknesses = []
@@ -601,7 +617,9 @@ def visualize_cell_rays(
     labels_layer: np.ndarray,
     cell_wall_signal: np.ndarray | None = None,
     target_label_id: int = 1,
-    search_radius: int = 12,
+    max_search_radius: int = 30,
+    min_search_radius: int = 4,
+    radius_scale: float = 0.33,
     expand_labs_dist: int = 4,
     erode_labs: int = 4,
     sample_step: int = 3,
@@ -627,7 +645,9 @@ def visualize_cell_rays(
     raw_bbox = (y_slice.start, x_slice.start, y_slice.stop, x_slice.stop)
 
     # Expand bounding box using standardized (r0, r1, c0, c1)
-    bbox_padding = search_radius + (4 * expand_labs_dist) + erode_labs
+    bbox_padding = int(
+        max_search_radius + (1.3 * max_search_radius) + erode_labs
+    )
     bbox = get_safe_padded_bbox(
         raw_bbox, pad=bbox_padding, img_shape=labels_layer.shape
     )
@@ -665,7 +685,9 @@ def visualize_cell_rays(
         expanded_labels=expanded_labels,
         cell_wall_signal=cell_wall_signal,
         bbox=bbox,
-        search_radius=search_radius,
+        max_search_radius=max_search_radius,
+        min_search_radius=min_search_radius,
+        radius_scale=radius_scale,
         sample_step=sample_step,
         max_rays=max_rays,
         offset=offset,
@@ -747,11 +769,138 @@ def visualize_cell_rays(
     print('lumen_baseline_intensity:', result['lumen_baseline_intensity'])
 
 
+def visualize_cell_neighborhood(
+    viewer: napari.Viewer,
+    cell_id: int,
+    labels_layer: np.ndarray,
+    df_single_cell_metrics: pd.DataFrame | None = None,
+    search_radius: int = 8,
+    use_delaunay_fallback: bool = True,
+    max_delaunay_dist_px: float = 120.0,
+):
+    """Visualizes a target cell, its physical/Delaunay neighbors, and connectivity
+
+    edges directly in a napari viewer, computing centroids on the fly from the
+    labels array.
+    """
+    if cell_id not in labels_layer:
+        raise ValueError(f'Cell ID {cell_id} was not found in labels_layer.')
+
+    # 1. Compute Centroids Directly from Labels Layer
+    props = regionprops_table(labels_layer, properties=('label', 'centroid'))
+    df_centroids = pd.DataFrame(props).rename(columns={'label': 'label_id'})
+
+    # Optionally merge with single-cell metrics if provided
+    if df_single_cell_metrics is not None:
+        df_metrics = df_single_cell_metrics.copy()
+        if (
+            'label_id' not in df_metrics.columns
+            and 'label' in df_metrics.columns
+        ):
+            df_metrics.rename(columns={'label': 'label_id'}, inplace=True)
+        df_full = pd.merge(df_centroids, df_metrics, on='label_id', how='left')
+    else:
+        df_full = df_centroids
+
+    df_full = df_full.drop_duplicates(subset=['label_id']).copy()
+
+    label_ids = df_full['label_id'].values
+    centroids = df_full[['centroid-0', 'centroid-1']].values
+    id_to_centroid = dict(zip(label_ids, centroids, strict=True))
+
+    # 2. Build Physical Contact Graph
+    G = build_cell_contact_graph(labels_layer, search_radius)
+
+    # 3. Apply Delaunay Fallback using Computed Centroids
+    if use_delaunay_fallback and len(centroids) >= 4:
+        tri = Delaunay(centroids)
+        for simplex in tri.simplices:
+            for i in range(3):
+                for j in range(i + 1, 3):
+                    u_idx, v_idx = simplex[i], simplex[j]
+                    u_id, v_id = label_ids[u_idx], label_ids[v_idx]
+
+                    if G.degree(u_id) == 0 or G.degree(v_id) == 0:
+                        dist = np.linalg.norm(
+                            centroids[u_idx] - centroids[v_idx]
+                        )
+                        if dist <= max_delaunay_dist_px:
+                            G.add_edge(u_id, v_id, contact_pixels=0)
+
+    # 4. Separate Neighbors into Physical vs. Delaunay
+    neighbors = list(G.neighbors(cell_id)) if cell_id in G else []
+    physical_nbrs = []
+    delaunay_nbrs = []
+
+    for nbr in neighbors:
+        edge_data = G.get_edge_data(cell_id, nbr, {})
+        if edge_data.get('contact_pixels', 0) > 0:
+            physical_nbrs.append(nbr)
+        else:
+            delaunay_nbrs.append(nbr)
+
+    # 5. Create Color-Coded Mask
+    highlight_mask = np.zeros_like(labels_layer, dtype=np.uint32)
+
+    # 1 = Target Cell (Red), 2 = Physical Neighbor (Cyan), 3 = Delaunay Fallback (Yellow)
+    highlight_mask[labels_layer == cell_id] = 1
+    for nbr in physical_nbrs:
+        highlight_mask[labels_layer == nbr] = 2
+    for nbr in delaunay_nbrs:
+        highlight_mask[labels_layer == nbr] = 3
+
+    color_dict = {
+        0: (0.0, 0.0, 0.0, 0.0),  # Label 0 -> Transparent
+        1: (0.8, 0.1, 0.0, 0.85),  # Label 1 -> Red
+        2: (0.0, 0.8, 0.2, 0.85),  # Label 2 -> Green
+        3: (1.0, 0.8, 0.0, 0.7),  # Delaunay Neighbor
+    }
+    # Layer cmap
+    cmap = DirectLabelColormap(
+        color_dict=color_dict,
+        default_color=(0.0, 0.0, 0.0, 0.0),
+    )
+    viewer.add_labels(
+        highlight_mask,
+        name=f'Cell {cell_id} Neighborhood',
+        colormap=cmap,
+        opacity=0.8,
+    )
+
+    # 6. Draw Neighbor Connection Lines
+    lines = []
+    line_colors = []
+    focal_centroid = id_to_centroid[cell_id]
+
+    for nbr in physical_nbrs:
+        lines.append([focal_centroid, id_to_centroid[nbr]])
+        line_colors.append([0.0, 0.8, 1.0, 1.0])  # Cyan
+
+    for nbr in delaunay_nbrs:
+        lines.append([focal_centroid, id_to_centroid[nbr]])
+        line_colors.append([1.0, 0.8, 0.0, 1.0])  # Yellow
+
+    if lines:
+        viewer.add_shapes(
+            lines,
+            shape_type='line',
+            edge_color=line_colors,
+            edge_width=2.5,
+            name=f'Cell {cell_id} Connections',
+        )
+
+    print(
+        f'[INFO] Cell {cell_id}: Found {len(physical_nbrs)} physical contact neighbors and {len(delaunay_nbrs)} Delaunay fallback neighbors.'
+    )
+
+
 def measure_cell_morphology(
     labels_layer: np.ndarray,
     cell_wall_signal: np.ndarray,
     pixel_spacing: float = 1.0,
-    search_radius: int = 12,
+    max_search_radius: int = 12,
+    min_search_radius: int = 4,
+    radius_scale: float = 0.33,
     sample_step: int = 3,
     max_rays: int = np.inf,
     offset: float = 0.5,
@@ -821,7 +970,9 @@ def measure_cell_morphology(
         df_morphology.rename(columns={'label': 'label_id'}, inplace=True)
 
     # Build padded bounding box lookup: cell_id -> safe (min_r, min_c, max_r, max_c)
-    bbox_padding = (2 * expand_labs_dist) + search_radius
+    bbox_padding = int(
+        max_search_radius + (1.1 * max_search_radius) + erode_labs
+    )
     img_shape = labels_layer.shape
     bbox_lookup = {
         int(row['label_id']): get_safe_padded_bbox(
@@ -853,7 +1004,9 @@ def measure_cell_morphology(
                 cell_wall_signal=cell_wall_signal,
                 raw_signal_image=raw_signal,
                 bbox=bbox_lookup.get(int(cell_id)),
-                search_radius=search_radius,
+                max_search_radius=max_search_radius,
+                min_search_radius=min_search_radius,
+                radius_scale=radius_scale,
                 sample_step=sample_step,
                 max_rays=max_rays,
                 offset=offset,
@@ -946,7 +1099,7 @@ def measure_cell_morphology(
     # Finally build and return spatial features for each cell
     print('[w-seg] Extracting spatial features for all cells...')
     df_final = extract_spatial_feature_matrix(
-        labels_layer, df_combined, search_radius=search_radius
+        labels_layer, df_combined, search_radius=max_search_radius
     )
 
     return df_final, labels_layer
@@ -996,8 +1149,18 @@ class MorphologyWidget(Container):
             max=100.0,
             step=0.01,
         )
-        self.search_radius = SpinBox(
-            label='Ray Search Radius (px):', value=12, min=2, max=100
+        self.max_search_radius = SpinBox(
+            label='Max Ray Search Radius (px):', value=30, min=10, max=150
+        )
+        self.min_search_radius = SpinBox(
+            label='Min Ray Search Radius (px)', value=4, min=2, max=10
+        )
+        self.radius_scale = FloatSpinBox(
+            label='Ray Search scale',
+            value=0.33,
+            min=0.1,
+            max=1.0,
+            step=0.05,
         )
         self.expand_labs_dist = SpinBox(
             label='Label Expansion (px):', value=4, min=0, max=20
@@ -1058,6 +1221,9 @@ class MorphologyWidget(Container):
         )
         self.draw_rays_btn = PushButton(text='Draw Sampling Rays')
 
+        # Neighbour inspection
+        self.draw_neighbours_btn = PushButton(text='Draw Neighbours')
+
         # Connect center point button to callback and layer visibility toggle
         self.radial_symmetry.changed.connect(self._on_radial_symmetry_toggled)
         # Connect push button to activate interactive point selection in Napari
@@ -1075,7 +1241,9 @@ class MorphologyWidget(Container):
                 self.labels_layer,
                 self.signal_layer,
                 self.pixel_spacing,
-                self.search_radius,
+                self.max_search_radius,
+                self.min_search_radius,
+                self.radius_scale,
                 self.expand_labs_dist,
                 self.erode_labs,
                 self.sample_step,
@@ -1093,6 +1261,7 @@ class MorphologyWidget(Container):
                 self.vis_btn,
                 self.inspect_cell_id,
                 self.draw_rays_btn,
+                self.draw_neighbours_btn,
             ]
         )
 
@@ -1102,6 +1271,9 @@ class MorphologyWidget(Container):
         self.run_btn.changed.connect(self._on_measure_clicked)
         self.vis_btn.changed.connect(self._on_visualize_clicked)
         self.draw_rays_btn.changed.connect(self._on_draw_rays_clicked)
+        self.draw_neighbours_btn.changed.connect(
+            self._on_draw_neighbours_clicked
+        )
 
         if self.viewer is not None:
             self.viewer.layers.events.inserted.connect(
@@ -1135,7 +1307,9 @@ class MorphologyWidget(Container):
             labels_layer=lbl_data,
             cell_wall_signal=sig_data,
             pixel_spacing=self.pixel_spacing.value,
-            search_radius=self.search_radius.value,
+            max_search_radius=self.max_search_radius.value,
+            min_search_radius=self.min_search_radius.value,
+            radius_scale=self.radius_scale.value,
             sample_step=self.sample_step.value,
             max_rays=self.max_rays.value,
             offset=self.offset.value,
@@ -1218,7 +1392,9 @@ class MorphologyWidget(Container):
             labels_layer=lbl_layer.data,
             cell_wall_signal=sig_layer.data if sig_layer else None,
             target_label_id=int(self.inspect_cell_id.value),
-            search_radius=self.search_radius.value,
+            max_search_radius=self.max_search_radius.value,
+            min_search_radius=self.min_search_radius.value,
+            radius_scale=self.radius_scale.value,
             expand_labs_dist=self.expand_labs_dist.value,
             erode_labs=self.erode_labs.value,
             sample_step=self.sample_step.value,
@@ -1226,6 +1402,22 @@ class MorphologyWidget(Container):
             offset=self.offset.value,
             invert_signal=self.invert_signal.value,
             show_processed_signal=self.show_processed_signal.value,
+        )
+
+    def _on_draw_neighbours_clicked(self):
+        lbl_layer = self.labels_layer.value
+
+        if lbl_layer is None:
+            print('[w-seg] Select a Labels layer first.')
+            return
+        visualize_cell_neighborhood(
+            viewer=self.viewer,
+            cell_id=int(self.inspect_cell_id.value),
+            labels_layer=lbl_layer.data,
+            df_single_cell_metrics=None,
+            search_radius=self.max_search_radius.value,
+            use_delaunay_fallback=True,
+            max_delaunay_dist_px=120.0,
         )
 
     def _on_radial_symmetry_toggled(self, value=None):
@@ -1334,7 +1526,9 @@ class MorphologyWidget(Container):
         """Extracts locked feature extraction parameters from UI widgets."""
         fe_config = {
             'pixel_spacing': float(self.pixel_spacing.value),
-            'search_radius': int(self.search_radius.value),
+            'max_search_radius': int(self.max_search_radius.value),
+            'min_search_radius': int(self.min_search_radius.value),
+            'radius_scale': float(self.radius_scale.value),
             'expand_labs_dist': int(self.expand_labs_dist.value),
             'erode_labs': int(self.erode_labs.value),
             'sample_step': int(self.sample_step.value),
@@ -1356,8 +1550,12 @@ class MorphologyWidget(Container):
         # Directly assign to widget .value attributes
         if 'pixel_spacing' in config:
             self.pixel_spacing.value = float(config['pixel_spacing'])
-        if 'search_radius' in config:
-            self.search_radius.value = int(config['search_radius'])
+        if 'max_search_radius' in config:
+            self.max_search_radius.value = int(config['max_search_radius'])
+        if 'min_search_radius' in config:
+            self.min_search_radius.value = int(config['min_search_radius'])
+        if 'radius_scale' in config:
+            self.radius_scale.value = float(config['radius_scale'])
         if 'expand_labs_dist' in config:
             self.expand_labs_dist.value = int(config['expand_labs_dist'])
         if 'erode_labs' in config:
