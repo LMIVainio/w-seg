@@ -1,6 +1,6 @@
 [project]
 name = "w-seg-napari"
-version = "0.3.0"
+version = "0.3.11"
 description = "Segmentation tool for plant tissue plastic sections stained with toluidine blue"
 readme = "README.md"
 license = "MIT"
@@ -43,6 +43,8 @@ dependencies = [
     "kornia",
     "pandas",
     "shapely",
+    "h5py",
+    "tifffile",
 ]
 
 [project.optional-dependencies]

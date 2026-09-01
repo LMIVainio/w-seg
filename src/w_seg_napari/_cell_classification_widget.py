@@ -1,16 +1,19 @@
 import os
 from typing import Any
 
+import h5py
 import joblib
 import napari
 import numpy as np
 import pandas as pd
+import tifffile
 from qtpy.QtCore import QStandardPaths
 from qtpy.QtWidgets import (
     QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -373,12 +376,20 @@ class CellClassificationWidget(QWidget):
         layer_select_layout.addWidget(self.btn_refresh_layers)
         export_layout.addLayout(layer_select_layout)
 
-        self.btn_export_data = QPushButton('💾 Export Results & Metadata')
+        self.btn_export_data = QPushButton('📊 Export Data and Metadata')
         self.btn_export_data.setEnabled(
             False
         )  # Enable when cached_df is bound/predicted
         self.btn_export_data.clicked.connect(self._on_export_analytics)
         export_layout.addWidget(self.btn_export_data)
+
+        self.btn_export_layers = QPushButton('📦 Export Napari Layers')
+        self.btn_export_layers.clicked.connect(self._on_export_napari_layers)
+        export_layout.addWidget(self.btn_export_layers)
+
+        self.btn_import_layers = QPushButton('📂 Import Napari Layers')
+        self.btn_import_layers.clicked.connect(self._on_import_napari_layers)
+        export_layout.addWidget(self.btn_import_layers)
 
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
@@ -599,7 +610,6 @@ class CellClassificationWidget(QWidget):
                     self, 'Error', f'Failed to load model: {str(e)}'
                 )
 
-    # Inside CellClassificationWidget
     def _on_copy_config_clicked(self):
         if not self.model_config:
             QMessageBox.warning(
@@ -749,6 +759,280 @@ class CellClassificationWidget(QWidget):
         except (RuntimeError, ValueError, TypeError, OSError) as e:
             QMessageBox.critical(
                 self, 'Export Failed', f'Failed to save file:\n{str(e)}'
+            )
+
+    def _on_export_napari_layers(self):
+        if self.viewer is None or len(self.viewer.layers) == 0:
+            QMessageBox.warning(
+                self, 'Export Error', 'No Napari viewer or layers available.'
+            )
+            return
+        # Iterate through all layers for shortest name suggestion
+        shortest_name = min(
+            (layer.name for layer in self.viewer.layers),
+            key=len,
+            default='napari_layers_export',
+        )
+        items = ['HDF5 Single File (.h5)', 'Individual TIFF Files (.tif)']
+        item, ok = QInputDialog.getItem(
+            self, 'Export Format', 'Select export format:', items, 0, False
+        )
+        if not ok or not item:
+            return
+
+        docs_dir = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        )
+        default_dir = os.path.join(docs_dir, 'napari_layers_export')
+
+        try:
+            # ------------------------------------------------------------------
+            # OPTION A: Save all layers into a single HDF5 container (.h5)
+            # ------------------------------------------------------------------
+            if 'HDF5' in item:
+                save_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    'Save Napari Project Session',
+                    os.path.join(
+                        default_dir, f'{shortest_name}_segmentation_session.h5'
+                    ),
+                    'HDF5 Files (*.h5 *.hdf5)',
+                )
+                if not save_path:
+                    return
+
+                with h5py.File(save_path, 'w') as h5f:
+                    # Iterate with index to record original layer order
+                    for index, layer in enumerate(self.viewer.layers):
+                        if isinstance(
+                            layer, (napari.layers.Image, napari.layers.Labels)
+                        ):
+                            data = np.ascontiguousarray(layer.data)
+                            layer_name_safe = layer.name.replace('/', '_')
+
+                            # Create dataset preserving full array dimensions
+                            dset = h5f.create_dataset(
+                                layer_name_safe,
+                                data=data,
+                                compression='gzip',
+                                compression_opts=4,
+                            )
+
+                            # Save layer metadata & ordering index
+                            dset.attrs['order'] = index
+                            dset.attrs['layer_type'] = layer._type_string
+                            dset.attrs['opacity'] = float(layer.opacity)
+                            dset.attrs['scale'] = list(layer.scale)
+                            dset.attrs['visible'] = bool(layer.visible)
+
+                            if hasattr(layer, 'rgb'):
+                                dset.attrs['rgb'] = bool(layer.rgb)
+
+                QMessageBox.information(
+                    self,
+                    'Export Successful',
+                    f'Napari session saved to HDF5 file:<br/><code>{save_path}</code>',
+                )
+
+            # ------------------------------------------------------------------
+            # OPTION B: Save layers as individual TIFF files
+            # ------------------------------------------------------------------
+            else:
+                dirpath = QFileDialog.getExistingDirectory(
+                    self,
+                    'Select Directory to Export Napari Layers',
+                    default_dir,
+                    QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+                )
+                if not dirpath:
+                    return
+
+                exported_count = 0
+                for index, layer in enumerate(self.viewer.layers):
+                    if isinstance(
+                        layer, (napari.layers.Image, napari.layers.Labels)
+                    ):
+                        data = np.ascontiguousarray(layer.data)
+
+                        # Ensure minimum 2D shape
+                        if data.ndim < 2:
+                            data = np.atleast_2d(data)
+
+                        # Downcast 64-bit integer masks safely for ImageJ compatibility
+                        if data.dtype in (np.int64, np.uint64):
+                            min_val = data.min() if data.size > 0 else 0
+                            max_val = data.max() if data.size > 0 else 0
+
+                            if min_val >= 0 and max_val <= 65535:
+                                data = data.astype(np.uint16)
+                            elif (
+                                min_val >= -2147483648
+                                and max_val <= 2147483647
+                            ):
+                                data = data.astype(np.int32)
+                            else:
+                                print(
+                                    f'[w-seg] Warning: Layer "{layer.name}" values exceed int32 range. '
+                                    f'Saving as {data.dtype}.'
+                                )
+                        elif data.dtype == np.float64:
+                            data = data.astype(np.float32)
+
+                        dtype_str = str(data.dtype)
+                        layer_name_safe = layer.name.replace(' ', '_').replace(
+                            '/', '_'
+                        )
+
+                        save_path = os.path.join(
+                            dirpath,
+                            f'{index:02d}_{layer_name_safe}_{dtype_str}.tif',
+                        )
+
+                        # Determine if layer is RGB color
+                        is_rgb = getattr(layer, 'rgb', False) or (
+                            data.ndim >= 3
+                            and data.shape[-1] in (3, 4)
+                            and data.dtype == np.uint8
+                        )
+
+                        if is_rgb:
+                            # Drop alpha channel (4th channel) for ImageJ compatibility
+                            if data.shape[-1] == 4:
+                                data = data[..., :3]
+                            tifffile.imwrite(
+                                save_path, data, photometric='rgb', imagej=True
+                            )
+                        elif data.dtype == np.int32 or data.dtype == np.uint32:
+                            # ImageJ does not support 32-bit integers, save without ImageJ compatibility
+                            tifffile.imwrite(
+                                save_path,
+                                data,
+                                photometric='minisblack',
+                                metadata={
+                                    'axes': 'YX' if data.ndim == 2 else 'YX'
+                                },
+                                imagej=False,
+                            )
+                        else:
+                            # uint8, uint16, int16, float32 are compatible with ImageJ
+                            tifffile.imwrite(save_path, data, imagej=True)
+
+                        exported_count += 1
+
+                QMessageBox.information(
+                    self,
+                    'Export Successful',
+                    f'{exported_count} layer(s) exported successfully to:<br/><code>{dirpath}</code>',
+                )
+
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
+            QMessageBox.critical(
+                self, 'Export Failed', f'Failed to export layers:\n{str(e)}'
+            )
+            print(layer_name_safe, dtype_str)
+            print(data.shape, data.dtype, is_rgb)
+            print(min_val, max_val)
+
+    def _on_import_napari_layers(self):
+        if self.viewer is None:
+            QMessageBox.warning(
+                self, 'Import Error', 'No Napari viewer instance available.'
+            )
+            return
+
+        docs_dir = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        )
+        default_dir = os.path.join(docs_dir, 'napari_layers_export')
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            'Import Napari Session (HDF5)',
+            default_dir,
+            'HDF5 Files (*.h5 *.hdf5)',
+        )
+
+        if not file_path:
+            return
+
+        try:
+            layers_to_import = []
+
+            with h5py.File(file_path, 'r') as h5f:
+                for key in h5f:
+                    dset = h5f[key]
+                    data = dset[()]  # Read full array
+
+                    # Retrieve stored order index (default to 0 if missing from older files)
+                    order = int(dset.attrs.get('order', 0))
+                    layer_type = dset.attrs.get('layer_type', 'image')
+                    opacity = float(dset.attrs.get('opacity', 1.0))
+                    scale = dset.attrs.get('scale', None)
+                    visible = bool(dset.attrs.get('visible', True))
+                    is_rgb = bool(dset.attrs.get('rgb', False))
+
+                    # Auto-detect RGB if applicable
+                    if (
+                        not is_rgb
+                        and data.ndim >= 3
+                        and data.shape[-1] in (3, 4)
+                        and data.dtype == np.uint8
+                    ):
+                        is_rgb = True
+
+                    if scale is not None:
+                        scale = tuple(scale)
+
+                    layers_to_import.append(
+                        {
+                            'order': order,
+                            'name': key,
+                            'data': data,
+                            'layer_type': layer_type,
+                            'opacity': opacity,
+                            'scale': scale,
+                            'visible': visible,
+                            'is_rgb': is_rgb,
+                        }
+                    )
+
+            # Sort layers by saved order index ascending so they add in exact sequence
+            layers_to_import.sort(key=lambda x: x['order'])
+
+            # Add layers sequentially to the viewer
+            for item in layers_to_import:
+                if item['layer_type'] == 'labels' or (
+                    np.issubdtype(item['data'].dtype, np.integer)
+                    and not item['is_rgb']
+                ):
+                    self.viewer.add_labels(
+                        item['data'],
+                        name=item['name'],
+                        opacity=item['opacity'],
+                        scale=item['scale'],
+                        visible=item['visible'],
+                    )
+                else:
+                    self.viewer.add_image(
+                        item['data'],
+                        name=item['name'],
+                        opacity=item['opacity'],
+                        scale=item['scale'],
+                        visible=item['visible'],
+                        rgb=item['is_rgb'],
+                    )
+
+            QMessageBox.information(
+                self,
+                'Import Successful',
+                f'Successfully restored {len(layers_to_import)} layer(s) in original order from:<br/><code>{file_path}</code>',
+            )
+
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
+            QMessageBox.critical(
+                self,
+                'Import Failed',
+                f'Failed to import session file:\n{str(e)}',
             )
 
     def _extract_classes_from_layer(
