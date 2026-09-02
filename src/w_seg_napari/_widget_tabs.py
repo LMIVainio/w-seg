@@ -1,12 +1,9 @@
 import napari
 import torch
 from qtpy.QtCore import Signal
-
-# from PyQt6.QtWidgets import (
-#    QWidget, QVBoxLayout, QGroupBox, QComboBox,
-#    QPushButton, QLabel, QScrollArea
-# )
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
+    QSizePolicy,
     QComboBox,
     QGroupBox,
     QLabel,
@@ -19,10 +16,10 @@ from qtpy.QtWidgets import (
 import w_seg_napari._wsegutils as w
 from w_seg_napari._cell_classification_widget import CellClassificationWidget
 from w_seg_napari._combine_layers_widget import create_layer_combination_widget
-from w_seg_napari._gasp_widget import make_gasp_widget
+from w_seg_napari._gasp_widget import GaspWidget
 from w_seg_napari._morphology_widget import MorphologyWidget
-from w_seg_napari._superpixel_widget import make_superpixel_widget
-from w_seg_napari._w_net_impl import WNetWidget
+from w_seg_napari._superpixel_widget import SuperpixelWidget
+from w_seg_napari._w_net_widget import WNetWidget
 from w_seg_napari._wsegutils import CurationWidget
 
 # Import your widget instantiators / utilities
@@ -35,24 +32,19 @@ class Tab1Pipeline(QScrollArea):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
+        # Ensure scrollbar only appears when content actually overflows
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
 
-        self.device = (
-            'cuda'
-            if torch.cuda.is_available()
-            else 'mps'
-            if torch.backends.mps.is_available()
-            else 'cpu'
-        )
+        self.device = w.get_device()
         self.model_state = {'generator': None, 'device': self.device}
 
         # Build UI
         container = QWidget()
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         layout = QVBoxLayout()
-
-        # Model Selection Group
-        layout.addWidget(self._build_model_group())
-
+        
         # Instantiate Sub-widgets
         selected_generator = self.model_state['generator']
         self.w_net_widget = WNetWidget(
@@ -60,13 +52,14 @@ class Tab1Pipeline(QScrollArea):
             generator=selected_generator,
             device=self.device,
         )
-        self.superpixel_widget = make_superpixel_widget()
-        self.gasp_widget = make_gasp_widget()
+        self.superpixel_widget = SuperpixelWidget(viewer=self.viewer)
+        self.gasp_widget = GaspWidget(viewer=self.viewer)
 
-        layout.addWidget(self.w_net_widget.native)
-        layout.addWidget(self.superpixel_widget.native)
-        layout.addWidget(self.gasp_widget.native)
-        layout.addStretch()
+        layout.addWidget(self._build_model_group())
+        layout.addWidget(self.w_net_widget)
+        layout.addWidget(self.superpixel_widget)
+        layout.addWidget(self.gasp_widget)
+        #layout.addStretch()
 
         container.setLayout(layout)
         self.setWidget(container)
@@ -84,7 +77,7 @@ class Tab1Pipeline(QScrollArea):
 
         self.btn_reload = QPushButton('🔄 Load / Reload Model')
         self.status_label = QLabel(
-            f'Device: {self.device.upper()} | Model not loaded'
+            f'Device: {self.device.type.upper()} | Model not loaded'
         )
 
         self.btn_reload.clicked.connect(self._on_reload_clicked)
@@ -127,7 +120,7 @@ class Tab1Pipeline(QScrollArea):
                 self.w_net_widget.generator = new_generator
 
             self.status_label.setText(
-                f'Active: {self.combo_weights.currentText()} ({self.device.upper()})'
+                f'Active: {self.combo_weights.currentText()} ({self.device.type.upper()})'
             )
             self.viewer.status = f'[w-seg] Successfully loaded {self.combo_weights.currentText()}'
             # Send signal to morphology widget
@@ -168,7 +161,7 @@ class Tab2Curation(QScrollArea):
 
         layout.addWidget(self.curation_panel)
         layout.addWidget(self.layer_blender_widget.native)
-        layout.addStretch()
+        #layout.addStretch()
 
         container.setLayout(layout)
         self.setWidget(container)
@@ -267,7 +260,7 @@ class Tab3Analysis(QScrollArea):
         # Add group boxes to layout
         layout.addWidget(morphology_box)
         layout.addWidget(classification_box)
-        layout.addStretch()
+        #layout.addStretch()
 
         container.setLayout(layout)
         self.setWidget(container)

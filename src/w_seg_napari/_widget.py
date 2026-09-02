@@ -8,6 +8,7 @@ import numpy as np
 
 # Napari GUI libraries
 from qtpy.QtWidgets import (
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -108,6 +109,8 @@ def main_tabbed_widget(viewer: 'napari.Viewer') -> QWidget:
             tab3.update_model_selection(initial_weight)
 
     main_widget = QWidget()
+    main_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    print("size policy set to expanding")
     main_layout = QVBoxLayout()
     main_layout.setContentsMargins(0, 0, 0, 0)
     main_layout.addWidget(tabs)
