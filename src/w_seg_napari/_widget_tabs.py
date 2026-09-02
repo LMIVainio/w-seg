@@ -1,7 +1,7 @@
 import napari
-import torch
+import sys
 from qtpy.QtCore import Signal
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QSize, Qt
 from qtpy.QtWidgets import (
     QSizePolicy,
     QComboBox,
@@ -32,6 +32,7 @@ class Tab1Pipeline(QScrollArea):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         # Ensure scrollbar only appears when content actually overflows
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -59,10 +60,15 @@ class Tab1Pipeline(QScrollArea):
         layout.addWidget(self.w_net_widget)
         layout.addWidget(self.superpixel_widget)
         layout.addWidget(self.gasp_widget)
-        #layout.addStretch()
+        layout.addStretch()
 
         container.setLayout(layout)
         self.setWidget(container)
+
+    # Ugly size hint override on windows - it should fallback on default on other systems
+    def sizeHint(self) -> QSize:
+        if sys.platform == 'win32':
+            return QSize(400, 1200)
 
     def _build_model_group(self) -> QGroupBox:
         model_group = QGroupBox('Model & Weights Selection')
@@ -147,6 +153,10 @@ class Tab2Curation(QScrollArea):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Ensure scrollbar only appears when content actually overflows
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
 
         container = QWidget()
@@ -182,6 +192,10 @@ class Tab3Analysis(QScrollArea):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Ensure scrollbar only appears when content actually overflows
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
 
         container = QWidget()
