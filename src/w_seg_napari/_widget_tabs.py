@@ -1,14 +1,14 @@
-import napari
 import sys
-from qtpy.QtCore import Signal
-from qtpy.QtCore import QSize, Qt
+
+import napari
+from qtpy.QtCore import QSize, Qt, Signal
 from qtpy.QtWidgets import (
-    QSizePolicy,
     QComboBox,
     QGroupBox,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -43,9 +43,11 @@ class Tab1Pipeline(QScrollArea):
 
         # Build UI
         container = QWidget()
-        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        container.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
         layout = QVBoxLayout()
-        
+
         # Instantiate Sub-widgets
         selected_generator = self.model_state['generator']
         self.w_net_widget = WNetWidget(
@@ -69,6 +71,7 @@ class Tab1Pipeline(QScrollArea):
     def sizeHint(self) -> QSize:
         if sys.platform == 'win32':
             return QSize(400, 1200)
+        return super().sizeHint()
 
     def _build_model_group(self) -> QGroupBox:
         model_group = QGroupBox('Model & Weights Selection')
@@ -171,7 +174,7 @@ class Tab2Curation(QScrollArea):
 
         layout.addWidget(self.curation_panel)
         layout.addWidget(self.layer_blender_widget.native)
-        #layout.addStretch()
+        # layout.addStretch()
 
         container.setLayout(layout)
         self.setWidget(container)
@@ -274,7 +277,7 @@ class Tab3Analysis(QScrollArea):
         # Add group boxes to layout
         layout.addWidget(morphology_box)
         layout.addWidget(classification_box)
-        #layout.addStretch()
+        # layout.addStretch()
 
         container.setLayout(layout)
         self.setWidget(container)
