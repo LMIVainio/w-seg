@@ -1,9 +1,10 @@
 import sys
 
 import napari
-from qtpy.QtCore import QSize, Qt, Signal
+from qtpy.QtCore import QSize, Qt, Signal, Slot, QThread
 from qtpy.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QGroupBox,
     QLabel,
     QPushButton,
@@ -11,6 +12,9 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QProgressBar,
+    QFileDialog,
+    QMessageBox,
 )
 
 import w_seg_napari._wsegutils as w
@@ -21,6 +25,7 @@ from w_seg_napari._morphology_widget import MorphologyWidget
 from w_seg_napari._superpixel_widget import SuperpixelWidget
 from w_seg_napari._w_net_widget import WNetWidget
 from w_seg_napari._wsegutils import CurationWidget
+from w_seg_napari._batch_widget import BatchWorker
 
 # Import your widget instantiators / utilities
 # import w_seg_napari._wsegutils as w
@@ -337,3 +342,145 @@ class Tab3Analysis(QScrollArea):
             self.morphology_widget, 'radial_symmetry'
         ):
             self.morphology_widget.radial_symmetry.value = is_arabidopsis
+
+
+class Tab4Batch(QScrollArea):
+    """Dedicated tab for automated directory batch processing and HDF5 export."""
+
+    def __init__(self, viewer: napari.Viewer, parent=None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setWidgetResizable(True)
+
+        self.worker_thread = None
+        self.worker = None
+
+        container = QWidget()
+        container.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
+        layout = QVBoxLayout()
+
+        # Build pipeline options group
+        layout.addWidget(self._build_settings_group())
+
+        # Execution controls
+        self.btn_start = QPushButton('📁 Select Folder & Run Batch')
+        self.btn_start.setStyleSheet('font-weight: bold; padding: 8px;')
+        self.btn_start.clicked.connect(self._on_start_batch)
+
+        self.btn_cancel = QPushButton('Cancel Batch')
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._on_cancel_batch)
+
+        self.status_label = QLabel('Ready for batch processing.')
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+
+        layout.addWidget(self.btn_start)
+        layout.addWidget(self.btn_cancel)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.progress_bar)
+        layout.addStretch()
+
+        container.setLayout(layout)
+        self.setWidget(container)
+
+    def _build_settings_group(self) -> QGroupBox:
+        group = QGroupBox('Batch Pipeline Stages')
+        layout = QVBoxLayout()
+
+        self.chk_superpixels = QCheckBox('Run Superpixels (Watershed)')
+        self.chk_superpixels.setChecked(True)
+
+        self.chk_gasp = QCheckBox('Run GASP Graph Partitioning')
+        self.chk_gasp.setChecked(True)
+
+        self.chk_morphology = QCheckBox('Run Cell Morphology Measurements')
+        self.chk_morphology.setChecked(True)
+
+        self.chk_classification = QCheckBox(
+            'Run Random Forest Cell Classification'
+        )
+        self.chk_classification.setChecked(False)
+
+        self.chk_export_h5 = QCheckBox('Export Session to HDF5 (.h5)')
+        self.chk_export_h5.setChecked(True)
+        self.chk_export_h5.setEnabled(False)  # Mandated output format
+
+        layout.addWidget(self.chk_superpixels)
+        layout.addWidget(self.chk_gasp)
+        layout.addWidget(self.chk_morphology)
+        layout.addWidget(self.chk_classification)
+        layout.addWidget(self.chk_export_h5)
+        group.setLayout(layout)
+        return group
+
+    def refresh_layer_choices(self):
+        """No dynamic layer widgets required for batch configuration."""
+        pass
+
+    def _get_settings(self) -> dict:
+        return {
+            'superpixels': self.chk_superpixels.isChecked(),
+            'gasp': self.chk_gasp.isChecked(),
+            'morphology': self.chk_morphology.isChecked(),
+            'classification': self.chk_classification.isChecked(),
+        }
+
+    def _on_start_batch(self):
+        dirpath = QFileDialog.getExistingDirectory(
+            self,
+            'Select Directory for Batch Processing',
+            '',
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not dirpath:
+            return
+
+        settings = self._get_settings()
+
+        self.btn_start.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+
+        self.worker_thread = QThread()
+        self.worker = BatchWorker(
+            dirpath, settings, self._run_single_file_pipeline
+        )
+        self.worker.moveToThread(self.worker_thread)
+
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.progress_changed.connect(self._on_progress_update)
+        self.worker.finished.connect(self._on_batch_finished)
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+
+        self.worker_thread.start()
+
+    @Slot(int, str)
+    def _on_progress_update(self, percent: int, msg: str):
+        self.progress_bar.setValue(percent)
+        self.status_label.setText(msg)
+
+    def _on_cancel_batch(self):
+        if self.worker:
+            self.worker.cancel()
+            self.status_label.setText('Cancelling batch run...')
+
+    @Slot(int, list)
+    def _on_batch_finished(self, success_count: int, failed_files: list):
+        self.btn_start.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self.progress_bar.setValue(100)
+
+        msg = f'Batch processing finished.\nSuccessfully processed: {success_count} file(s).'
+        if failed_files:
+            msg += f'\n\nFailed on {len(failed_files)} file(s):\n' + '\n'.join(
+                f'- {f}: {err}' for f, err in failed_files[:5]
+            )
+        QMessageBox.information(self, 'Batch Complete', msg)
+        self.status_label.setText('Ready for batch processing.')

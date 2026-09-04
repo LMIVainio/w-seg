@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 import h5py
+import json
 import joblib
 import napari
 import numpy as np
@@ -804,12 +805,11 @@ class CellClassificationWidget(QWidget):
                 with h5py.File(save_path, 'w') as h5f:
                     # Iterate with index to record original layer order
                     for index, layer in enumerate(self.viewer.layers):
+                        layer_name_safe = layer.name.replace('/', '_')
                         if isinstance(
                             layer, (napari.layers.Image, napari.layers.Labels)
                         ):
                             data = np.ascontiguousarray(layer.data)
-                            layer_name_safe = layer.name.replace('/', '_')
-
                             # Create dataset preserving full array dimensions
                             dset = h5f.create_dataset(
                                 layer_name_safe,
@@ -824,9 +824,63 @@ class CellClassificationWidget(QWidget):
                             dset.attrs['opacity'] = float(layer.opacity)
                             dset.attrs['scale'] = list(layer.scale)
                             dset.attrs['visible'] = bool(layer.visible)
+                            dset.attrs['blending_mode'] = str(layer.blending)
 
-                            if hasattr(layer, 'rgb'):
-                                dset.attrs['rgb'] = bool(layer.rgb)
+                            # Save colormap data
+                            if layer._type_string == 'image':
+                                # Save image colormap name
+                                dset.attrs['colormap'] = getattr(layer.colormap, 'name', str(layer.colormap))
+                                dset.attrs['rgb'] = bool(getattr(layer, 'rgb', False))
+
+                            elif layer._type_string == 'labels':
+                                # Save label colormap in the offchange that it might be customized
+                                dset.attrs['colormap'] = getattr(layer.colormap, 'name', str(layer.colormap))
+                                # Exctract custom labels
+                                color_dict = None
+                                if (hasattr(layer.colormap, 'color_dict') and layer.colormap.color_dict):
+                                    color_dict = layer.colormap.color_dict
+                                elif (
+                                    hasattr(layer, 'color')
+                                    and isinstance(layer.color, dict)
+                                    and layer.color
+                                ):
+                                    color_dict = layer.color
+
+                                if color_dict is not None:
+                                    clean_color_dict = {}
+                                    for k, v in color_dict.items():
+                                        # Convert ndarray / numpy scalars to standard Python floats/lists
+                                        if isinstance(v, np.ndarray):
+                                            v_clean = v.tolist()
+                                        elif hasattr(v, '__iter__'):
+                                            v_clean = [float(x) for x in v]
+                                        else:
+                                            v_clean = float(v)
+                                        clean_color_dict[str(k)] = v_clean
+                                        
+                                    dset.attrs['custom_label_colors'] = json.dumps(clean_color_dict)
+
+                            elif layer._type_string == 'shapes':
+                                # Create an HDF5 group for the Shapes layer
+                                group = h5f.create_group(layer_name_safe)
+                                group.attrs['order'] = index
+                                group.attrs['layer_type'] = layer._type_string
+                                group.attrs['opacity'] = float(layer.opacity)
+                                group.attrs['scale'] = list(layer.scale)
+                                group.attrs['visible'] = bool(layer.visible)
+                                group.attrs['blending_mode'] = str(layer.blending)
+                                group.attrs['shape_types'] = json.dumps(
+                                    [str(s) for s in layer.shape_types]
+                                )
+                                # Store each shape array under the group
+                                shapes_group = group.create_group('shapes_data')
+                                for s_idx, shape_arr in enumerate(layer.data):
+                                    shapes_group.create_datase(
+                                        f'shape_{s_idx:04d}',
+                                        data=np.ascontiguousarray(shape_arr),
+                                        compression='gzip',
+                                        compression_opts=4,
+                                    )
 
                 QMessageBox.information(
                     self,
@@ -929,9 +983,6 @@ class CellClassificationWidget(QWidget):
             QMessageBox.critical(
                 self, 'Export Failed', f'Failed to export layers:\n{str(e)}'
             )
-            print(layer_name_safe, dtype_str)
-            print(data.shape, data.dtype, is_rgb)
-            print(min_val, max_val)
 
     def _on_import_napari_layers(self):
         if self.viewer is None:
@@ -960,58 +1011,148 @@ class CellClassificationWidget(QWidget):
 
             with h5py.File(file_path, 'r') as h5f:
                 for key in h5f:
-                    dset = h5f[key]
-                    data = dset[()]  # Read full array
+                    item = h5f[key]
 
-                    # Retrieve stored order index (default to 0 if missing from older files)
-                    order = int(dset.attrs.get('order', 0))
-                    layer_type = dset.attrs.get('layer_type', 'image')
-                    opacity = float(dset.attrs.get('opacity', 1.0))
-                    scale = dset.attrs.get('scale', None)
-                    visible = bool(dset.attrs.get('visible', True))
-                    is_rgb = bool(dset.attrs.get('rgb', False))
-
-                    # Auto-detect RGB if applicable
-                    if (
-                        not is_rgb
-                        and data.ndim >= 3
-                        and data.shape[-1] in (3, 4)
-                        and data.dtype == np.uint8
-                    ):
-                        is_rgb = True
+                    # Retrieve layer metadata
+                    order = int(item.attrs.get('order', 0))
+                    layer_type = item.attrs.get('layer_type', 'image')
+                    opacity = float(item.attrs.get('opacity', 1.0))
+                    scale = item.attrs.get('scale', None)
+                    visible = bool(item.attrs.get('visible', True))
+                    blending = item.attrs.get('blending_mode', 'translucent')
 
                     if scale is not None:
                         scale = tuple(scale)
 
-                    layers_to_import.append(
-                        {
-                            'order': order,
-                            'name': key,
-                            'data': data,
-                            'layer_type': layer_type,
-                            'opacity': opacity,
-                            'scale': scale,
-                            'visible': visible,
-                            'is_rgb': is_rgb,
-                        }
-                    )
+                    # Load Shape layer Group
+                    if layer_type == 'shapes' and isinstance(
+                        item, h5py.Group
+                    ):
+                        shape_types = json.loads(
+                            item.attrs.get('shape_types', '[]')
+                        )
+                        shapes_data = []
+                        if 'shapes_data' in item:
+                            s_group = item['shapes_data']
+                            # Sort keys numerically (shape_0000, shape_0001, ...)
+                            sorted_keys = sorted(
+                                s_group.keys(),
+                                key=lambda x: int(x.split('_')[-1])
+                                if '_' in x
+                                else 0,
+                            )
+                            for s_key in sorted_keys:
+                                shapes_data.append(s_group[s_key][()])
 
-            # Sort layers by saved order index ascending so they add in exact sequence
+                        layers_to_import.append(
+                            {
+                                'order': order,
+                                'name': key,
+                                'data': shapes_data,
+                                'layer_type': 'shapes',
+                                'shape_type': shape_types,
+                                'opacity': opacity,
+                                'scale': scale,
+                                'visible': visible,
+                                'blending_mode': blending,
+                            }
+                        )
+
+                    # Load Image or Labels Data
+                    elif isinstance(item, h5py.Dataset):
+                        data = item[()]
+                        is_rgb = bool(item.attrs.get('rgb', False))
+                        colormap = item.attrs.get('colormap', 'gray')
+
+                        # Parse custom label colors dict safely
+                        custom_label_colors = None
+                        if 'custom_label_colors' in item.attrs:
+                            try:
+                                raw_colors = json.loads(
+                                    item.attrs['custom_label_colors']
+                                )
+                                custom_label_colors = {
+                                    int(k): v for k, v in raw_colors.items()
+                                }
+                            except (json.JSONDecodeError, ValueError):
+                                custom_label_colors = None
+
+                        # Autodetect RGB if applicable
+                        if (
+                            not is_rgb
+                            and data.ndim >= 3
+                            and data.shape[-1] in (3, 4)
+                            and data.dtype == np.uint8
+                        ):
+                            is_rgb = True
+
+                        layers_to_import.append(
+                            {
+                                'order': order,
+                                'name': key,
+                                'data': data,
+                                'layer_type': layer_type,
+                                'opacity': opacity,
+                                'blending_mode': blending,
+                                'colormap': colormap,
+                                'custom_label_colors': custom_label_colors,
+                                'scale': scale,
+                                'visible': visible,
+                                'is_rgb': is_rgb,
+                            }
+                        )
+
+            # Sort layers by saved order in ascending index
             layers_to_import.sort(key=lambda x: x['order'])
 
             # Add layers sequentially to the viewer
             for item in layers_to_import:
-                if item['layer_type'] == 'labels' or (
-                    np.issubdtype(item['data'].dtype, np.integer)
+                ltype = item['layer_type']
+
+                if ltype == 'labels' or (
+                    ltype != 'shapes'
+                    and np.issubdtype(item['data'].dtype, np.integer)
                     and not item['is_rgb']
                 ):
-                    self.viewer.add_labels(
+                    labels_kwargs = {
+                        'name': item['name'],
+                        'opacity': item['opacity'],
+                        'scale': item['scale'],
+                        'visible': item['visible'],
+                        'blending': item['blending_mode'],
+                    }
+
+                    # Reconstruct DirecLabelColormap if custom colors were saved
+                    if item.get('custom_label_colors'):
+                        from napari.utils.colormaps import DirectLabelColormap
+
+                        labels_kwargs['colormap'] = DirectLabelColormap(
+                            color_dict=item['custom_label_colors'],
+                            default_color=(0.0, 0.0, 0.0, 0.0),
+                        )
+                    elif (
+                        item.get('colormap')
+                        and item['colormap']
+                        not in ('label_colormap', 'custom', 'gray')
+                    ):
+                        try:
+                            labels_kwargs['colormap'] = item['colormap']
+                        except Exception:
+                            pass  # Fallback to default random categorical colormap
+
+                    self.viewer.add_labels(item['data'], **labels_kwargs)
+
+                elif ltype == 'shapes':
+                    self.viewer.add_shapes(
                         item['data'],
+                        shape_type=item['shape_type'],
                         name=item['name'],
                         opacity=item['opacity'],
                         scale=item['scale'],
                         visible=item['visible'],
+                        blending=item['blending_mode'],
                     )
+
                 else:
                     self.viewer.add_image(
                         item['data'],
@@ -1019,6 +1160,8 @@ class CellClassificationWidget(QWidget):
                         opacity=item['opacity'],
                         scale=item['scale'],
                         visible=item['visible'],
+                        blending=item['blending_mode'],
+                        colormap=item['colormap'],
                         rgb=item['is_rgb'],
                     )
 

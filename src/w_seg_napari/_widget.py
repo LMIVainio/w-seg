@@ -17,7 +17,12 @@ from qtpy.QtWidgets import (
 # =====================================================================
 # Widget Tabs import
 # =====================================================================
-from w_seg_napari._widget_tabs import Tab1Pipeline, Tab2Curation, Tab3Analysis
+from w_seg_napari._widget_tabs import (
+    Tab1Pipeline,
+    Tab2Curation,
+    Tab3Analysis,
+    Tab4Batch,
+)
 
 if TYPE_CHECKING:
     import napari
@@ -70,12 +75,14 @@ def main_tabbed_widget(viewer: 'napari.Viewer') -> QWidget:
     tab1 = Tab1Pipeline(viewer)
     tab2 = Tab2Curation(viewer)
     tab3 = Tab3Analysis(viewer)
+    tab4 = Tab4Batch(viewer)
 
     # 3. Layer Events Orchestrator
     def refresh_all_layer_choices(event=None):
         tab1.refresh_layer_choices()
         tab2.refresh_layer_choices()
         tab3.refresh_layer_choices()
+        tab4.refresh_layer_choices()
 
     viewer.layers.events.inserted.connect(refresh_all_layer_choices)
     viewer.layers.events.removed.connect(refresh_all_layer_choices)
@@ -93,6 +100,7 @@ def main_tabbed_widget(viewer: 'napari.Viewer') -> QWidget:
     tabs.addTab(tab1, '1. W-seg and GASP')
     tabs.addTab(tab2, '2. Curation')
     tabs.addTab(tab3, '3. Cell Morphology')
+    tabs.addTab(tab4, '4. Batch Mode')
 
     # 5. Connect Tab 1 signal directly to Tab 3
     if hasattr(tab1, 'model_changed') and hasattr(
