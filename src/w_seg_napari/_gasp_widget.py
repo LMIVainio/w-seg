@@ -11,6 +11,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from w_seg_napari._affinity import find_sources, gasp_inputs, gather
+
 
 class GaspWidget(QGroupBox):
     def __init__(self, viewer: napari.Viewer, parent=None):
@@ -41,17 +43,20 @@ class GaspWidget(QGroupBox):
         form_layout = QFormLayout()
 
         # 1. Layer Selection Controls
-        self.combo_aff_h = QComboBox()
-        self.combo_aff_h.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
-        form_layout.addRow('Horizontal Affinity:', self.combo_aff_h)
+        # One entry per prediction: all of its affinity layers are used
+        # (aff_k<range>_<image> for new models, affH_/affV_ for old ones).
+        self.combo_aff = QComboBox()
+        self.combo_aff.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        form_layout.addRow('Affinities of:', self.combo_aff)
 
-        self.combo_aff_v = QComboBox()
-        self.combo_aff_v.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
+        self.combo_ranges = QComboBox()
+        self.combo_ranges.addItem('All ranges', userData='all')
+        self.combo_ranges.addItem('Shortest range only', userData='shortest')
+        self.combo_ranges.addItem('Longest range only', userData='longest')
+        self.combo_ranges.setToolTip(
+            'Which affinity ranges GASP uses. Useful for testing what the long-range channels add.'
         )
-        form_layout.addRow('Vertical Affinity:', self.combo_aff_v)
+        form_layout.addRow('Ranges used:', self.combo_ranges)
 
         self.combo_superpixel = QComboBox()
         self.combo_superpixel.setSizePolicy(
@@ -81,7 +86,10 @@ class GaspWidget(QGroupBox):
         self.spin_k_offset = QSpinBox()
         self.spin_k_offset.setRange(1, 100)
         self.spin_k_offset.setValue(8)
-        form_layout.addRow('K Offset:', self.spin_k_offset)
+        self.spin_k_offset.setToolTip(
+            'Only for old models (affH_/affV_ layers). New models store their offsets with the layers.'
+        )
+        form_layout.addRow('K Offset (old models):', self.spin_k_offset)
 
         # 3. Action Button
         self.btn_run = QPushButton('Run GASP Clustering')
@@ -119,38 +127,61 @@ class GaspWidget(QGroupBox):
 
             combo.blockSignals(False)
 
-        # Update each dropdown with its matching layer criteria
-        _update_combo(self.combo_aff_h, napari.layers.Image, prefix='affH_')
-        _update_combo(self.combo_aff_v, napari.layers.Image, prefix='affV_')
+        # Affinity sets: one entry per prediction that has affinity layers
+        current = self.combo_aff.currentText()
+        self.combo_aff.blockSignals(True)
+        self.combo_aff.clear()
+        image_names = [
+            lay.name
+            for lay in self.viewer.layers
+            if isinstance(lay, napari.layers.Image)
+        ]
+        for source in find_sources(image_names):
+            self.combo_aff.addItem(source, userData=source)
+        index = self.combo_aff.findText(current)
+        if index != -1:
+            self.combo_aff.setCurrentIndex(index)
+        self.combo_aff.blockSignals(False)
+
         _update_combo(self.combo_superpixel, napari.layers.Labels)
 
     def _on_run_clicked(self):
         """Executes the GaspFromAffinities pipeline and posts the output layer."""
-        aff_h_layer = self.combo_aff_h.currentData()
-        aff_v_layer = self.combo_aff_v.currentData()
+        source = self.combo_aff.currentData()
         sp_layer = self.combo_superpixel.currentData()
-
-        if aff_h_layer is None or aff_v_layer is None or sp_layer is None:
-            msg = '[w-seg] Error: Missing required layers for GASP.'
-            print(msg)
-            if self.viewer:
-                self.viewer.status = msg
-            return
 
         linkage = self.combo_linkage.currentText()
         beta_bias = self.spin_beta.value()
         k_offset = self.spin_k_offset.value()
 
-        if self.viewer:
-            self.viewer.status = '[w-seg] Running GaspFromAffinities...'
+        aset = None
+        if source is not None:
+            try:
+                aset = gather(
+                    list(self.viewer.layers), source, legacy_k=k_offset
+                )
+            except ValueError as e:
+                print(f'[w-seg] Error: {e}')
+                return
+        if aset is None or sp_layer is None:
+            msg = '[w-seg] Error: Missing required layers for GASP.'
+            print(msg)
+            if self.viewer:
+                self.viewer.status = msg
+            return
+        aset = aset.select(self.combo_ranges.currentData())
 
-        final_instances = self._compute_gasp(
-            horizontal_affinity=aff_h_layer.data,
-            vertical_affinity=aff_v_layer.data,
+        if self.viewer:
+            self.viewer.status = (
+                f'[w-seg] Running GaspFromAffinities ({aset.describe()})...'
+            )
+        print(f'[w-seg] GASP using {aset.describe()}; offsets {aset.offsets}')
+
+        final_instances = self._compute_gasp_from_set(
+            aset,
             superpixels=sp_layer.data,
             linkage=linkage,
             beta_bias=beta_bias,
-            k_offset=k_offset,
         )
 
         if final_instances is None:
@@ -192,6 +223,41 @@ class GaspWidget(QGroupBox):
             )
             if self.viewer:
                 self.viewer.status = f'[w-seg] Added GASP layer: {layer_name}'
+
+    @staticmethod
+    def _compute_gasp_from_set(
+        aset,
+        superpixels: np.ndarray,
+        linkage: str,
+        beta_bias: float,
+    ) -> np.ndarray:
+        """GASP on a 2D image with any number of affinity channels / offsets (see _affinity.AffinitySet)."""
+        from elf.segmentation.gasp import GaspFromAffinities
+
+        fragments = np.squeeze(superpixels).astype(np.uint64)
+        if fragments.shape != aset.shape:
+            print(
+                f'[w-seg] Error: superpixels {fragments.shape} and affinities {aset.shape} differ in shape'
+            )
+            return None
+
+        offsets, aff_channels = gasp_inputs(
+            aset
+        )  # offsets [0, dy, dx]; affs [n, 1, H, W]
+        fragments_3d = fragments[np.newaxis, :, :]
+
+        gasp_engine = GaspFromAffinities(
+            offsets=offsets,
+            beta_bias=beta_bias,
+            superpixel_generator=lambda affs, **kwargs: fragments_3d,
+            run_GASP_kwargs={
+                'linkage_criteria': linkage,
+                'use_efficient_implementations': True,
+            },
+            set_only_direct_neigh_as_mergeable=True,
+        )
+        final_instances_3d, _ = gasp_engine(aff_channels)
+        return np.squeeze(final_instances_3d)
 
     @staticmethod
     def _compute_gasp(

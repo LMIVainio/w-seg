@@ -17,6 +17,14 @@ from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
 from skimage.segmentation import felzenszwalb, relabel_sequential, watershed
 
+from w_seg_napari._affinity import (
+    AffinitySet,
+    boundary_magnitude,
+    find_sources,
+    gather,
+    mutex_inputs,
+)
+
 # Importing skimage.morphology remove_small_objects() in a version independent manner
 from w_seg_napari._wsegutils import remove_small_objects_safe
 
@@ -70,17 +78,11 @@ class SuperpixelWidget(QGroupBox):
         )
         form_layout.addRow('Semantic / Pred Layer:', self.combo_sem_layer)
 
-        self.combo_aff_h = QComboBox()
-        self.combo_aff_h.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
-        form_layout.addRow('Horizontal Affinity (affH):', self.combo_aff_h)
-
-        self.combo_aff_v = QComboBox()
-        self.combo_aff_v.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
-        )
-        form_layout.addRow('Vertical Affinity (affV):', self.combo_aff_v)
+        # One entry per prediction: all of its affinity layers are used
+        # (aff_k<range>_<image> for new models, affH_/affV_ for old ones).
+        self.combo_aff = QComboBox()
+        self.combo_aff.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        form_layout.addRow('Affinities of:', self.combo_aff)
 
         # 3. Global Pre-Smoothing Parameter
         self.spin_smooth_sigma = QDoubleSpinBox()
@@ -291,8 +293,7 @@ class SuperpixelWidget(QGroupBox):
         ]
         # Check if the selected algorithm requires affinity maps
         uses_affinity = selected_algo in affinity_algorithms
-        self.combo_aff_h.setEnabled(uses_affinity)
-        self.combo_aff_v.setEnabled(uses_affinity)
+        self.combo_aff.setEnabled(uses_affinity)
         self.spin_aff_sigma.setEnabled(uses_affinity)
 
         # Get algorithms that require semantic/prediction maps
@@ -334,8 +335,20 @@ class SuperpixelWidget(QGroupBox):
 
         # Standar layers with selected prfixes
         _update_combo(self.combo_sem_layer, prefix='pred_')
-        _update_combo(self.combo_aff_h, prefix='affH_')
-        _update_combo(self.combo_aff_v, prefix='affV_')
+        current = self.combo_aff.currentText()
+        self.combo_aff.blockSignals(True)
+        self.combo_aff.clear()
+        image_names = [
+            lay.name
+            for lay in self.viewer.layers
+            if isinstance(lay, napari.layers.Image)
+        ]
+        for source in find_sources(image_names):
+            self.combo_aff.addItem(source, userData=source)
+        index = self.combo_aff.findText(current)
+        if index != -1:
+            self.combo_aff.setCurrentIndex(index)
+        self.combo_aff.blockSignals(False)
 
         # Layers that accept None
         _update_combo(self.felz_signal, prefix=None, allow_none=True)
@@ -347,10 +360,18 @@ class SuperpixelWidget(QGroupBox):
         algo_name = self.combo_algorithm.currentText()
 
         sem_layer = self.combo_sem_layer.currentData()
-        aff_h_layer = self.combo_aff_h.currentData()
-        aff_v_layer = self.combo_aff_v.currentData()
         sigma = self.spin_smooth_sigma.value()
         aff_sigma = self.spin_aff_sigma.value()
+
+        # All affinity layers of the chosen prediction, as one object
+        aset = None
+        source = self.combo_aff.currentData()
+        if source is not None:
+            try:
+                aset = gather(list(self.viewer.layers), source)
+            except ValueError as e:
+                print(f'[w-seg] Error: {e}')
+                return
 
         if self.viewer:
             self.viewer.status = f'[w-seg] Computing {algo_name}...'
@@ -373,14 +394,13 @@ class SuperpixelWidget(QGroupBox):
             )
 
         elif algo_idx == 1:  # Local Affinity Watershed
-            if aff_h_layer is None or aff_v_layer is None:
-                print(
-                    '[w-seg] Error: Both Horizontal and Vertical affinities are required.'
-                )
+            if aset is None:
+                print('[w-seg] Error: Affinity layers are required.')
                 return
             superpixels = self._compute_affinity_watershed(
-                aff_h_layer.data,
-                aff_v_layer.data,
+                None,
+                None,
+                boundary_map=boundary_magnitude(aset),
                 sem_mask=sem_layer.data if sem_layer is not None else None,
                 compactness=self.spin_aff_compactness.value(),
                 min_distance=self.spin_aff_min_dist.value(),
@@ -393,18 +413,17 @@ class SuperpixelWidget(QGroupBox):
             )
 
         elif algo_idx == 2:  # Felzenszwalb Superpixels
-            if aff_h_layer is None or aff_v_layer is None:
-                print(
-                    '[w-seg] Error: Both Horizontal and Vertical affinities are required.'
-                )
+            if aset is None:
+                print('[w-seg] Error: Affinity layers are required.')
                 return
             signal_layer = self.felz_signal.currentData()
             signal_data = (
                 signal_layer.data if signal_layer is not None else None
             )
             superpixels = self._compute_felzenszwalb(
-                aff_h_layer.data,
-                aff_v_layer.data,
+                None,
+                None,
+                boundary_mag=boundary_magnitude(aset),
                 scale=self.spin_felz_scale.value(),
                 aff_sigma=aff_sigma,
                 sigma=sigma,
@@ -415,18 +434,20 @@ class SuperpixelWidget(QGroupBox):
             )
 
         elif algo_idx == 3:  # Mutex seeded Watershed
-            if aff_h_layer is None or aff_v_layer is None:
-                print(
-                    '[w-seg] Error: Both Horizontal and Vertical affinities are required.'
-                )
+            if aset is None:
+                print('[w-seg] Error: Affinity layers are required.')
                 return
             smutex_sem_layer = self.smutex_signal.currentData()
             smutex_sem_data = (
                 smutex_sem_layer.data if smutex_sem_layer is not None else None
             )
-            superpixels = self._compute_mutex_watershed_seeded(
-                aff_h_layer.data,
-                aff_v_layer.data,
+            mutex_fn = (
+                self._compute_mutex_watershed_seeded
+                if aset.legacy
+                else self._compute_mutex_multi_seeded
+            )
+            superpixels = mutex_fn(
+                *self._mutex_affinity_args(aset),
                 semantic_map=smutex_sem_data,
                 strides=self.spin_smutex_strides.value(),
                 randomize_strides=self.check_smutex_randomize_strides.isChecked(),
@@ -439,18 +460,20 @@ class SuperpixelWidget(QGroupBox):
             )
 
         elif algo_idx == 4:  # Mutex Watershed
-            if aff_h_layer is None or aff_v_layer is None:
-                print(
-                    '[w-seg] Error: Both Horizontal and Vertical affinities are required.'
-                )
+            if aset is None:
+                print('[w-seg] Error: Affinity layers are required.')
                 return
             mutex_sem_layer = self.mutex_signal.currentData()
             mutex_sem_data = (
                 mutex_sem_layer.data if mutex_sem_layer is not None else None
             )
-            superpixels = self._compute_mutex_watershed(
-                aff_h_layer.data,
-                aff_v_layer.data,
+            mutex_fn = (
+                self._compute_mutex_watershed
+                if aset.legacy
+                else self._compute_mutex_multi
+            )
+            superpixels = mutex_fn(
+                *self._mutex_affinity_args(aset),
                 semantic_map=mutex_sem_data,
                 strides=self.spin_mutex_strides.value(),
                 randomize_strides=self.check_mutex_randomize_strides.isChecked(),
@@ -467,14 +490,21 @@ class SuperpixelWidget(QGroupBox):
             return
 
         # Determine reference input layer for spatial coordinate alignment
-        ref_layer = sem_layer if sem_layer is not None else aff_h_layer
+        ref_layer = sem_layer
+        if ref_layer is None and aset is not None:
+            ref_layer = next(
+                lay
+                for lay in self.viewer.layers
+                if lay.name.startswith(('aff_k', 'affH_', 'affV_'))
+                and lay.name.endswith(aset.source)
+            )
         layer_scale = ref_layer.scale
         layer_translate = ref_layer.translate
 
         source_name = (
             sem_layer.name.replace('pred_', '')
             if sem_layer
-            else aff_h_layer.name.replace('affH_', '')
+            else (aset.source if aset is not None else 'result')
         )
         layer_name = f'sp_{source_name}'
 
@@ -570,6 +600,7 @@ class SuperpixelWidget(QGroupBox):
         sem_mask: np.ndarray,
         compactness: float,
         min_distance: int,
+        boundary_map: np.ndarray = None,
         threshold: float = 0.5,
         aff_threshold: float = 0.5,
         min_cell_size: int = 15,
@@ -577,13 +608,18 @@ class SuperpixelWidget(QGroupBox):
         aff_sigma: float = 1.0,
         min_peak_height: float = 2.0,
     ) -> np.ndarray:
-        """Local affinity watershed using directional affinity vectors."""
-        aff_h_clean = np.squeeze(aff_h).astype(np.float32)
-        aff_v_clean = np.squeeze(aff_v).astype(np.float32)
-        # Compute boundary map as the magnitude of the affinity vectors
-        boundary_map = np.sqrt(
-            (1.0 - aff_h_clean) ** 2 + (1.0 - aff_v_clean) ** 2
-        )
+        """
+        Local affinity watershed using directional affinity vectors.
+        Pass either aff_h and aff_v (old models) or a ready boundary_map
+        (see _affinity.boundary_magnitude).
+        """
+        if boundary_map is None:
+            aff_h_clean = np.squeeze(aff_h).astype(np.float32)
+            aff_v_clean = np.squeeze(aff_v).astype(np.float32)
+            # Compute boundary map as the magnitude of the affinity vectors
+            boundary_map = np.sqrt(
+                (1.0 - aff_h_clean) ** 2 + (1.0 - aff_v_clean) ** 2
+            )
         # Normalize boundary map to [0, 1] range
         boundary_norm = boundary_map / (boundary_map.max() + 1e-8)
         # Apply Gaussian smoothing to the boundary map to reduce noise and small artifacts
@@ -594,12 +630,17 @@ class SuperpixelWidget(QGroupBox):
         if b_max > 0:
             boundary_norm /= b_max
         # Apply Gaussian smoothing to the semantic mask to reduce noise and small artifacts
-        if sigma > 0:
-            sem_mask = ndi.gaussian_filter(sem_mask, sigma=sigma)
+        if sem_mask is not None:
+            sem_mask = np.squeeze(sem_mask).astype(np.float32)
+            if sigma > 0:
+                sem_mask = ndi.gaussian_filter(sem_mask, sigma=sigma)
 
         # Threshold to create a binary mask of cell interiors (low boundary probability)
         interior_mask = boundary_norm < aff_threshold
-        sem_mask = sem_mask < threshold
+        if sem_mask is not None:
+            sem_mask = sem_mask < threshold
+        else:  # no semantic layer selected: no extra masking
+            sem_mask = np.ones(boundary_norm.shape, dtype=bool)
         # Return empty if no interior regions are found
         if not np.any(interior_mask):
             return np.zeros_like(boundary_map, dtype=np.uint64)
@@ -649,27 +690,31 @@ class SuperpixelWidget(QGroupBox):
         signal_or_sem=None,  # 1-channel or 3-channel (RGB) array/layer
         affinity_weight: float = 1.5,  # Strength of boundary walls added to image
         bg_threshold: float = None,
+        boundary_mag: np.ndarray = None,  # ready boundary map (new models)
     ) -> np.ndarray:
-        """Felzenszwalb segmentation with blended boundary magnitude support."""
-        # 1. Clean & Extract Arrays
-        aff_h_clean = np.squeeze(
-            aff_h.data if hasattr(aff_h, 'data') else aff_h
-        ).astype(np.float32)
-        aff_v_clean = np.squeeze(
-            aff_v.data if hasattr(aff_v, 'data') else aff_v
-        ).astype(np.float32)
+        """
+        Felzenszwalb segmentation with blended boundary magnitude support.
+        Pass either aff_h and aff_v (old models) or a ready boundary_mag
+        (see _affinity.boundary_magnitude).
+        """
 
         if hasattr(signal_or_sem, 'data'):
             signal_data = signal_or_sem.data
         else:
             signal_data = signal_or_sem
 
-        # 2. Convert Affinities to Boundary Costs (0 = interior, 1 = boundary)
-        b_h = 1.0 - np.clip(aff_h_clean, 0.0, 1.0)
-        b_v = 1.0 - np.clip(aff_v_clean, 0.0, 1.0)
-
-        # 3. Compute Isotropic Boundary Magnitude
-        boundary_mag = np.sqrt(0.5 * (b_h**2 + b_v**2))
+        # 2./3. Convert Affinities to an isotropic boundary magnitude
+        # (0 = interior, 1 = boundary), unless one was passed in
+        if boundary_mag is None:
+            aff_h_clean = np.squeeze(
+                aff_h.data if hasattr(aff_h, 'data') else aff_h
+            ).astype(np.float32)
+            aff_v_clean = np.squeeze(
+                aff_v.data if hasattr(aff_v, 'data') else aff_v
+            ).astype(np.float32)
+            b_h = 1.0 - np.clip(aff_h_clean, 0.0, 1.0)
+            b_v = 1.0 - np.clip(aff_v_clean, 0.0, 1.0)
+            boundary_mag = np.sqrt(0.5 * (b_h**2 + b_v**2))
 
         # 4. Process Signal / Semantic Input
         if signal_data is not None:
@@ -718,6 +763,161 @@ class SuperpixelWidget(QGroupBox):
             labels[bg_mask] = 0
         labels = relabel_sequential(labels)[0]
         return labels.astype(np.uint64)
+
+    @staticmethod
+    def _mutex_affinity_args(aset):
+        """Old models: (affH, affV) arrays for the original mutex functions; new models: the AffinitySet."""
+        if aset.legacy:
+            return (aset.data[0], aset.data[1])
+        return (aset,)
+
+    @staticmethod
+    def _mutex_multi_core(
+        aset: AffinitySet,
+        semantic_map,
+        strides: int,
+        randomize_strides: bool,
+        noise_level: float,
+        min_cell_size: int,
+        sigma: float,
+        aff_sigma: float,
+        mask_threshold: float,
+        seed_min_distance=None,
+    ) -> np.ndarray:
+        """
+        Mutex watershed for new models (any ranges and directions).
+
+        Attractive edges: nearest neighbours, strength from the predicted wall
+        map (or, without one, from the affinities' boundary magnitude).
+        Repulsive edges: every affinity channel (short and long range),
+        weight 1 - affinity. With seed_min_distance the seeded variant is used.
+        See _affinity.mutex_inputs.
+        """
+        try:
+            from elf.segmentation.mutex_watershed import (
+                mutex_watershed,
+                mutex_watershed_with_seeds,
+            )
+        except ImportError:
+            print('[w-seg] Error: elf module is required for Mutex Watershed.')
+            return None
+
+        if len(aset.ranges()) < 2 and aset.legacy is False:
+            print(
+                '[w-seg] Note: only one affinity range found; mutex watershed works best with a short and a long range.'
+            )
+
+        data = aset.data
+        if aff_sigma > 0:
+            data = np.stack(
+                [ndi.gaussian_filter(c, sigma=aff_sigma) for c in data]
+            ).astype(np.float32)
+        smoothed = AffinitySet(aset.source, aset.offsets, data, aset.legacy)
+
+        if semantic_map is not None:
+            # Semantic map: cell interior low (0), cell wall high (1)
+            wall = np.squeeze(semantic_map).astype(np.float32)
+            if sigma > 0:
+                wall = ndi.gaussian_filter(wall, sigma=sigma)
+        else:
+            wall = boundary_magnitude(smoothed)
+        fg_mask = wall < mask_threshold
+        if not np.any(fg_mask):
+            return np.zeros(fg_mask.shape, dtype=np.uint64)
+
+        affs, offsets = mutex_inputs(smoothed, wall)
+        strides_arg = [strides, strides]
+
+        if seed_min_distance is None:
+            print('[w-seg] Executing Mutex Watershed...')
+            labels = mutex_watershed(
+                affs=affs,
+                offsets=offsets,
+                strides=strides_arg,
+                randomize_strides=randomize_strides,
+                mask=fg_mask,
+                noise_level=noise_level,
+            )
+        else:
+            print('[w-seg] Generating seeds for Mutex Watershed...')
+            dist_map = ndi.distance_transform_edt(fg_mask)
+            coords = peak_local_max(
+                dist_map, min_distance=seed_min_distance, labels=fg_mask
+            )
+            seeds = np.zeros(fg_mask.shape, dtype=np.uint64)
+            for idx, (r, c) in enumerate(coords, start=1):
+                seeds[r, c] = idx
+            if seeds.max() == 0:
+                return np.zeros(fg_mask.shape, dtype=np.uint64)
+            print('[w-seg] Executing Mutex Watershed with seeds...')
+            labels = mutex_watershed_with_seeds(
+                affs=affs,
+                offsets=offsets,
+                seeds=seeds,
+                strides=strides_arg,
+                randomize_strides=randomize_strides,
+                mask=fg_mask,
+                noise_level=noise_level,
+            )
+
+        labels[~fg_mask] = 0
+        if min_cell_size > 0:
+            labels = remove_small_objects_safe(labels, max_size=min_cell_size)
+        labels = relabel_sequential(labels)[0]
+        print('[w-seg] Mutex Watershed completed')
+        return labels.astype(np.uint64)
+
+    @staticmethod
+    def _compute_mutex_multi(
+        aset: AffinitySet,
+        semantic_map: np.ndarray = None,
+        strides: int = 1,
+        randomize_strides: bool = False,
+        noise_level: float = 0.0,
+        min_cell_size: int = 15,
+        sigma: float = 1.0,
+        aff_sigma: float = 1.0,
+        mask_threshold: float = 0.5,
+    ) -> np.ndarray:
+        """Mutex watershed on a new-model AffinitySet."""
+        return SuperpixelWidget._mutex_multi_core(
+            aset,
+            semantic_map,
+            strides,
+            randomize_strides,
+            noise_level,
+            min_cell_size,
+            sigma,
+            aff_sigma,
+            mask_threshold,
+        )
+
+    @staticmethod
+    def _compute_mutex_multi_seeded(
+        aset: AffinitySet,
+        semantic_map: np.ndarray = None,
+        strides: int = 1,
+        randomize_strides: bool = False,
+        noise_level: float = 0.0,
+        min_cell_size: int = 15,
+        sigma: float = 1.0,
+        aff_sigma: float = 1.0,
+        seed_min_distance: int = 7,
+        mask_threshold: float = 0.5,
+    ) -> np.ndarray:
+        """Seeded mutex watershed on a new-model AffinitySet."""
+        return SuperpixelWidget._mutex_multi_core(
+            aset,
+            semantic_map,
+            strides,
+            randomize_strides,
+            noise_level,
+            min_cell_size,
+            sigma,
+            aff_sigma,
+            mask_threshold,
+            seed_min_distance=seed_min_distance,
+        )
 
     @staticmethod
     def _compute_mutex_watershed_seeded(

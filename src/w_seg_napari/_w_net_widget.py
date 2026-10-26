@@ -16,7 +16,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
-from w_seg_napari._wsegutils import process_large_image
+from w_seg_napari._affinity import layer_payloads
+from w_seg_napari._wsegutils import get_model_config, process_large_image
 
 
 class WNetWidget(QGroupBox):
@@ -235,6 +236,12 @@ class WNetWidget(QGroupBox):
         self._set_ui_processing_state(True)
         self.cancel_event.clear()
 
+        # The model's config says how its input is preprocessed and how its
+        # affinity channels are laid out (old models get a built-in config).
+        cfg = get_model_config(self.generator)
+        pre = cfg['preprocessing']
+        output_names = (cfg['outputs']['wall'], cfg['outputs']['affinity'])
+
         # Instantiate background thread worker using napari.qt.thread_worker
         @thread_worker
         def _run_inference_worker():
@@ -247,6 +254,9 @@ class WNetWidget(QGroupBox):
                     device=self.device,
                     live_view=is_live,
                     is_cancelled=self.cancel_event.is_set,
+                    hue_encoding=pre['hue_encoding'],
+                    enable_lab=pre['enable_lab'],
+                    output_names=output_names,
                 )
             )
 
@@ -254,7 +264,7 @@ class WNetWidget(QGroupBox):
         self.worker.yielded.connect(self._update_live_canvas)
         self.worker.returned.connect(
             lambda res: self._on_prediction_finished(
-                res, image_layer.name, layer_scale, layer_translate
+                res, image_layer.name, layer_scale, layer_translate, cfg
             )
         )
         self.worker.errored.connect(self._on_prediction_error)
@@ -297,7 +307,7 @@ class WNetWidget(QGroupBox):
             self.viewer.status = f'[w-seg] Error: {exc}'
 
     def _on_prediction_finished(
-        self, result, original_name, layer_scale, layer_translate
+        self, result, original_name, layer_scale, layer_translate, cfg
     ):
         """Called when thread returns output or gets cancelled."""
         final_sem, final_aff = result if result else (None, None)
@@ -312,23 +322,29 @@ class WNetWidget(QGroupBox):
             return
 
         sem_numpy = np.squeeze(final_sem)
-        aff_numpy = np.clip(final_aff, 0.0, 1.0)
         predicted_layer_name = f'pred_{original_name}'
 
-        # Add affinity layers
-        aff_layers = self.viewer.add_image(
-            aff_numpy,
-            name=[f'affH_{original_name}', f'affV_{original_name}'],
-            channel_axis=0,
-            colormap='gray',
-            blending='additive',
-            scale=layer_scale,
-            translate=layer_translate,
-        )
-
-        for layer in aff_layers:
-            current_idx = self.viewer.layers.index(layer)
-            self.viewer.layers.move(current_idx, 0)
+        # Affinity layers. New models: one layer per range, 4 channels each
+        # (E, S, SE, SW) on the first axis, named aff_k<range>_<image>; the
+        # offsets travel in layer.metadata. Old models: affH_ and affV_.
+        for payload in layer_payloads(final_aff, cfg, original_name):
+            if payload['name'] in self.viewer.layers:
+                aff_layer = self.viewer.layers[payload['name']]
+                aff_layer.data = payload['data']
+                aff_layer.metadata = payload['metadata']
+                aff_layer.scale = layer_scale
+                aff_layer.translate = layer_translate
+            else:
+                aff_layer = self.viewer.add_image(
+                    payload['data'],
+                    name=payload['name'],
+                    metadata=payload['metadata'],
+                    colormap='gray',
+                    blending='additive',
+                    scale=layer_scale,
+                    translate=layer_translate,
+                )
+            self.viewer.layers.move(self.viewer.layers.index(aff_layer), 0)
 
         if predicted_layer_name in self.viewer.layers:
             final_layer = self.viewer.layers[predicted_layer_name]

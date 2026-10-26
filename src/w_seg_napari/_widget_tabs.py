@@ -1,12 +1,15 @@
 import sys
+from pathlib import Path
 
 import napari
 from qtpy.QtCore import QSize, Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFrame,
     QGroupBox,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -88,8 +91,15 @@ class Tab1Pipeline(QScrollArea):
         self.combo_generator.addItems(['W-seg'])
 
         self.combo_weights = QComboBox()
-        for w_name in w.WEIGHT_URL_MAP:
-            self.combo_weights.addItem(w_name, userData=w_name)
+        self._populate_weights()
+
+        self.btn_browse = QPushButton('📂 Add model bundle folder...')
+        self.btn_browse.setToolTip(
+            'A model bundle is a folder with model.keras and config.json, '
+            'written by the training code. Bundles stored in ~/.wseg_models '
+            'are listed automatically.'
+        )
+        self.btn_browse.clicked.connect(self._on_browse_bundle)
 
         self.btn_reload = QPushButton('🔄 Load / Reload Model')
         self.status_label = QLabel(
@@ -103,6 +113,7 @@ class Tab1Pipeline(QScrollArea):
         layout.addWidget(self.combo_generator)
         layout.addWidget(QLabel('Staining Weights:'))
         layout.addWidget(self.combo_weights)
+        layout.addWidget(self.btn_browse)
         layout.addWidget(self.btn_reload)
         layout.addWidget(self.status_label)
         model_group.setLayout(layout)
@@ -110,6 +121,40 @@ class Tab1Pipeline(QScrollArea):
         # Trigger default model load on init
         self._on_reload_clicked()
         return model_group
+
+    def _populate_weights(self):
+        """Old-style weights (downloaded by name) plus bundles found in ~/.wseg_models."""
+        self.combo_weights.blockSignals(True)
+        self.combo_weights.clear()
+        for w_name in w.WEIGHT_URL_MAP:
+            self.combo_weights.addItem(w_name, userData=w_name)
+        for name, folder in w.list_local_bundles():
+            self.combo_weights.addItem(f'[bundle] {name}', userData=folder)
+        self.combo_weights.blockSignals(False)
+
+    def _on_browse_bundle(self):
+        start = w.BUNDLE_DIR if w.BUNDLE_DIR.is_dir() else Path.home()
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            'Select a model bundle folder (contains model.keras and config.json)',
+            str(start),
+        )
+        if not folder:
+            return
+        if w.find_bundle(folder) is None:
+            QMessageBox.warning(
+                self,
+                'Not a model bundle',
+                'This folder does not contain both model.keras and config.json.',
+            )
+            return
+        label = f'[bundle] {Path(folder).name}'
+        index = self.combo_weights.findText(label)
+        if index == -1:
+            self.combo_weights.addItem(label, userData=folder)
+            index = self.combo_weights.findText(label)
+        self.combo_weights.setCurrentIndex(index)
+        self._on_reload_clicked()
 
     def _emit_model_change(self, text: str):
         # currentData() can be None or an object/Path; fall back to text string

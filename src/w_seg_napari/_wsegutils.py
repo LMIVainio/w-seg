@@ -15,6 +15,7 @@ import platform
 # Downloading the model
 # =====================================================================
 import urllib.request
+import weakref
 from collections.abc import Sequence
 
 # =====================================================================
@@ -458,19 +459,111 @@ def get_generator_weights(w_name: str) -> str:
     return str(weights_path)
 
 
+# Config (affinity offsets, preprocessing) of every loaded model, by model object
+_MODEL_CONFIGS = weakref.WeakKeyDictionary()
+
+BUNDLE_DIR = Path.home() / '.wseg_models'
+
+
+def get_model_config(model) -> dict:
+    """Config of a model returned by load_my_generator (old models get the legacy config)."""
+    from w_seg_napari._model_config import legacy_config
+
+    return _MODEL_CONFIGS.get(model) or legacy_config()
+
+
+def find_bundle(w_name: str):
+    """
+    Folder of a new-style model bundle (model.keras + config.json) for w_name,
+    or None when w_name is an old-style weights file. w_name can be the bundle
+    folder, its model.keras, or the name of a folder inside ~/.wseg_models.
+    """
+    for c in (Path(w_name), BUNDLE_DIR / str(w_name)):
+        if c.is_file() and c.name == 'model.keras':
+            c = c.parent
+        if (
+            c.is_dir()
+            and (c / 'config.json').is_file()
+            and (c / 'model.keras').is_file()
+        ):
+            return c
+    return None
+
+
+def list_local_bundles():
+    """[(name, folder)] of the model bundles stored in ~/.wseg_models."""
+    if not BUNDLE_DIR.is_dir():
+        return []
+    return [
+        (d.name, str(d))
+        for d in sorted(BUNDLE_DIR.iterdir())
+        if d.is_dir()
+        and (d / 'config.json').is_file()
+        and (d / 'model.keras').is_file()
+    ]
+
+
+def load_model_bundle(folder, device: torch.device):
+    """
+    Load a model bundle written by the training code: model.keras holds
+    architecture and weights, config.json describes the affinity offsets and
+    preprocessing. Returns (model, config).
+    """
+    from w_seg_napari._model_config import load_config
+
+    folder = Path(folder)
+    cfg = load_config(str(folder / 'config.json'))
+    model = keras.saving.load_model(str(folder / 'model.keras'), compile=False)
+    model.to(device)
+    model.eval()
+
+    # Sanity check: one blank patch must give as many affinity channels as the config lists
+    p, c = cfg['input']['patch_size'], cfg['input']['channels']
+    with torch.no_grad():
+        out = model(torch.zeros((1, p, p, c), device=device), training=False)
+    if not isinstance(out, dict):
+        out = {'semantic_head': out[0], 'affinity_head': out[1]}
+    n_model = int(out[cfg['outputs']['affinity']].shape[-1])
+    n_cfg = len(cfg['affinity']['offsets'])
+    if n_model != n_cfg:
+        raise ValueError(
+            f'Model has {n_model} affinity channels but its config.json lists {n_cfg} offsets'
+        )
+    return model, cfg
+
+
 def load_my_generator(
     device: torch.device, w_name: str = 'w-seg_TolBlue_Populus.weights.h5'
 ):
     """
-    Instantiates the Generator, fetches/downloads weights specified by w_name,
-    loads parameters, and prepares the model for inference.
+    Loads a model for inference.
+
+    * New-style bundle (folder with model.keras + config.json): the network and
+      its settings are read from the bundle; no code change is needed for a new
+      number of affinity channels or other offsets.
+    * Old-style weights file (.weights.h5): builds the Generator below, fetches or
+      downloads the weights specified by w_name and loads them.
     """
+    from w_seg_napari._model_config import legacy_config
+
+    bundle = find_bundle(w_name)
+    if bundle is not None:
+        generator, cfg = load_model_bundle(bundle, device)
+        _MODEL_CONFIGS[generator] = cfg
+        print(f'Model bundle loaded on device: {device}')
+        print(f'Model loaded from folder: {bundle}')
+        print(
+            f'Affinity layout: {cfg["affinity"]["ranges"]} px x {cfg["affinity"]["direction_names"]}'
+        )
+        return generator
+
     weights_file = get_generator_weights(w_name)
 
     generator = Generator()
     generator.to(device)
     generator.load_weights(weights_file)
     generator.eval()
+    _MODEL_CONFIGS[generator] = legacy_config()
 
     print(f'Model loaded successfully on device: {device}')
     print(f'Model loaded from path: {weights_file}')
@@ -645,16 +738,22 @@ def preprocess_image_channels(
     enable_lab: bool = True,
     enable_centering: bool = True,
     return_foreground_mask=True,
+    hue_encoding: str = 'raw',
 ) -> torch.Tensor:
     """
     Modular preprocessing pipeline converting [B, 3, H, W] tensor inputs
     into normalized/centered 6-channel tensors. Handles ultra-large images safely.
+
+    hue_encoding: 'raw'    -> (hue, saturation, value), as used by the old models
+                  'chroma' -> (s*cos(hue), s*sin(hue), value), used by new models;
+                              must match the model's config.json.
     """
     # Generate a background mask of initial raw tensor
     is_foreground_2d = img_tensor.squeeze(0).sum(dim=0) > 1e-3
 
     # show_info('Started preprocessing pipeline...')
     tensor = img_tensor.float()
+    num_pixels = tensor.shape[-1] * tensor.shape[-2]
     print(
         '[w-seg] Initial preprocessing: Input tensor shape:', tensor.shape[2:3]
     )
@@ -713,7 +812,22 @@ def preprocess_image_channels(
         first_3 = tensor
 
     # 5. Zero Centering to [-1, 1]
-    if enable_centering:
+    if hue_encoding == 'chroma':
+        # (s*cos h, s*sin h, v): no 0/2pi wrap-around, no noisy hue on grey pixels
+        hue = tensor_hsv[:, 0:1, :, :]
+        sat = tensor_hsv[:, 1:2, :, :]
+        val = tensor_hsv[:, 2:3, :, :]
+        if enable_centering:
+            first_3 = (first_3 - 0.5) / 0.5
+            val = (val - 0.5) / 0.5
+        tensor_hsv = torch.cat(
+            [sat * torch.cos(hue), sat * torch.sin(hue), val], dim=1
+        )
+    elif hue_encoding != 'raw':
+        raise ValueError(
+            f"hue_encoding must be 'raw' or 'chroma', got {hue_encoding!r}"
+        )
+    elif enable_centering:
         first_3 = (first_3 - 0.5) / 0.5
         h_chan = (tensor_hsv[:, 0:1, :, :] - math.pi) / math.pi
         s_chan = (tensor_hsv[:, 1:2, :, :] - 0.5) / 0.5
@@ -740,9 +854,17 @@ def process_large_image(
     live_view=True,
     # yield_callback=None,
     is_cancelled=None,
+    hue_encoding='raw',
+    enable_lab=True,
+    output_names=('semantic_head', 'affinity_head'),
 ):
     """
     Memory-safe inference pipeline for Napari.
+
+    Works with old models (output: (semantic, affinity) tuple, 2 affinity
+    channels) and new models (output: dict, any number of affinity channels).
+    Returns (semantic [1, H, W], affinities [n, H, W]).
+
     Runs global 6-channel preprocessing on CPU (RAM) to avoid GPU VRAM spikes,
     then transfers individual 256x256 patches to CUDA for model inference.
     """
@@ -770,8 +892,9 @@ def process_large_image(
         image_batch_cpu,
         enable_stretch=True,
         enable_denoise=True,
-        enable_lab=True,
+        enable_lab=enable_lab,
         enable_centering=True,
+        hue_encoding=hue_encoding,
     )
 
     large_6ch_cpu = large_6ch_cpu.squeeze(0)  # Shape: (6, H, W) on CPU
@@ -781,7 +904,8 @@ def process_large_image(
     sem_canvas_cpu = torch.zeros((1, H, W), dtype=torch.float32)
     sem_weight_cpu = torch.zeros((1, H, W), dtype=torch.float32)
 
-    aff_canvas_cpu = torch.zeros((2, H, W), dtype=torch.float32)
+    # Allocated after the first patch, once the number of affinity channels is known
+    aff_canvas_cpu = None
     aff_weight_cpu = torch.zeros((1, H, W), dtype=torch.float32)
 
     # Blend mask can live on CPU for canvas accumulation
@@ -852,9 +976,12 @@ def process_large_image(
                     patch_gpu_cl = patch_resized.permute(0, 2, 3, 1)
 
                 # 3. GPU Model Pass
-                pred_sem_gpu, pred_aff_gpu = model(
-                    patch_gpu_cl, training=False
-                )
+                model_out = model(patch_gpu_cl, training=False)
+                if isinstance(model_out, dict):  # new models
+                    pred_sem_gpu = model_out[output_names[0]]
+                    pred_aff_gpu = model_out[output_names[1]]
+                else:  # old models: (semantic, affinity)
+                    pred_sem_gpu, pred_aff_gpu = model_out
 
                 # 4. Convert model outputs (1, 256, 256, C) -> Channels-First (1, C, 256, 256)
                 pred_sem_gpu = pred_sem_gpu.permute(
@@ -862,7 +989,7 @@ def process_large_image(
                 )  # (1, 1, 256, 256)
                 pred_aff_gpu = pred_aff_gpu.permute(
                     0, 3, 1, 2
-                )  # (1, 2, 256, 256)
+                )  # (1, n_aff, 256, 256)
 
                 # 5. Resize predictions back to extracted patch dimensions (h, w)
                 if (h, w) != (256, 256):
@@ -881,7 +1008,11 @@ def process_large_image(
 
                 # 6. Move predictions to CPU (already in C, H, W format after squeeze)
                 pred_sem = pred_sem_gpu.squeeze(0).cpu()  # (1, h, w)
-                pred_aff = pred_aff_gpu.squeeze(0).cpu()  # (2, h, w)
+                pred_aff = pred_aff_gpu.squeeze(0).cpu()  # (n_aff, h, w)
+                if aff_canvas_cpu is None:
+                    aff_canvas_cpu = torch.zeros(
+                        (pred_aff.shape[0], H, W), dtype=torch.float32
+                    )
 
                 # 7. Strictly mask predictions AND blend weights using patch_fg_mask
                 fg_mask_patch = patch_fg_mask[:h, :w].bool()
@@ -924,6 +1055,8 @@ def process_large_image(
         .numpy()
     )
 
+    if aff_canvas_cpu is None:  # no foreground patch at all
+        aff_canvas_cpu = torch.zeros((1, H, W), dtype=torch.float32)
     final_aff = (
         torch.where(aff_weight_cpu > 0, aff_canvas_cpu / aff_weight_cpu, 0.0)
         .clamp(0.0, 1.0)
