@@ -1,8 +1,8 @@
+import json
 import os
 from typing import Any
 
 import h5py
-import json
 import joblib
 import napari
 import numpy as np
@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,29 +26,103 @@ from scipy.ndimage import binary_dilation, generate_binary_structure
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
 
 import w_seg_napari._wsegutils as w
 
+# Optional imports for advanced classifiers
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None
+
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:
+    LGBMClassifier = None
+
+# Factory Registry for extensible estimator instantiation
+SUPPORTED_CLASSIFIERS = {
+    'Random Forest': lambda hp: RandomForestClassifier(
+        n_estimators=hp.get('n_estimators', 100),
+        max_depth=hp.get('max_depth', 15),
+        random_state=42,
+        n_jobs=-1,
+    ),
+    'SVM': lambda hp: SVC(
+        C=hp.get('C', 1.0),
+        kernel=hp.get('kernel', 'rbf'),
+        probability=True,
+        random_state=42,
+    ),
+}
+
+if XGBClassifier is not None:
+    SUPPORTED_CLASSIFIERS['XGBoost'] = lambda hp: XGBClassifier(
+        n_estimators=hp.get('n_estimators', 100),
+        max_depth=hp.get('max_depth', 6),
+        learning_rate=hp.get('learning_rate', 0.1),
+        random_state=42,
+        n_jobs=-1,
+        eval_metric='logloss',
+    )
+
+if LGBMClassifier is not None:
+    SUPPORTED_CLASSIFIERS['LightGBM'] = lambda hp: LGBMClassifier(
+        n_estimators=hp.get('n_estimators', 100),
+        max_depth=hp.get('max_depth', -1),
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1,
+    )
+
 
 class CellClassifierManager:
-    def __init__(self, n_estimators: int = 100, max_depth: int | None = 15):
+    def __init__(
+        self,
+        classifier_type: str = 'Random Forest',
+        hyperparameters: dict | None = None,
+    ):
+        # Setup classifier manager
+        self.classifier_type = classifier_type
+        self.hyperparameters = hyperparameters or {
+            'n_estimators': 100,
+            'max_depth': 15,
+        }
+        self.feature_names: list[str] = []
+        self.is_trained: bool = False
+        self.model_config: dict[str, Any] = {}
+        self.loaded_model_path: str | None = None
+        self.pipeline: Pipeline | None = None
+
+        self._build_pipeline()
+
+    def _build_pipeline(self):
+        """Instantiates the scikit-learn Pipeline based on classifier_type."""
+        if self.classifier_type not in SUPPORTED_CLASSIFIERS:
+            raise ValueError(
+                f"Unsupported classifier type: '{self.classifier_type}'. "
+                f'Available: {list(SUPPORTED_CLASSIFIERS.keys())}'
+            )
+
+        estimator = SUPPORTED_CLASSIFIERS[self.classifier_type](
+            self.hyperparameters
+        )
         self.pipeline = Pipeline(
             [
                 ('imputer', SimpleImputer(strategy='median')),
-                (
-                    'rf',
-                    RandomForestClassifier(
-                        n_estimators=n_estimators,
-                        max_depth=max_depth,
-                        random_state=42,
-                        n_jobs=-1,
-                    ),
-                ),
+                ('clf', estimator),
             ]
         )
-        self.feature_names = []
+
+    def set_classifier(
+        self, classifier_type: str, hyperparameters: dict | None = None
+    ):
+        """Reconfigures the active classifier type and rebuilds pipeline."""
+        self.classifier_type = classifier_type
+        self.hyperparameters = hyperparameters or {}
         self.is_trained = False
-        self.model_config = {}
+        self._build_pipeline()
 
     def create_annotation_layer_data(
         self, labels_layer: np.ndarray, erosion_steps: int = 1
@@ -125,6 +200,7 @@ class CellClassifierManager:
             'bbox-3',
             'predicted_class',
             'manual_class',
+            'yolo_pred_tissue',
         ]
         feature_cols = [
             c
@@ -158,41 +234,58 @@ class CellClassifierManager:
 
         return X, y, valid_cell_ids
 
-    def train(self, X: np.ndarray, y: np.ndarray) -> dict[str, Any]:
-        """Trains the Random Forest model and returns metrics."""
+    def train(
+        self, X: np.ndarray, y: np.ndarray, feature_config: dict | None = None
+    ) -> dict[str, Any]:
+        """Trains pipeline and updates active model configuration."""
         if len(X) == 0:
             raise ValueError('No annotated training samples found.')
 
         self.pipeline.fit(X, y)
         self.is_trained = True
 
-        # Calculate out-of-bag feature importances
-        rf_model = self.pipeline.named_steps['rf']
-        importances = rf_model.feature_importances_
-        top_features = sorted(
-            zip(self.feature_names, importances, strict=False),
-            key=lambda x: x[1],
-            reverse=True,
-        )[:5]
+        # Store standardized model config
+        self.model_config = {
+            'classifier_type': self.classifier_type,
+            'hyperparameters': self.hyperparameters,
+            'feature_names': list(self.feature_names),
+            'feature_config': feature_config or {},
+        }
+
+        # Calculate feature importances if model supports it
+        clf_step = self.pipeline.named_steps['clf']
+        top_features = []
+        if hasattr(clf_step, 'feature_importances_'):
+            importances = clf_step.feature_importances_
+            top_features = sorted(
+                zip(self.feature_names, importances, strict=False),
+                key=lambda x: x[1],
+                reverse=True,
+            )[:5]
 
         return {
             'n_samples': len(X),
             'classes': np.unique(y).tolist(),
-            'top_features': top_features,
+            'top_features': top_features or {},
+            'classifier_type': self.classifier_type,
         }
 
     def predict(
         self, df_spatial_features: pd.DataFrame
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
         if not self.is_trained:
             raise RuntimeError('Classifier is not trained yet!')
 
         # Sanitize full DataFrame prior to feature slicing
-        df_clean = w.sanitize_feature_matrix(
-            df_spatial_features, feature_cols=self.feature_names
-        )
-
+        df_clean = w.sanitize_feature_matrix(df_spatial_features)
+        # Feature Alignment Guard: Ensure exact feature columns exist in exact order
+        for col in self.feature_names:
+            if col not in df_clean.columns:
+                print(
+                    f'[w-seg] Warning {col} not included in data frame and was replaced with NaNs'
+                )
+                df_clean[col] = np.nan  # Imputer will handle missing features
         X = df_clean[self.feature_names].values
         cell_ids = df_clean['label_id'].values
         preds = self.pipeline.predict(X)
@@ -219,32 +312,68 @@ class CellClassifierManager:
         # Single-pass 2D array re-indexing
         return lut[labels_layer]
 
-    def save_model(self, filepath: str, config: dict | None = None):
-        """Saves trained model pipeline, feature names, and extraction parameters."""
-        # Append .joblib extension if not present
+    def save_model(self, filepath: str, feature_config: dict | None = None):
+        """Saves trained model pipeline and unified payload schema."""
         if not filepath.endswith('.joblib'):
             filepath += '.joblib'
 
         payload = {
             'pipeline': self.pipeline,
+            'classifier_type': self.classifier_type,
+            'hyperparameters': self.hyperparameters,
             'feature_names': self.feature_names,
             'is_trained': self.is_trained,
-            'feature_config': config or {},
+            'feature_config': feature_config
+            or self.feature_extraction_config.get('feature_config', {}),
         }
 
-        # Ensure target directory exists before saving
+        # Update cached model_config
+        self.model_config = {
+            'classifier_type': self.classifier_type,
+            'hyperparameters': self.hyperparameters,
+            'feature_names': self.feature_names,
+            'feature_extraction_config': feature_config
+            or self.feature_extraction_config.get('feature_config', {}),
+        }
+
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-        # Dump classifier to file
         joblib.dump(payload, filepath)
+        self.loaded_model_path = filepath
         print(f'[w-seg] Model payload saved successfully to: {filepath}')
 
-    def load_model(self, filepath: str):
-        """Loads trained model pipeline and feature names."""
+    def load_model(self, filepath: str) -> dict[str, Any]:
+        """Loads trained model payload and updates active state."""
         payload = joblib.load(filepath)
         self.pipeline = payload['pipeline']
-        self.feature_names = payload['feature_names']
-        self.is_trained = payload['is_trained']
-        self.model_config = payload.get('feature_config', {})
+        self.feature_names = payload['feature_names', []]
+        self.is_trained = payload.get('is_trained', True)
+        self.hyperparameters = payload.get('hyperparameters', {})
+        self.loaded_model_path = filepath
+
+        # Resolve classifier_type explicitly
+        if 'classifier_type' in payload:
+            self.classifier_type = payload['classifier_type']
+        elif (
+            hasattr(self.pipeline, 'named_steps')
+            and 'clf' in self.pipeline.named_steps
+        ):
+            self.classifier_type = type(
+                self.pipeline.named_steps['clf']
+            ).__name__
+        else:
+            self.classifier_type = 'Loaded Classifier'
+
+        fe_config = (
+            payload.get('feature_extraction_config')
+            or payload.get('feature_config')
+            or {}
+        )
+        self.model_config = {
+            'classifier_type': self.classifier_type,
+            'hyperparameters': self.hyperparameters,
+            'feature_names': self.feature_names,
+            'feature_config': fe_config,
+        }
         return self.model_config
 
 
@@ -266,7 +395,9 @@ class CellClassificationWidget(QWidget):
         # --- Frozen Data Pair State ---
         self.cached_df: pd.DataFrame | None = None
         self.cached_labels_data: np.ndarray | None = None
-        self.feature_extraction_config: dict | None = feature_extraction_config
+        self.feature_extraction_config: dict | None = (
+            feature_extraction_config or {}
+        )
         self.model_config: dict | None = None
         self.current_layer_name: str = layer_name
         self.annotation_layer: napari.layers.Labels | None = None
@@ -282,7 +413,30 @@ class CellClassificationWidget(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout()
 
-        # --- 1. Frozen Data Pair Display ---
+        # --- 1. Model Selection box ---
+        model_group = QGroupBox('Classifier Selection')
+        model_layout = QVBoxLayout(model_group)
+
+        h_layout = QHBoxLayout()
+        h_layout.addWidget(QLabel('Algorithm:'))
+        self.combo_algo = QComboBox()
+        self.combo_algo.addItems(list(SUPPORTED_CLASSIFIERS.keys()))
+        self.combo_algo.currentTextChanged.connect(self._on_algorithm_changed)
+        h_layout.addWidget(self.combo_algo)
+        model_layout.addLayout(h_layout)
+
+        # Hyperparameter inputs (Example: Trees/Estimators)
+        hp_layout = QHBoxLayout()
+        hp_layout.addWidget(QLabel('N Estimators:'))
+        self.spin_estimators = QSpinBox()
+        self.spin_estimators.setRange(10, 1000)
+        self.spin_estimators.setValue(100)
+        hp_layout.addWidget(self.spin_estimators)
+        model_layout.addLayout(hp_layout)
+
+        layout.addWidget(model_group)
+
+        # --- 2. Frozen Data Pair Display ---
         info_group = QGroupBox('Active Measured Data Source')
         info_layout = QVBoxLayout()
 
@@ -295,7 +449,7 @@ class CellClassificationWidget(QWidget):
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
 
-        # --- 2. Class Annotation Control ---
+        # --- 3. Class Annotation Control ---
         annot_group = QGroupBox('1. Interactive Annotation')
         annot_layout = QVBoxLayout()
 
@@ -310,7 +464,7 @@ class CellClassificationWidget(QWidget):
         annot_group.setLayout(annot_layout)
         layout.addWidget(annot_group)
 
-        # --- 3. Model Training ---
+        # --- 4. Model Training ---
         train_group = QGroupBox('2. Classifier Training')
         train_layout = QVBoxLayout()
 
@@ -319,7 +473,7 @@ class CellClassificationWidget(QWidget):
         self.btn_train.clicked.connect(self._on_train_model)
         train_layout.addWidget(self.btn_train)
 
-        self.lbl_status = QLabel('Status: Model Untrained')
+        self.lbl_status = QLabel('Status: Model Untrained/Not Loaded')
         train_layout.addWidget(self.lbl_status)
 
         train_group.setLayout(train_layout)
@@ -418,6 +572,26 @@ class CellClassificationWidget(QWidget):
         if index >= 0:
             self.combo_export_layer.setCurrentIndex(index)
 
+    def _on_algorithm_changed(self, algo_name: str):
+        """Updates classifier type when user changes dropdown."""
+        hp = {'n_estimators': self.spin_estimators.value()}
+        self.clf_manager.set_classifier(algo_name, hp)
+        self._refresh_status_label()
+
+    def _refresh_status_label(self):
+        """Refreshes status text reliably."""
+        algo = self.clf_manager.classifier_type
+        trained = 'Trained' if self.clf_manager.is_trained else 'Not Trained'
+        path = self.clf_manager.loaded_model_path or 'In-Memory'
+        self.lbl_status.setText(f'Active: {algo} ({trained}) | Source: {path}')
+
+    def _refresh_active_classifier(self):
+        """Refreshes the active classifier"""
+        if hasattr(self.clf_manager, 'classifier_type'):
+            return self.clf_manager.classifier_type
+        else:
+            return 'Not Trained/Loaded'
+
     def bind_measured_data(
         self,
         df: pd.DataFrame,
@@ -492,17 +666,30 @@ class CellClassificationWidget(QWidget):
             return
 
         try:
+            """Handles classifier training from GUI"""
+            # Update hyperparameters
+            self.clf_manager.hyperparameters['n_estimators'] = (
+                self.spin_estimators.value()
+            )
+            self.clf_manager._build_pipeline()
+
             X, y, _ = self.clf_manager.extract_training_data(
                 labels_layer=self.cached_labels_data,
                 annotation_layer=self.annotation_layer.data,
                 df_spatial_features=self.cached_df,
             )
 
-            metrics = self.clf_manager.train(X, y)
+            metrics = self.clf_manager.train(
+                X, y, feature_config=self.feature_extraction_config
+            )
 
             # Store current active feature config as trained model config
             if self.feature_extraction_config:
                 self.model_config = self.feature_extraction_config.copy()
+            # Store classifier type in config
+            self.model_config['classifier_type'] = (
+                self.clf_manager.classifier_type
+            )
 
             top_feat_str = '\n'.join(
                 [
@@ -512,9 +699,12 @@ class CellClassificationWidget(QWidget):
             )
             self.lbl_status.setText(
                 f'Status: Trained ({metrics["n_samples"]} samples)'
+                '\n'
+                f'Classifer: {self.clf_manager.classifier_type}'
             )
             self.btn_predict.setEnabled(True)
-
+            self.btn_copy_config.setEnabled(True)
+            self._refresh_status_label()
             QMessageBox.information(
                 self,
                 'Training Complete',
@@ -573,21 +763,22 @@ class CellClassificationWidget(QWidget):
     def _on_save_model(self):
         if not self.clf_manager.is_trained:
             QMessageBox.warning(
-                self, 'Warning', 'Train a model before saving.'
+                self, 'Warning', 'Train a Classifier before saving.'
             )
             return
 
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Save Model', '', 'Joblib Model (*.joblib)'
+            self, 'Save Classifier', '', 'Joblib Model (*.joblib)'
         )
         if path:
             active_config = self.model_config or self.feature_extraction_config
-            self.clf_manager.save_model(path, config=active_config)
+            self.clf_manager.save_model(path, feature_config=active_config)
             QMessageBox.information(self, 'Success', f'Model saved to {path}')
+            self._refresh_status_label()
 
     def _on_load_model(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Load Model', '', 'Joblib Model (*.joblib)'
+            self, 'Load Classifier', '', 'Joblib Model (*.joblib)'
         )
         if not path:
             return
@@ -598,14 +789,42 @@ class CellClassificationWidget(QWidget):
                 self.model_config = getattr(
                     self.clf_manager, 'model_config', {}
                 )
-                self.lbl_status.setText('Status: Model Loaded')
+                if (
+                    isinstance(self.model_config, dict)
+                    and 'classifier_type' in self.model_config
+                ):
+                    self.clf_manager.classifier_type = self.model_config[
+                        'classifier_type'
+                    ]
+                else:
+                    print(
+                        f'[w-seg debug] Available keys in model_config: {list(self.model_config.keys()) if self.model_config else "None"}'
+                    )
+                    self.clf_manager.classifier_type = 'Uspecified Classifier'
+                self.lbl_status.setText(
+                    f'Status: {self.clf_manager.classifier_type} Loaded'
+                )
                 self.check_config_compatibility()
                 if self.cached_df is not None:
                     self.btn_predict.setEnabled(True)
                 QMessageBox.information(
-                    self, 'Success', 'Model loaded successfully.'
+                    self,
+                    'Success',
+                    f'{self.clf_manager.classifier_type} loaded successfully.',
                 )
+                # Enable copy settings button
+                self.btn_copy_config.setEnabled(True)
+                # Sync combo box without triggering signal
                 self.btn_copy_config.setEnabled(bool(self.model_config))
+                self.combo_algo.blockSignals(True)
+                idx = self.combo_algo.findText(
+                    self.clf_manager.classifier_type
+                )
+                if idx >= 0:
+                    self.combo_algo.setCurrentIndex(idx)
+                self.combo_algo.blockSignals(False)
+
+                self._refresh_status_label()
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 QMessageBox.critical(
                     self, 'Error', f'Failed to load model: {str(e)}'
@@ -625,12 +844,23 @@ class CellClassificationWidget(QWidget):
             hasattr(self, 'on_apply_config_callback')
             and self.on_apply_config_callback
         ):
-            self.on_apply_config_callback(self.model_config)
+            model_fe_config = self.clf_manager.model_config.get(
+                'feature_extraction_config', {}
+            )
+            self.on_apply_config_callback(model_fe_config)
             info_txt = (
                 '<b>Successfully copied model parameters to input fields!</b>'
                 '<b>Remember</b> to Remeasure Cell Wall Morphology to apply changes!'
             )
             QMessageBox.information(self, 'Parameters Restored', info_txt)
+
+            self.combo_algo.blockSignals(True)
+            idx = self.combo_algo.findText(
+                self.model_config['classifier_type']
+            )
+            if idx >= 0:
+                self.combo_algo.setCurrentIndex(idx)
+            self.combo_algo.blockSignals(False)
 
     def _update_ui_state(self):
         """Enable the copy button whenever a model config is available."""
@@ -649,16 +879,14 @@ class CellClassificationWidget(QWidget):
         if not self.model_config or not self.feature_extraction_config:
             from napari.utils.notifications import show_info
 
-            show_info(
-                'Proceeding with prediction: Parameter check skipped (missing config'
-                ' metadata).'
-            )
+            show_info('Warning: classifier configuration is missing')
             return True
 
         mismatches = []
 
         # Normalize keys for comparison
         for key, model_val in self.model_config.items():
+            active_val = {}
             if key in self.feature_extraction_config:
                 active_val = self.feature_extraction_config[key]
 
@@ -695,22 +923,75 @@ class CellClassificationWidget(QWidget):
 
         return True
 
+    def export_analytics_data(
+        self, filepath: str, class_layer=None
+    ) -> pd.DataFrame:
+        """
+        Headless exporter: Merges cached feature data with class labels and writes to disk (.xlsx or .csv).
+
+        Parameters:
+            filepath (str): Destination file path ending in .xlsx or .csv.
+            class_layer (napari.layers.Layer, optional): Napari layer containing custom class markings.
+                                                        If None, tries reading from combo_export_layer.
+
+        Returns:
+            pd.DataFrame: The generated export DataFrame containing all features and class columns.
+        """
+        if self.cached_df is None or self.cached_df.empty:
+            raise ValueError('No measured data available in cache to export.')
+
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+
+        # Build complete export DataFrame (merging features + prediction labels)
+        export_df = self.cached_df.copy()
+
+        # Determine class layer source (argument override or UI dropdown)
+        selected_layer = class_layer
+        if selected_layer is None and hasattr(self, 'combo_export_layer'):
+            selected_layer = self.combo_export_layer.currentData()
+
+        # Map custom labels from the selected layer (if available)
+        if selected_layer is not None and self.cached_labels_data is not None:
+            custom_classes = self._extract_classes_from_layer(
+                segmentation_labels=self.cached_labels_data,
+                class_layer_data=selected_layer.data,
+                cell_ids=export_df['label_id'].values,
+            )
+            # Attach custom class column named after the Napari layer
+            column_name = f'class_{selected_layer.name.replace(" ", "_")}'
+            export_df[column_name] = custom_classes
+
+        # Active extraction config metadata dictionary
+        meta_config = (
+            getattr(self, 'model_config', None)
+            or getattr(self, 'feature_extraction_config', None)
+            or {}
+        )
+
+        # Dispatch to specific writer depending on extension
+        if filepath.lower().endswith('.xlsx'):
+            self._save_excel_with_meta(filepath, export_df, meta_config)
+        else:
+            self._save_csv_with_meta_header(filepath, export_df, meta_config)
+
+        return export_df
+
     def _on_export_analytics(self):
+        """Interactive GUI button callback."""
         if self.cached_df is None or self.cached_df.empty:
             QMessageBox.warning(
                 self, 'Export Error', 'No measured data to export.'
             )
             return
 
-        # 1. Default directory to system 'Documents' folder
         docs_dir = QStandardPaths.writableLocation(
-            QStandardPaths.DocumentsLocation
+            QStandardPaths.StandardLocation.DocumentsLocation
         )
         default_filename = os.path.join(
             docs_dir, 'cell_morphology_analytics.xlsx'
         )
 
-        filepath, selected_filter = QFileDialog.getSaveFileName(
+        filepath, _ = QFileDialog.getSaveFileName(
             self,
             'Export Analytics Data',
             default_filename,
@@ -721,59 +1002,168 @@ class CellClassificationWidget(QWidget):
             return
 
         try:
-            # Build complete export DataFrame (merging features + prediction labels)
-            export_df = self.cached_df.copy()
-
-            # Map custom labels from the selected dropdown layer (if selected)
-            selected_layer = self.combo_export_layer.currentData()
-            if (
-                selected_layer is not None
-                and self.cached_labels_data is not None
-            ):
-                custom_classes = self._extract_classes_from_layer(
-                    segmentation_labels=self.cached_labels_data,
-                    class_layer_data=selected_layer.data,
-                    cell_ids=export_df['label_id'].values,
-                )
-                # Attach custom class column named after the Napari layer
-                column_name = f'class_{selected_layer.name.replace(" ", "_")}'
-                export_df[column_name] = custom_classes
-
-            # Active extraction config metadata dictionary
-            meta_config = (
-                self.model_config or self.feature_extraction_config or {}
-            )
-
-            if filepath.endswith('.xlsx'):
-                self._save_excel_with_meta(filepath, export_df, meta_config)
-            else:
-                self._save_csv_with_meta_header(
-                    filepath, export_df, meta_config
-                )
-
+            self.export_analytics_data(filepath)
             QMessageBox.information(
                 self,
                 'Export Successful',
                 f'Analytics exported successfully to:<br/><code>{filepath}</code>',
             )
-
         except (RuntimeError, ValueError, TypeError, OSError) as e:
             QMessageBox.critical(
                 self, 'Export Failed', f'Failed to save file:\n{str(e)}'
             )
 
+    def export_to_h5(self, save_path: str) -> int:
+        """Handler: Extracts current viewer layers into a payload and forwards it to the headless HDF5 exporter."""
+        if self.viewer is None or len(self.viewer.layers) == 0:
+            return 0
+
+        layers_payload = []
+
+        for layer in self.viewer.layers:
+            layer_type = layer._type_string
+            base_meta = {
+                'opacity': float(layer.opacity),
+                'scale': list(layer.scale),
+                'visible': bool(layer.visible),
+                'blending_mode': str(layer.blending),
+            }
+
+            if isinstance(layer, (napari.layers.Image, napari.layers.Labels)):
+                meta = base_meta.copy()
+                meta['colormap'] = getattr(
+                    layer.colormap, 'name', str(layer.colormap)
+                )
+
+                if layer_type == 'image':
+                    meta['rgb'] = bool(getattr(layer, 'rgb', False))
+
+                elif layer_type == 'labels':
+                    color_dict = None
+                    if (
+                        hasattr(layer.colormap, 'color_dict')
+                        and layer.colormap.color_dict
+                    ):
+                        color_dict = layer.colormap.color_dict
+                    elif (
+                        hasattr(layer, 'color')
+                        and isinstance(layer.color, dict)
+                        and layer.color
+                    ):
+                        color_dict = layer.color
+
+                    if color_dict is not None:
+                        meta['custom_label_colors'] = color_dict
+
+                layers_payload.append(
+                    {
+                        'name': layer.name,
+                        'type': layer_type,
+                        'data': layer.data,
+                        'metadata': meta,
+                    }
+                )
+
+            elif isinstance(layer, napari.layers.Shapes):
+                meta = base_meta.copy()
+                meta['shape_types'] = layer.shape_types
+
+                layers_payload.append(
+                    {
+                        'name': layer.name,
+                        'type': layer_type,
+                        'shapes_data': layer.data,
+                        'metadata': meta,
+                    }
+                )
+
+        # Delegate execution to headless utility
+        return w.export_layers_to_h5(layers_payload, save_path)
+
+    def export_to_tiff_dir(self, dirpath: str) -> int:
+        """Headless exporter: Saves all Image/Labels layers as individual TIFF files.
+
+        Returns the count of exported layers.
+        """
+        if self.viewer is None or len(self.viewer.layers) == 0:
+            return 0
+
+        os.makedirs(dirpath, exist_ok=True)
+        exported_count = 0
+
+        for index, layer in enumerate(self.viewer.layers):
+            if isinstance(layer, (napari.layers.Image, napari.layers.Labels)):
+                data = np.ascontiguousarray(layer.data)
+
+                if data.ndim < 2:
+                    data = np.atleast_2d(data)
+
+                # Downcast 64-bit integers safely for ImageJ compatibility
+                if data.dtype in (np.int64, np.uint64):
+                    min_val = data.min() if data.size > 0 else 0
+                    max_val = data.max() if data.size > 0 else 0
+
+                    if min_val >= 0 and max_val <= 65535:
+                        data = data.astype(np.uint16)
+                    elif min_val >= -2147483648 and max_val <= 2147483647:
+                        data = data.astype(np.int32)
+                    else:
+                        print(
+                            f'[w-seg] Warning: Layer "{layer.name}" values exceed int32 range. '
+                            f'Saving as {data.dtype}.'
+                        )
+                elif data.dtype == np.float64:
+                    data = data.astype(np.float32)
+
+                dtype_str = str(data.dtype)
+                layer_name_safe = layer.name.replace(' ', '_').replace(
+                    '/', '_'
+                )
+                save_path = os.path.join(
+                    dirpath, f'{index:02d}_{layer_name_safe}_{dtype_str}.tif'
+                )
+
+                is_rgb = getattr(layer, 'rgb', False) or (
+                    data.ndim >= 3
+                    and data.shape[-1] in (3, 4)
+                    and data.dtype == np.uint8
+                )
+
+                if is_rgb:
+                    if data.shape[-1] == 4:
+                        data = data[..., :3]
+                    tifffile.imwrite(
+                        save_path, data, photometric='rgb', imagej=True
+                    )
+                elif data.dtype in (np.int32, np.uint32):
+                    tifffile.imwrite(
+                        save_path,
+                        data,
+                        photometric='minisblack',
+                        metadata={'axes': 'YX' if data.ndim == 2 else 'YX'},
+                        imagej=False,
+                    )
+                else:
+                    tifffile.imwrite(save_path, data, imagej=True)
+
+                exported_count += 1
+
+        return exported_count
+
     def _on_export_napari_layers(self):
+        """Interactive GUI button callback."""
         if self.viewer is None or len(self.viewer.layers) == 0:
             QMessageBox.warning(
                 self, 'Export Error', 'No Napari viewer or layers available.'
             )
             return
-        # Iterate through all layers for shortest name suggestion
+
         shortest_name = min(
             (layer.name for layer in self.viewer.layers),
             key=len,
             default='napari_layers_export',
         )
+
         items = ['HDF5 Single File (.h5)', 'Individual TIFF Files (.tif)']
         item, ok = QInputDialog.getItem(
             self, 'Export Format', 'Select export format:', items, 0, False
@@ -787,9 +1177,7 @@ class CellClassificationWidget(QWidget):
         default_dir = os.path.join(docs_dir, 'napari_layers_export')
 
         try:
-            # ------------------------------------------------------------------
-            # OPTION A: Save all layers into a single HDF5 container (.h5)
-            # ------------------------------------------------------------------
+            # OPTION A: HDF5 Export
             if 'HDF5' in item:
                 save_path, _ = QFileDialog.getSaveFileName(
                     self,
@@ -802,95 +1190,14 @@ class CellClassificationWidget(QWidget):
                 if not save_path:
                     return
 
-                with h5py.File(save_path, 'w') as h5f:
-                    # Iterate with index to record original layer order
-                    for index, layer in enumerate(self.viewer.layers):
-                        layer_name_safe = layer.name.replace('/', '_')
-                        if isinstance(
-                            layer, (napari.layers.Image, napari.layers.Labels)
-                        ):
-                            data = np.ascontiguousarray(layer.data)
-                            # Create dataset preserving full array dimensions
-                            dset = h5f.create_dataset(
-                                layer_name_safe,
-                                data=data,
-                                compression='gzip',
-                                compression_opts=4,
-                            )
-
-                            # Save layer metadata & ordering index
-                            dset.attrs['order'] = index
-                            dset.attrs['layer_type'] = layer._type_string
-                            dset.attrs['opacity'] = float(layer.opacity)
-                            dset.attrs['scale'] = list(layer.scale)
-                            dset.attrs['visible'] = bool(layer.visible)
-                            dset.attrs['blending_mode'] = str(layer.blending)
-
-                            # Save colormap data
-                            if layer._type_string == 'image':
-                                # Save image colormap name
-                                dset.attrs['colormap'] = getattr(layer.colormap, 'name', str(layer.colormap))
-                                dset.attrs['rgb'] = bool(getattr(layer, 'rgb', False))
-
-                            elif layer._type_string == 'labels':
-                                # Save label colormap in the offchange that it might be customized
-                                dset.attrs['colormap'] = getattr(layer.colormap, 'name', str(layer.colormap))
-                                # Exctract custom labels
-                                color_dict = None
-                                if (hasattr(layer.colormap, 'color_dict') and layer.colormap.color_dict):
-                                    color_dict = layer.colormap.color_dict
-                                elif (
-                                    hasattr(layer, 'color')
-                                    and isinstance(layer.color, dict)
-                                    and layer.color
-                                ):
-                                    color_dict = layer.color
-
-                                if color_dict is not None:
-                                    clean_color_dict = {}
-                                    for k, v in color_dict.items():
-                                        # Convert ndarray / numpy scalars to standard Python floats/lists
-                                        if isinstance(v, np.ndarray):
-                                            v_clean = v.tolist()
-                                        elif hasattr(v, '__iter__'):
-                                            v_clean = [float(x) for x in v]
-                                        else:
-                                            v_clean = float(v)
-                                        clean_color_dict[str(k)] = v_clean
-                                        
-                                    dset.attrs['custom_label_colors'] = json.dumps(clean_color_dict)
-
-                            elif layer._type_string == 'shapes':
-                                # Create an HDF5 group for the Shapes layer
-                                group = h5f.create_group(layer_name_safe)
-                                group.attrs['order'] = index
-                                group.attrs['layer_type'] = layer._type_string
-                                group.attrs['opacity'] = float(layer.opacity)
-                                group.attrs['scale'] = list(layer.scale)
-                                group.attrs['visible'] = bool(layer.visible)
-                                group.attrs['blending_mode'] = str(layer.blending)
-                                group.attrs['shape_types'] = json.dumps(
-                                    [str(s) for s in layer.shape_types]
-                                )
-                                # Store each shape array under the group
-                                shapes_group = group.create_group('shapes_data')
-                                for s_idx, shape_arr in enumerate(layer.data):
-                                    shapes_group.create_datase(
-                                        f'shape_{s_idx:04d}',
-                                        data=np.ascontiguousarray(shape_arr),
-                                        compression='gzip',
-                                        compression_opts=4,
-                                    )
-
+                count = self.export_to_h5(save_path)
                 QMessageBox.information(
                     self,
                     'Export Successful',
-                    f'Napari session saved to HDF5 file:<br/><code>{save_path}</code>',
+                    f'Successfully saved {count} layer(s) to HDF5 file:<br/><code>{save_path}</code>',
                 )
 
-            # ------------------------------------------------------------------
-            # OPTION B: Save layers as individual TIFF files
-            # ------------------------------------------------------------------
+            # OPTION B: TIFF Directory Export
             else:
                 dirpath = QFileDialog.getExistingDirectory(
                     self,
@@ -901,78 +1208,7 @@ class CellClassificationWidget(QWidget):
                 if not dirpath:
                     return
 
-                exported_count = 0
-                for index, layer in enumerate(self.viewer.layers):
-                    if isinstance(
-                        layer, (napari.layers.Image, napari.layers.Labels)
-                    ):
-                        data = np.ascontiguousarray(layer.data)
-
-                        # Ensure minimum 2D shape
-                        if data.ndim < 2:
-                            data = np.atleast_2d(data)
-
-                        # Downcast 64-bit integer masks safely for ImageJ compatibility
-                        if data.dtype in (np.int64, np.uint64):
-                            min_val = data.min() if data.size > 0 else 0
-                            max_val = data.max() if data.size > 0 else 0
-
-                            if min_val >= 0 and max_val <= 65535:
-                                data = data.astype(np.uint16)
-                            elif (
-                                min_val >= -2147483648
-                                and max_val <= 2147483647
-                            ):
-                                data = data.astype(np.int32)
-                            else:
-                                print(
-                                    f'[w-seg] Warning: Layer "{layer.name}" values exceed int32 range. '
-                                    f'Saving as {data.dtype}.'
-                                )
-                        elif data.dtype == np.float64:
-                            data = data.astype(np.float32)
-
-                        dtype_str = str(data.dtype)
-                        layer_name_safe = layer.name.replace(' ', '_').replace(
-                            '/', '_'
-                        )
-
-                        save_path = os.path.join(
-                            dirpath,
-                            f'{index:02d}_{layer_name_safe}_{dtype_str}.tif',
-                        )
-
-                        # Determine if layer is RGB color
-                        is_rgb = getattr(layer, 'rgb', False) or (
-                            data.ndim >= 3
-                            and data.shape[-1] in (3, 4)
-                            and data.dtype == np.uint8
-                        )
-
-                        if is_rgb:
-                            # Drop alpha channel (4th channel) for ImageJ compatibility
-                            if data.shape[-1] == 4:
-                                data = data[..., :3]
-                            tifffile.imwrite(
-                                save_path, data, photometric='rgb', imagej=True
-                            )
-                        elif data.dtype == np.int32 or data.dtype == np.uint32:
-                            # ImageJ does not support 32-bit integers, save without ImageJ compatibility
-                            tifffile.imwrite(
-                                save_path,
-                                data,
-                                photometric='minisblack',
-                                metadata={
-                                    'axes': 'YX' if data.ndim == 2 else 'YX'
-                                },
-                                imagej=False,
-                            )
-                        else:
-                            # uint8, uint16, int16, float32 are compatible with ImageJ
-                            tifffile.imwrite(save_path, data, imagej=True)
-
-                        exported_count += 1
-
+                exported_count = self.export_to_tiff_dir(dirpath)
                 QMessageBox.information(
                     self,
                     'Export Successful',
@@ -984,7 +1220,170 @@ class CellClassificationWidget(QWidget):
                 self, 'Export Failed', f'Failed to export layers:\n{str(e)}'
             )
 
+    def import_h5_file(self, file_path: str) -> int:
+        """
+        Headless loader method: Reads an HDF5 session file and rebuilds napari layers.
+        Returns the number of imported layers.
+        """
+        if self.viewer is None or not os.path.isfile(file_path):
+            return 0
+
+        layers_to_import = []
+
+        with h5py.File(file_path, 'r') as h5f:
+            for key in h5f:
+                item = h5f[key]
+
+                # Retrieve layer metadata
+                order = int(item.attrs.get('order', 0))
+                layer_type = item.attrs.get('layer_type', 'image')
+                opacity = float(item.attrs.get('opacity', 1.0))
+                scale = item.attrs.get('scale', None)
+                visible = bool(item.attrs.get('visible', True))
+                blending = item.attrs.get('blending_mode', 'translucent')
+
+                if scale is not None:
+                    scale = tuple(scale)
+
+                # Load Shape layer Group
+                if layer_type == 'shapes' and isinstance(item, h5py.Group):
+                    shape_types = json.loads(
+                        item.attrs.get('shape_types', '[]')
+                    )
+                    shapes_data = []
+                    if 'shapes_data' in item:
+                        s_group = item['shapes_data']
+                        sorted_keys = sorted(
+                            s_group.keys(),
+                            key=lambda x: (
+                                int(x.split('_')[-1]) if '_' in x else 0
+                            ),
+                        )
+                        for s_key in sorted_keys:
+                            shapes_data.append(s_group[s_key][()])
+
+                    layers_to_import.append(
+                        {
+                            'order': order,
+                            'name': key,
+                            'data': shapes_data,
+                            'layer_type': 'shapes',
+                            'shape_type': shape_types,
+                            'opacity': opacity,
+                            'scale': scale,
+                            'visible': visible,
+                            'blending_mode': blending,
+                        }
+                    )
+
+                # Load Image or Labels Data
+                elif isinstance(item, h5py.Dataset):
+                    data = item[()]
+                    is_rgb = bool(item.attrs.get('rgb', False))
+                    colormap = item.attrs.get('colormap', 'gray')
+
+                    custom_label_colors = None
+                    if 'custom_label_colors' in item.attrs:
+                        try:
+                            raw_colors = json.loads(
+                                item.attrs['custom_label_colors']
+                            )
+                            custom_label_colors = {
+                                int(k): v for k, v in raw_colors.items()
+                            }
+                        except (json.JSONDecodeError, ValueError):
+                            custom_label_colors = None
+
+                    if (
+                        not is_rgb
+                        and data.ndim >= 3
+                        and data.shape[-1] in (3, 4)
+                        and data.dtype == np.uint8
+                    ):
+                        is_rgb = True
+
+                    layers_to_import.append(
+                        {
+                            'order': order,
+                            'name': key,
+                            'data': data,
+                            'layer_type': layer_type,
+                            'opacity': opacity,
+                            'blending_mode': blending,
+                            'colormap': colormap,
+                            'custom_label_colors': custom_label_colors,
+                            'scale': scale,
+                            'visible': visible,
+                            'is_rgb': is_rgb,
+                        }
+                    )
+
+        # Sort layers by saved order in ascending index
+        layers_to_import.sort(key=lambda x: x['order'])
+
+        # Add layers sequentially to the viewer
+        for item in layers_to_import:
+            ltype = item['layer_type']
+
+            if ltype == 'labels' or (
+                ltype != 'shapes'
+                and np.issubdtype(item['data'].dtype, np.integer)
+                and not item['is_rgb']
+            ):
+                labels_kwargs = {
+                    'name': item['name'],
+                    'opacity': item['opacity'],
+                    'scale': item['scale'],
+                    'visible': item['visible'],
+                    'blending': item['blending_mode'],
+                }
+
+                if item.get('custom_label_colors'):
+                    from napari.utils.colormaps import DirectLabelColormap
+
+                    labels_kwargs['colormap'] = DirectLabelColormap(
+                        color_dict=item['custom_label_colors'],
+                        default_color=(0.0, 0.0, 0.0, 0.0),
+                    )
+                elif item.get('colormap') and item['colormap'] not in (
+                    'label_colormap',
+                    'custom',
+                    'gray',
+                ):
+                    try:
+                        labels_kwargs['colormap'] = item['colormap']
+                    except Exception:
+                        pass
+
+                self.viewer.add_labels(item['data'], **labels_kwargs)
+
+            elif ltype == 'shapes':
+                self.viewer.add_shapes(
+                    item['data'],
+                    shape_type=item['shape_type'],
+                    name=item['name'],
+                    opacity=item['opacity'],
+                    scale=item['scale'],
+                    visible=item['visible'],
+                    blending=item['blending_mode'],
+                )
+
+            else:
+                self.viewer.add_image(
+                    item['data'],
+                    name=item['name'],
+                    opacity=item['opacity'],
+                    scale=item['scale'],
+                    visible=item['visible'],
+                    blending=item['blending_mode'],
+                    colormap=item['colormap'],
+                    rgb=item['is_rgb'],
+                )
+
+        return len(layers_to_import)
+
     def _on_import_napari_layers(self):
+        """Interactive GUI button callback."""
         if self.viewer is None:
             QMessageBox.warning(
                 self, 'Import Error', 'No Napari viewer instance available.'
@@ -1007,170 +1406,12 @@ class CellClassificationWidget(QWidget):
             return
 
         try:
-            layers_to_import = []
-
-            with h5py.File(file_path, 'r') as h5f:
-                for key in h5f:
-                    item = h5f[key]
-
-                    # Retrieve layer metadata
-                    order = int(item.attrs.get('order', 0))
-                    layer_type = item.attrs.get('layer_type', 'image')
-                    opacity = float(item.attrs.get('opacity', 1.0))
-                    scale = item.attrs.get('scale', None)
-                    visible = bool(item.attrs.get('visible', True))
-                    blending = item.attrs.get('blending_mode', 'translucent')
-
-                    if scale is not None:
-                        scale = tuple(scale)
-
-                    # Load Shape layer Group
-                    if layer_type == 'shapes' and isinstance(
-                        item, h5py.Group
-                    ):
-                        shape_types = json.loads(
-                            item.attrs.get('shape_types', '[]')
-                        )
-                        shapes_data = []
-                        if 'shapes_data' in item:
-                            s_group = item['shapes_data']
-                            # Sort keys numerically (shape_0000, shape_0001, ...)
-                            sorted_keys = sorted(
-                                s_group.keys(),
-                                key=lambda x: int(x.split('_')[-1])
-                                if '_' in x
-                                else 0,
-                            )
-                            for s_key in sorted_keys:
-                                shapes_data.append(s_group[s_key][()])
-
-                        layers_to_import.append(
-                            {
-                                'order': order,
-                                'name': key,
-                                'data': shapes_data,
-                                'layer_type': 'shapes',
-                                'shape_type': shape_types,
-                                'opacity': opacity,
-                                'scale': scale,
-                                'visible': visible,
-                                'blending_mode': blending,
-                            }
-                        )
-
-                    # Load Image or Labels Data
-                    elif isinstance(item, h5py.Dataset):
-                        data = item[()]
-                        is_rgb = bool(item.attrs.get('rgb', False))
-                        colormap = item.attrs.get('colormap', 'gray')
-
-                        # Parse custom label colors dict safely
-                        custom_label_colors = None
-                        if 'custom_label_colors' in item.attrs:
-                            try:
-                                raw_colors = json.loads(
-                                    item.attrs['custom_label_colors']
-                                )
-                                custom_label_colors = {
-                                    int(k): v for k, v in raw_colors.items()
-                                }
-                            except (json.JSONDecodeError, ValueError):
-                                custom_label_colors = None
-
-                        # Autodetect RGB if applicable
-                        if (
-                            not is_rgb
-                            and data.ndim >= 3
-                            and data.shape[-1] in (3, 4)
-                            and data.dtype == np.uint8
-                        ):
-                            is_rgb = True
-
-                        layers_to_import.append(
-                            {
-                                'order': order,
-                                'name': key,
-                                'data': data,
-                                'layer_type': layer_type,
-                                'opacity': opacity,
-                                'blending_mode': blending,
-                                'colormap': colormap,
-                                'custom_label_colors': custom_label_colors,
-                                'scale': scale,
-                                'visible': visible,
-                                'is_rgb': is_rgb,
-                            }
-                        )
-
-            # Sort layers by saved order in ascending index
-            layers_to_import.sort(key=lambda x: x['order'])
-
-            # Add layers sequentially to the viewer
-            for item in layers_to_import:
-                ltype = item['layer_type']
-
-                if ltype == 'labels' or (
-                    ltype != 'shapes'
-                    and np.issubdtype(item['data'].dtype, np.integer)
-                    and not item['is_rgb']
-                ):
-                    labels_kwargs = {
-                        'name': item['name'],
-                        'opacity': item['opacity'],
-                        'scale': item['scale'],
-                        'visible': item['visible'],
-                        'blending': item['blending_mode'],
-                    }
-
-                    # Reconstruct DirecLabelColormap if custom colors were saved
-                    if item.get('custom_label_colors'):
-                        from napari.utils.colormaps import DirectLabelColormap
-
-                        labels_kwargs['colormap'] = DirectLabelColormap(
-                            color_dict=item['custom_label_colors'],
-                            default_color=(0.0, 0.0, 0.0, 0.0),
-                        )
-                    elif (
-                        item.get('colormap')
-                        and item['colormap']
-                        not in ('label_colormap', 'custom', 'gray')
-                    ):
-                        try:
-                            labels_kwargs['colormap'] = item['colormap']
-                        except Exception:
-                            pass  # Fallback to default random categorical colormap
-
-                    self.viewer.add_labels(item['data'], **labels_kwargs)
-
-                elif ltype == 'shapes':
-                    self.viewer.add_shapes(
-                        item['data'],
-                        shape_type=item['shape_type'],
-                        name=item['name'],
-                        opacity=item['opacity'],
-                        scale=item['scale'],
-                        visible=item['visible'],
-                        blending=item['blending_mode'],
-                    )
-
-                else:
-                    self.viewer.add_image(
-                        item['data'],
-                        name=item['name'],
-                        opacity=item['opacity'],
-                        scale=item['scale'],
-                        visible=item['visible'],
-                        blending=item['blending_mode'],
-                        colormap=item['colormap'],
-                        rgb=item['is_rgb'],
-                    )
-
+            count = self.import_h5_file(file_path)
             QMessageBox.information(
                 self,
                 'Import Successful',
-                f'Successfully restored {len(layers_to_import)} layer(s) in original order from:<br/><code>{file_path}</code>',
+                f'Successfully restored {count} layer(s) in original order from:<br/><code>{file_path}</code>',
             )
-
         except (RuntimeError, ValueError, TypeError, OSError) as e:
             QMessageBox.critical(
                 self,
@@ -1249,3 +1490,16 @@ class CellClassificationWidget(QWidget):
 
             # Append standard dataframe below header lines
             df.to_csv(f, index=True)
+
+    def get_model_config(self):
+        return self.clf_manager.model_config
+
+    def get_active_config(self) -> dict:
+        """Returns unified configuration snapshot for Tab 4 / Batch Processing."""
+        return {
+            'classifier_type': self.clf_manager.classifier_type,
+            'loaded_model_path': self.clf_manager.loaded_model_path,
+            'is_trained': self.clf_manager.is_trained,
+            'feature_names': self.clf_manager.feature_names,
+            'model_config': self.clf_manager.model_config,
+        }

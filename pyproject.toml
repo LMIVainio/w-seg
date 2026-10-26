@@ -1,6 +1,6 @@
 [project]
 name = "w-seg-napari"
-version = "0.3.13"
+version = "0.3.53"
 description = "Segmentation tool for plant tissue plastic sections stained with toluidine blue"
 readme = "README.md"
 license = "MIT"
@@ -10,9 +10,10 @@ authors = [
   {email = "leo.vainio@helsinki.fi"},
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Framework :: napari",
     "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -20,8 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 requires-python = ">=3.10"
@@ -30,21 +30,30 @@ requires-python = ">=3.10"
 # or any other Qt bindings directly (e.g. PyQt5, PySide2).
 # See best practices: https://napari.org/stable/plugins/building_a_plugin/best_practices.html
 dependencies = [
-    "napari",
-    "numpy",
-    "magicgui",
-    "qtpy",
+    # Core GUI & Visualization
+    "napari>=0.4.19",
+    "magicgui>=0.8.0",
+    "qtpy>=2.4.0",
+
+    # Arrays & Processing
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scikit-image>=0.23.0",
+    "pillow>=10.0.0",
+    "h5py>=3.8.0",
+    "tifffile>=2023.3.15",
+    "shapely>=2.0.0",
+
+    # Deep Learning & Computer Vision
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
     "keras>=3.0.0",
-    "torch",
-    "scikit-image",
-    "pillow",
-    "torchvision",
-    "python-elf",
-    "kornia",
-    "pandas",
-    "shapely",
-    "h5py",
-    "tifffile",
+    "ultralytics>=8.1.0",
+    "kornia>=0.7.0",
+    "opencv-python-headless>=4.8.0",
+
+    # Specialized Segmentation (GASP/RAGs)
+    "python-elf>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -113,6 +122,9 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
-    "E501", # line too long. handled by formatter
-    "UP006", "UP007", # type annotation. As using magicgui require runtime type annotation then we disable this.
+    "E501",
+    "UP006", "UP007",
+    "SIM102", "SIM105",   # nested if / try-except-pass: style only
+    "B905",               # zip() without strict=: style only
+    "BLE001",             # blind `except Exception`: fine for the batch worker
 ]

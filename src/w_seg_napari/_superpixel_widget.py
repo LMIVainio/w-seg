@@ -15,8 +15,10 @@ from qtpy.QtWidgets import (
 )
 from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
-from skimage.morphology import remove_small_objects
 from skimage.segmentation import felzenszwalb, relabel_sequential, watershed
+
+# Importing skimage.morphology remove_small_objects() in a version independent manner
+from w_seg_napari._wsegutils import remove_small_objects_safe
 
 
 class SuperpixelWidget(QGroupBox):
@@ -268,6 +270,9 @@ class SuperpixelWidget(QGroupBox):
 
         # 5. Run Button
         self.btn_run = QPushButton('Generate Superpixels')
+        self.btn_run.setStyleSheet(
+            'font-weight: bold; background-color: #2b5b84; color: white; padding: 6px;'
+        )
         self.btn_run.clicked.connect(self._on_run_clicked)
         main_layout.addWidget(self.btn_run)
 
@@ -461,6 +466,11 @@ class SuperpixelWidget(QGroupBox):
                 self.viewer.status = f'[w-seg] Failed to generate {algo_name}.'
             return
 
+        # Determine reference input layer for spatial coordinate alignment
+        ref_layer = sem_layer if sem_layer is not None else aff_h_layer
+        layer_scale = ref_layer.scale
+        layer_translate = ref_layer.translate
+
         source_name = (
             sem_layer.name.replace('pred_', '')
             if sem_layer
@@ -468,10 +478,21 @@ class SuperpixelWidget(QGroupBox):
         )
         layer_name = f'sp_{source_name}'
 
+        # Update existing layer or create new labels layer with scale & translate
         if layer_name in self.viewer.layers:
-            self.viewer.layers[layer_name].data = superpixels
+            existing_layer = self.viewer.layers[layer_name]
+            existing_layer.data = superpixels
+            existing_layer.scale = layer_scale
+            existing_layer.translate = layer_translate
+            existing_layer.refresh()
         else:
-            self.viewer.add_labels(superpixels, name=layer_name, opacity=0.7)
+            self.viewer.add_labels(
+                superpixels,
+                name=layer_name,
+                opacity=0.7,
+                scale=layer_scale,
+                translate=layer_translate,
+            )
 
         if self.viewer:
             self.viewer.status = (
@@ -536,7 +557,9 @@ class SuperpixelWidget(QGroupBox):
         # **or equal to** its value, while the previous parameter called min_size
         #  only removed smaller ones. Min cell size is used for clarity
         if min_cell_size > 0:
-            ws_labels = remove_small_objects(ws_labels, max_size=min_cell_size)
+            ws_labels = remove_small_objects_safe(
+                ws_labels, max_size=min_cell_size
+            )
         ws_labels = relabel_sequential(ws_labels)[0]
         return ws_labels.astype(np.uint64)
 
@@ -608,7 +631,9 @@ class SuperpixelWidget(QGroupBox):
         )
         # Remove small objects from the watershed labels to clean up spurious regions
         if min_cell_size > 0:
-            ws_labels = remove_small_objects(ws_labels, max_size=min_cell_size)
+            ws_labels = remove_small_objects_safe(
+                ws_labels, max_size=min_cell_size
+            )
         ws_labels = relabel_sequential(ws_labels)[0]
         print('[w-seg] Watershed segmentation completed.')
         return ws_labels.astype(np.uint64)
@@ -787,7 +812,7 @@ class SuperpixelWidget(QGroupBox):
         labels[~fg_mask] = 0
 
         if min_cell_size > 0:
-            labels = remove_small_objects(labels, max_size=min_cell_size)
+            labels = remove_small_objects_safe(labels, max_size=min_cell_size)
         labels = relabel_sequential(labels)[0]
         '[w-seg] Mutex Watershed completed'
         return labels.astype(np.uint64)
@@ -867,7 +892,63 @@ class SuperpixelWidget(QGroupBox):
         labels[~fg_mask] = 0
 
         if min_cell_size > 0:
-            labels = remove_small_objects(labels, max_size=min_cell_size)
+            labels = remove_small_objects_safe(labels, max_size=min_cell_size)
         labels = relabel_sequential(labels)[0]
         '[w-seg] Mutex Watershed completed'
         return labels.astype(np.uint64)
+
+    def get_settings(self):
+        selected_algo = self.combo_algorithm.currentText()
+
+        # Base settings common to all algorithms
+        settings = {
+            'sp_algorithm': selected_algo,
+            'sp_affinity_smoothing_sigma': self.spin_aff_sigma.value(),
+            'sp_mask_threshold': self.spin_mask_thresh.value(),
+            'sp_min_size': self.spin_min_cell_size.value(),
+        }
+
+        # Algorithm-specific parameters merged directly into top-level dict
+        if selected_algo == 'Distance Watershed':
+            settings.update(
+                {
+                    'sp_compactness': self.spin_compactness.value(),
+                    'sp_min_distance': self.spin_min_dist.value(),
+                    'sp_min_peak_height': self.spin_min_peak_height.value(),
+                }
+            )
+        elif selected_algo == 'Local Affinity Watershed':
+            settings.update(
+                {
+                    'sp_compactness': self.spin_aff_compactness.value(),
+                    'sp_min_distance': self.spin_aff_min_dist.value(),
+                    'sp_min_peak_height': self.spin_aff_min_peak_height.value(),
+                    'sp_affinity_threshold': self.spin_aff_threshold.value(),
+                }
+            )
+        elif selected_algo == 'Felzenszwalb Superpixels':
+            settings.update(
+                {
+                    'sp_scale': self.spin_felz_scale.value(),
+                    'sp_affinity_weight': self.spin_felz_aff_weight.value(),
+                }
+            )
+        elif selected_algo == 'Seeded Mutex Watershed (elf)':
+            settings.update(
+                {
+                    'sp_seed_min_distance': self.spin_smutex_seed_min_distance.value(),
+                    'sp_strides': self.spin_smutex_strides.value(),
+                    'sp_randomize_strides': self.check_smutex_randomize_strides.isChecked(),
+                    'sp_noise_level': self.spin_smutex_noise_level.value(),
+                }
+            )
+        elif selected_algo == 'Mutex Watershed (elf)':
+            settings.update(
+                {
+                    'sp_strides': self.spin_mutex_strides.value(),
+                    'sp_randomize_strides': self.check_mutex_randomize_strides.isChecked(),
+                    'sp_noise_level': self.spin_mutex_noise_level.value(),
+                }
+            )
+
+        return settings

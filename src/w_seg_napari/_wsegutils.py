@@ -2,6 +2,8 @@ import os
 import sys
 
 os.environ['KERAS_BACKEND'] = 'torch'
+import inspect
+import json
 import math
 
 # =====================================================================
@@ -13,6 +15,7 @@ import platform
 # Downloading the model
 # =====================================================================
 import urllib.request
+from collections.abc import Sequence
 
 # =====================================================================
 # Loading and saving images
@@ -21,6 +24,10 @@ from pathlib import Path
 from typing import Union
 from urllib.error import HTTPError, URLError
 
+# =====================================================================
+# Loading and saving h5 payloads
+# =====================================================================
+import h5py
 import keras
 import kornia.color as K_color
 
@@ -45,7 +52,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from keras import layers
-from napari.utils.notifications import show_info, show_warning
+from napari.utils.notifications import show_warning
 
 # =====================================================================
 # QtPy for GUI elements for curation Widget
@@ -70,7 +77,11 @@ from scipy.ndimage import (
 from scipy.ndimage import label as label_connected_components
 from scipy.spatial import Delaunay, Voronoi
 from shapely.geometry import Polygon, box
+from skimage.morphology import remove_small_objects
 from skimage.segmentation import expand_labels, watershed
+from skimage.util import map_array
+from torch import nn
+from ultralytics import YOLO
 
 
 def get_device() -> torch.device:
@@ -383,7 +394,7 @@ def Generator():
 
 
 # =====================================================================
-# Download weights and load model
+# Download weights and load models
 # =====================================================================
 # Base URLs for downloading w-seg model weights
 WEIGHT_URL_MAP = {
@@ -467,6 +478,99 @@ def load_my_generator(
     return generator
 
 
+YOLO_WEIGHT_URL_MAP = {
+    # Custom w-seg trained cell classification models
+    'yolov11_Arabidopsis_RuthRed_TolBlu.pt': (
+        'https://github.com/LMIVainio/w-seg/releases/download/w-seg/yolov11_Arabidopsis_RuthRed_TolBlu.pt'
+    ),
+    'yolov11_Populus_TolBlu.pt': (
+        'https://github.com/LMIVainio/w-seg/releases/download/w-seg/yolov11_Populus_TolBlu.pt'
+    ),
+}
+
+
+def get_yolo_weights(w_name: str) -> str:
+    """Resolves local weight path or downloads missing .pt file to ~/.wseg_models.
+
+    Parameters
+    ----------
+    w_name : str
+        Local file path, key in YOLO_WEIGHT_URL_MAP, or filename.
+
+    Returns
+    -------
+    str
+        Absolute path to cached .pt weight file.
+    """
+    # 1. If user passed an existing local path, return it directly
+    local_path = Path(w_name)
+    if local_path.is_file():
+        return str(local_path.resolve())
+
+    # 2. Local cache directory setup (~/.wseg_models)
+    cache_dir = Path.home() / '.wseg_models'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = local_path.name
+    weights_path = cache_dir / filename
+
+    # 3. Determine download URL
+    if w_name in YOLO_WEIGHT_URL_MAP:
+        weights_url = YOLO_WEIGHT_URL_MAP[w_name]
+    elif filename in YOLO_WEIGHT_URL_MAP:
+        weights_url = YOLO_WEIGHT_URL_MAP[filename]
+    else:
+        weights_url = f'{DEFAULT_RELEASE_BASE_URL}{filename}'
+
+    # 4. Download if missing from cache
+    if not weights_path.exists():
+        print(f'Downloading YOLO weights ({filename}) from {weights_url}...')
+        try:
+            # Use custom User-Agent to avoid HTTP 403 Forbidden on GitHub downloads
+            req = urllib.request.Request(
+                weights_url,
+                headers={'User-Agent': 'Mozilla/5.0 (Python/w-seg)'},
+            )
+            with (
+                urllib.request.urlopen(req) as response,
+                open(weights_path, 'wb') as out_file,
+            ):
+                out_file.write(response.read())
+            print(f'Successfully downloaded: {filename}')
+        except (URLError, HTTPError, OSError) as e:
+            if weights_path.exists():
+                weights_path.unlink()  # Clean up partial download
+            raise RuntimeError(
+                f"Failed to download YOLO weights '{filename}' from {weights_url}: {e}"
+            ) from e
+
+    return str(weights_path)
+
+
+def load_yolo_model(w_name: str, task: str = 'classify') -> YOLO:
+    """Resolves weights using cache and returns a loaded Ultralytics YOLO model.
+
+    Parameters
+    ----------
+    w_name : str
+        Model identifier, filename, or direct path.
+    task : str
+        YOLO task type ('classify', 'segment', or 'detect').
+
+    Returns
+    -------
+    YOLO
+        Instantiated YOLO model ready for predict().
+    """
+
+    weights_path = get_yolo_weights(w_name)
+    print(f'[w-seg] Loading YOLO model from: {weights_path}')
+    torch.cuda.empty_cache()  # Clears any residual CUDA cache allocations in case of VRAM issues
+    model = YOLO(weights_path, task=task)
+
+    return model
+
+
 # =====================================================================
 # Image processing functions
 # =====================================================================
@@ -540,14 +644,20 @@ def preprocess_image_channels(
     enable_denoise: bool = True,
     enable_lab: bool = True,
     enable_centering: bool = True,
+    return_foreground_mask=True,
 ) -> torch.Tensor:
     """
     Modular preprocessing pipeline converting [B, 3, H, W] tensor inputs
     into normalized/centered 6-channel tensors. Handles ultra-large images safely.
     """
-    show_info('Started preprocessing pipeline...')
+    # Generate a background mask of initial raw tensor
+    is_foreground_2d = img_tensor.squeeze(0).sum(dim=0) > 1e-3
+
+    # show_info('Started preprocessing pipeline...')
     tensor = img_tensor.float()
-    print('Initial preprocessing: Input tensor shape:', tensor.shape)
+    print(
+        '[w-seg] Initial preprocessing: Input tensor shape:', tensor.shape[2:3]
+    )
     # 1. Percentile Stretch with Subsampling Guard for Massive Images
     if enable_stretch:
         b, c, h, w = tensor.shape
@@ -559,7 +669,7 @@ def preprocess_image_channels(
             stride = num_pixels // 500_000
             sample_flat = flat[:, :, ::stride]
             show_warning(
-                'large image detected. Preprocessing might take a while'
+                '[w-seg] Large image detected. Preprocessing might take a while'
             )
         else:
             sample_flat = flat
@@ -576,7 +686,7 @@ def preprocess_image_channels(
     # 2. Bilateral Denoise
     if enable_denoise:
         if num_pixels > 4_000_000:
-            print('Applying bilateral blur in tiles...')
+            print('[w-seg] Applying bilateral blur in tiles...')
             tensor = mem_safe_bilateral_blur(tensor, tile_size=2000, pad=2)
         else:
             tensor = K_filters.bilateral_blur(
@@ -612,7 +722,12 @@ def preprocess_image_channels(
         # show_info("Zero-centering applied to [-1, 1] range")
 
     # 6. Concatenate to 6 Channels -> [B, 6, H, W]
-    return torch.cat([first_3, tensor_hsv], dim=1)
+    final_tensor = torch.cat([first_3, tensor_hsv], dim=1)
+
+    if return_foreground_mask:
+        return final_tensor, is_foreground_2d
+    else:
+        return final_tensor, None
 
 
 def process_large_image(
@@ -621,8 +736,10 @@ def process_large_image(
     patch_size=256,
     stride=128,
     device=device,
-    live_layer=None,
+    # live_layer=None,
     live_view=True,
+    # yield_callback=None,
+    is_cancelled=None,
 ):
     """
     Memory-safe inference pipeline for Napari.
@@ -649,14 +766,15 @@ def process_large_image(
     # 2. GLOBAL PREPROCESSING ON CPU (System RAM)
     # =========================================================================
     # Returns (6, H, W) 6-channel preprocessed image in system RAM
-    large_6ch_cpu = preprocess_image_channels(
+    large_6ch_cpu, is_foreground_2d = preprocess_image_channels(
         image_batch_cpu,
         enable_stretch=True,
         enable_denoise=True,
         enable_lab=True,
         enable_centering=True,
-    ).squeeze(0)  # Shape: (6, H, W) on CPU
+    )
 
+    large_6ch_cpu = large_6ch_cpu.squeeze(0)  # Shape: (6, H, W) on CPU
     _, H, W = large_6ch_cpu.shape
 
     # 3. INITIALIZE CANVASES IN SYSTEM RAM (CPU) TO SAVE VRAM
@@ -687,6 +805,9 @@ def process_large_image(
     with torch.no_grad():
         for y in y_coords:
             for x in x_coords:
+                if is_cancelled and is_cancelled():
+                    print('[w-seg] Inference cancelled...')
+                    return None, None
                 # Print progress
                 progress_count += 1
                 progress_out = progress_count / total_patches * 100
@@ -695,6 +816,15 @@ def process_large_image(
                     f'\r[w-seg] Prediction {progress_out:.2f}% complete'
                 )
                 sys.stdout.flush()
+                # Slice foreground mask for current patch
+                patch_fg_mask = is_foreground_2d[
+                    y : y + patch_size, x : x + patch_size
+                ]
+
+                # --- BRANCH A: EMPTY BACKGROUND PATCH ---
+                if not patch_fg_mask.any():
+                    # Completely skip inference, masking, canvas accumulation, and live updates
+                    continue
                 # Slice 6-channel patch on CPU -> (6, 256, 256)
                 patch_6ch_cpu = large_6ch_cpu[
                     :, y : y + patch_size, x : x + patch_size
@@ -753,10 +883,12 @@ def process_large_image(
                 pred_sem = pred_sem_gpu.squeeze(0).cpu()  # (1, h, w)
                 pred_aff = pred_aff_gpu.squeeze(0).cpu()  # (2, h, w)
 
-                # 7. Slice blend mask to match current patch dimensions (h, w)
-                mask_patch = blend_mask_cpu[
-                    :h, :w
-                ]  # (h, w) or (1, h, w) depending on setup
+                # 7. Strictly mask predictions AND blend weights using patch_fg_mask
+                fg_mask_patch = patch_fg_mask[:h, :w].bool()
+                # Zero out bacground
+                pred_sem = pred_sem * fg_mask_patch
+                pred_aff = pred_aff * fg_mask_patch
+                mask_patch = blend_mask_cpu[:h, :w] * fg_mask_patch
 
                 # 8. Accumulate on CPU canvases using actual patch bounds (y:y+h, x:x+w)
                 sem_canvas_cpu[:, y : y + h, x : x + w] += (
@@ -770,7 +902,7 @@ def process_large_image(
                 aff_weight_cpu[:, y : y + h, x : x + w] += mask_patch
 
                 # Live Napari Update (CPU numpy slice)
-                if live_view and live_layer is not None:
+                if live_view:
                     local_sem = sem_canvas_cpu[
                         :, y : y + patch_size, x : x + patch_size
                     ]
@@ -778,20 +910,33 @@ def process_large_image(
                         :, y : y + patch_size, x : x + patch_size
                     ]
 
+                    # Calculate normalized patch on CPU
                     local_norm = (local_sem / local_weights).squeeze(0).numpy()
                     local_norm = np.clip(local_norm, 0.0, 1.0)
 
-                    live_layer.data[y : y + patch_size, x : x + patch_size] = (
-                        local_norm
-                    )
-                    live_layer.refresh()
-                    napari.qt.get_qapp().processEvents()
+                    # Yield slice coordinates and patch data to the main thread
+                    yield (y, x, patch_size, local_norm)
 
-    # Final normalization on CPU
-    final_sem = torch.clamp(sem_canvas_cpu / sem_weight_cpu, 0.0, 1.0).numpy()
-    final_aff = torch.clamp(aff_canvas_cpu / aff_weight_cpu, 0.0, 1.0).numpy()
-    # Print newline after sysstdout.flush
-    print('\n')
+    # Safe normalization on CPU (replaces NaNs with 0.0)
+    final_sem = (
+        torch.where(sem_weight_cpu > 0, sem_canvas_cpu / sem_weight_cpu, 0.0)
+        .clamp(0.0, 1.0)
+        .numpy()
+    )
+
+    final_aff = (
+        torch.where(aff_weight_cpu > 0, aff_canvas_cpu / aff_weight_cpu, 0.0)
+        .clamp(0.0, 1.0)
+        .numpy()
+    )
+
+    # Convert foreground mask to numpy boolean array (H, W)
+    fg_mask_np = is_foreground_2d.cpu().numpy().astype(bool)
+
+    # Mask non-foreground pixels to 0.0 across all channels
+    final_sem[:, ~fg_mask_np] = 0.0
+    final_aff[:, ~fg_mask_np] = 0.0
+    sys.stdout.write('\n')
     return final_sem, final_aff
 
 
@@ -1148,6 +1293,16 @@ class CurationWidget(QWidget):
         )
         self._on_layer_selection_changed(None)
 
+    def _sync_staging_transforms(self):
+        """Helper function to keep staging layer spatial scale/translate matched with active labels layer."""
+        if (
+            self.labels_layer
+            and self.staging_layer
+            and self.staging_layer in self.viewer.layers
+        ):
+            self.staging_layer.scale = self.labels_layer.scale
+            self.staging_layer.translate = self.labels_layer.translate
+
     def _on_layer_selection_changed(self, event):
         active_layer = self.viewer.layers.selection.active
         if (
@@ -1167,6 +1322,7 @@ class CurationWidget(QWidget):
             self.status_lbl.setText(f'Active: {self.labels_layer.name}')
             self.merge_btn.setEnabled(True)
             self.erode_split_btn.setEnabled(True)
+            self._sync_staging_transforms()
         elif active_layer is None:
             self.labels_layer = None
             self.status_lbl.setText('Status: Select a Labels layer...')
@@ -1206,13 +1362,18 @@ class CurationWidget(QWidget):
             if staging_name in self.viewer.layers:
                 self.staging_layer = self.viewer.layers[staging_name]
                 self.staging_layer.data[:] = 0
+                self._sync_staging_transforms()
                 self.staging_layer.refresh()
             else:
                 staging_data = np.zeros_like(
                     self.labels_layer.data, dtype=np.uint16
                 )
                 self.staging_layer = self.viewer.add_labels(
-                    staging_data, name=staging_name, opacity=0.6
+                    staging_data,
+                    name=staging_name,
+                    opacity=0.6,
+                    scale=self.labels_layer.scale,
+                    translate=self.labels_layer.translate,
                 )
             self.viewer.layers.selection.active = self.labels_layer
         else:
@@ -1237,14 +1398,18 @@ class CurationWidget(QWidget):
         if self.mode == 'navigate' or event.type != 'mouse_press':
             return
 
+        # Correctly map world position coordinates into local integer array index
         data_coordinates = layer.world_to_data(event.position)
         cords = tuple(int(np.round(c)) for c in data_coordinates)
-        y, x = cords[-2], cords[-1]
 
-        try:
-            val = layer.data[y, x]
-        except IndexError:
+        # Check boundary bounds before indexing
+        if any(
+            c < 0 or c >= s
+            for c, s in zip(cords, self.labels_layer.data.shape)
+        ):
             return
+
+        val = layer.data[cords]
 
         if val == 0:
             return  # Ignore background
@@ -1297,7 +1462,7 @@ class CurationWidget(QWidget):
         self.labels_layer.data[combined_mask] = target_master_id
         self.labels_layer.refresh()
 
-        # 5. KEY FEATURE: Update active layer's selected label in layer controls!
+        # 5. Update active layer's selected label in layer controls
         self.labels_layer.selected_label = int(target_master_id)
 
         self.viewer.status = f'Merged {len(self.selected_label_ids)} items into label ID: {target_master_id}'
@@ -1488,6 +1653,8 @@ def apply_feature_colormap(
     df_features: pd.DataFrame | None = None,
     feature_name: str = 'mean_wall_thickness',
     cmap_name: str = 'viridis',
+    scale: tuple | list | np.ndarray | None = None,
+    translate: tuple | list | np.ndarray | None = None,
 ):
     """
     Maps feature measurements onto the label mask geometry to create a true
@@ -1590,6 +1757,8 @@ def apply_feature_colormap(
         viewer.add_image(
             feature_map,
             name=target_layer_name,
+            scale=scale,
+            translate=translate,
             colormap=cmap_name,
             contrast_limits=(val_min, val_max),
             opacity=0.85,
@@ -1695,3 +1864,527 @@ def sanitize_feature_matrix(
         raise TypeError(
             f'Unsupported input type for sanitize_feature_matrix: {type(data)}'
         )
+
+
+# =====================================================================
+# Import/export functions
+# At some point migrate CellClassificationWidget functions here
+# =====================================================================
+
+
+def export_layers_to_h5(layers_payload: list[dict], save_path: str) -> int:
+    """Headless HDF5 exporter. Writes serialized layer payloads to an HDF5 file.
+
+    Parameters
+    ----------
+    layers_payload : list[dict]
+        List of dictionaries where each item represents a layer containing:
+        'name', 'type', 'data', 'metadata', and optional 'shapes_data'.
+    save_path : str
+        Target filepath for the output .h5 file.
+
+    Returns
+    -------
+    int
+        Count of successfully exported layers.
+    """
+    if not layers_payload:
+        return 0
+
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+
+    written_count = 0
+    with h5py.File(save_path, 'w') as h5f:
+        for index, layer_info in enumerate(layers_payload):
+            layer_name_safe = layer_info['name'].replace('/', '_')
+            layer_type = layer_info['type']
+            metadata = layer_info.get('metadata', {})
+
+            if layer_type in ('image', 'labels'):
+                data = np.ascontiguousarray(layer_info['data'])
+                dset = h5f.create_dataset(
+                    layer_name_safe,
+                    data=data,
+                    compression='gzip',
+                    compression_opts=4,
+                )
+
+                # Store order index and metadata attributes
+                dset.attrs['order'] = index
+                dset.attrs['layer_type'] = layer_type
+
+                for k, v in metadata.items():
+                    if k == 'custom_label_colors' and isinstance(v, dict):
+                        # Serialize color dictionary safely to JSON string
+                        clean_color_dict = {}
+                        for ck, cv in v.items():
+                            if isinstance(cv, np.ndarray):
+                                cv_clean = cv.tolist()
+                            elif hasattr(cv, '__iter__'):
+                                cv_clean = [float(x) for x in cv]
+                            else:
+                                cv_clean = float(cv)
+                            clean_color_dict[str(ck)] = cv_clean
+                        dset.attrs[k] = json.dumps(clean_color_dict)
+                    else:
+                        dset.attrs[k] = v
+
+                written_count += 1
+
+            elif layer_type == 'shapes':
+                group = h5f.create_group(layer_name_safe)
+                group.attrs['order'] = index
+                group.attrs['layer_type'] = layer_type
+
+                for k, v in metadata.items():
+                    if k == 'shape_types' and isinstance(v, (list, tuple)):
+                        group.attrs[k] = json.dumps([str(s) for s in v])
+                    else:
+                        group.attrs[k] = v
+
+                shapes_group = group.create_group('shapes_data')
+                shapes_data = layer_info.get('shapes_data', [])
+                for s_idx, shape_arr in enumerate(shapes_data):
+                    shapes_group.create_dataset(
+                        f'shape_{s_idx:04d}',
+                        data=np.ascontiguousarray(shape_arr),
+                        compression='gzip',
+                        compression_opts=4,
+                    )
+
+                written_count += 1
+
+    return written_count
+
+
+# =====================================================================
+# YOLO functions
+# =====================================================================
+
+
+def crop_yolo_bbox_torch(
+    bbox: tuple[float, float, float, float],
+    image_np: np.ndarray,
+    centroids: tuple[float, float] | None = None,
+    axis_l: float | None = None,
+    scale: tuple[float, float] | None = None,
+    translate: tuple[float, float] | None = None,
+    target_size: int = 256,
+    context_factor: float = 3.0,
+    min_crop_size: int = 64,
+    max_crop_size: int = 384,
+) -> torch.Tensor:
+    """Extracts a square crop from a CPU NumPy image and returns a PyTorch Tensor crop.
+
+    Supports optional layer spatial transforms (scale and translate) to accurately
+    map world coordinates (bounding box / centroids) to array pixel indices.
+
+    Parameters
+    ----------
+    bbox : tuple[float, float, float, float]
+        Bounding box (ymin, xmin, ymax, xmax) in world or data coordinates.
+    image_np : np.ndarray
+        Input image NumPy array with shape [H, W], [H, W, C], or [C, H, W].
+    centroids : tuple[float, float] | None
+        Optional (cy, cx) center coordinates.
+    axis_l : float | None
+        Optional predefined axis length.
+    scale : tuple[float, float] | None
+        Layer scale factors (scale_y, scale_x). Default is (1.0, 1.0).
+    translate : tuple[float, float] | None
+        Layer translation offsets (trans_y, trans_x). Default is (0.0, 0.0).
+    target_size : int
+        Output crop spatial size (default: 256).
+    context_factor : float
+        Multiplier relative to the cell's shorter axis (default: 3.0).
+    min_crop_size : int
+        Minimum allowed crop size before resizing (default: 64).
+    max_crop_size : int
+        Maximum allowed crop size before resizing (default: 384).
+
+    Returns
+    -------
+    torch.Tensor
+        Resized square crop tensor of shape [C, target_size, target_size].
+    """
+    # 1. Determine spatial dimensions [H, W] depending on NumPy layout
+    if image_np.ndim == 2:
+        img_h, img_w = image_np.shape
+    elif image_np.ndim == 3:
+        if image_np.shape[2] in (1, 3, 4):
+            img_h, img_w = image_np.shape[0], image_np.shape[1]
+        else:
+            img_h, img_w = image_np.shape[1], image_np.shape[2]
+    else:
+        raise ValueError(f'Unsupported image shape: {image_np.shape}')
+
+    # Parse transforms
+    scale_y, scale_x = (
+        (float(scale[0]), float(scale[1])) if scale is not None else (1.0, 1.0)
+    )
+    trans_y, trans_x = (
+        (float(translate[0]), float(translate[1]))
+        if translate is not None
+        else (0.0, 0.0)
+    )
+
+    ymin, xmin, ymax, xmax = bbox
+
+    # 2. Convert world-space bounding box to pixel-space data coordinates
+    ymin_data = (ymin - trans_y) / scale_y
+    ymax_data = (ymax - trans_y) / scale_y
+    xmin_data = (xmin - trans_x) / scale_x
+    xmax_data = (xmax - trans_x) / scale_x
+
+    # 3. Compute center coordinates in data space
+    if centroids is None:
+        cy = (ymin_data + ymax_data) / 2.0
+        cx = (xmin_data + xmax_data) / 2.0
+    else:
+        cy = (centroids[0] - trans_y) / scale_y
+        cx = (centroids[1] - trans_x) / scale_x
+
+    # 4. Determine cell axis for context scaling in pixel space
+    if axis_l is not None:
+        # Convert physical axis length to pixel space (average scale factor)
+        avg_scale = (scale_y + scale_x) / 2.0
+        axis = float(axis_l) / avg_scale
+    else:
+        cell_h = max(1.0, float(ymax_data - ymin_data))
+        cell_w = max(1.0, float(xmax_data - xmin_data))
+        axis = max(1.0, min(cell_h, cell_w))  # Shorter axis
+
+    # 5. Determine physical crop window size (in pixels)
+    crop_dim = max(int(round(axis * context_factor)), min_crop_size)
+    crop_dim = min(int(round(crop_dim)), max_crop_size)
+    crop_dim = min(crop_dim, max(img_h, img_w))
+
+    half_dim = crop_dim / 2.0
+
+    # 6. Calculate square crop coordinates centered on cell
+    c_ymin = int(round(cy - half_dim))
+    c_ymax = c_ymin + crop_dim
+    c_xmin = int(round(cx - half_dim))
+    c_xmax = c_xmin + crop_dim
+
+    # 7. Calculate clamping slices and padding boundaries
+    pad_top = max(0, -c_ymin)
+    pad_bottom = max(0, c_ymax - img_h)
+    pad_left = max(0, -c_xmin)
+    pad_right = max(0, c_xmax - img_w)
+
+    slice_ymin = max(0, c_ymin)
+    slice_ymax = min(img_h, c_ymax)
+    slice_xmin = max(0, c_xmin)
+    slice_xmax = min(img_w, c_xmax)
+
+    # 8. Slice NumPy array on CPU
+    if image_np.ndim == 2:
+        crop_np = image_np[slice_ymin:slice_ymax, slice_xmin:slice_xmax]
+    elif image_np.shape[2] in (1, 3, 4):  # Channels-last [H, W, C]
+        crop_np = image_np[slice_ymin:slice_ymax, slice_xmin:slice_xmax, :]
+    else:  # Channels-first [C, H, W]
+        crop_np = image_np[:, slice_ymin:slice_ymax, slice_xmin:slice_xmax]
+
+    # --- SAFEGUARD: Check if sliced crop is empty ---
+    if crop_np.size == 0:
+        c_channels = (
+            image_np.shape[2]
+            if (image_np.ndim == 3 and image_np.shape[2] in (1, 3, 4))
+            else 1
+        )
+        return torch.zeros(
+            (c_channels, target_size, target_size), dtype=torch.float32
+        )
+
+    # 9. Convert small NumPy crop to PyTorch Tensor [C, H, W]
+    crop = torch.from_numpy(crop_np)
+
+    if crop.ndim == 2:
+        crop = crop.unsqueeze(0).repeat(3, 1, 1)
+    elif crop.ndim == 3 and crop.shape[2] in (1, 3, 4):
+        if crop.shape[2] == 1:
+            crop = crop.permute(2, 0, 1).repeat(3, 1, 1)
+        elif crop.shape[2] == 4:
+            crop = crop[:, :, :3].permute(2, 0, 1)
+        else:
+            crop = crop.permute(2, 0, 1)
+
+    crop = crop.float()
+    if crop.max() > 1.0:
+        crop /= 255.0
+
+    # 10. Apply zero-padding if crop hit image border
+    if pad_top > 0 or pad_bottom > 0 or pad_left > 0 or pad_right > 0:
+        crop = F.pad(
+            crop,
+            (pad_left, pad_right, pad_top, pad_bottom),
+            mode='constant',
+            value=0,
+        )
+
+    # 11. Resample to target_size
+    src_h = crop.shape[1]
+    if src_h > target_size:
+        resized_crop = F.interpolate(
+            crop.unsqueeze(0), size=(target_size, target_size), mode='area'
+        ).squeeze(0)
+    else:
+        resized_crop = F.interpolate(
+            crop.unsqueeze(0),
+            size=(target_size, target_size),
+            mode='bilinear',
+            align_corners=False,
+        ).squeeze(0)
+
+    return resized_crop
+
+
+@torch.no_grad()
+def predict_yolo_tissue_on_image(
+    df_new: pd.DataFrame,
+    image_np: np.ndarray,
+    img_translation: Union[Sequence[float], np.ndarray, None],
+    img_scale: Union[Sequence[float], np.ndarray, None],
+    yolo_model: Union[YOLO, nn.Module],
+    target_size: int = 256,
+    context_factor: float = 2.5,
+    min_crop_size: int = 153,
+    max_crop_size: int = 409,
+    device: str = 'cuda',
+    batch_size: int = 64,
+) -> pd.DataFrame:
+    """Runs YOLO classification by cropping cell regions from a CPU NumPy array
+
+    and streaming small tensor batches to the target device (GPU or CPU).
+
+    Parameters
+    ----------
+    df_new : pd.DataFrame
+        DataFrame containing cell bounding boxes and centroids.
+    image_np : np.ndarray
+        Raw input image array from Napari layer (e.g. [H, W], [H, W, C], or [C, H, W]).
+    yolo_model : Union[YOLO, nn.Module]
+        Loaded Ultralytics YOLO model or PyTorch nn.Module.
+    target_size : int
+        Target crop dimensions (default: 256).
+    context_factor : float
+        Context multiplier around the cell (default: 2.5).
+    device : str
+        Execution device ('cuda' or 'cpu').
+    batch_size : int
+        Number of crops per GPU streaming mini-batch (default: 32).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with predictions, confidences, and per-class probability columns.
+    """
+    df_out = df_new.copy()
+
+    if len(df_out) == 0:
+        return df_out
+
+    # 1. Resolve model and class mapping
+    if isinstance(yolo_model, YOLO):
+        class_names_map = getattr(yolo_model, 'names', {})
+        torch_model = yolo_model.model
+    else:
+        torch_model = yolo_model
+        class_names_map = getattr(torch_model, 'names', {})
+
+    if not class_names_map and hasattr(torch_model, 'names'):
+        class_names_map = torch_model.names
+    if not class_names_map:
+        class_names_map = {i: f'class_{i}' for i in range(100)}
+
+    class_indices = sorted(class_names_map.keys())
+    class_names = [class_names_map[i] for i in class_indices]
+    prob_col_names = [f'prob_{name}' for name in class_names]
+
+    # Transfer model weights to execution device
+    torch_model = torch_model.to(device)
+    torch_model.eval()
+
+    # 2. Extract crops on CPU as lightweight NumPy/Torch CPU arrays
+    crop_list = []
+    tot_rows = df_out.shape[0]
+    for idx, row in df_out.iterrows():
+        bbox = (
+            int(row['bbox-0']),
+            int(row['bbox-1']),
+            int(row['bbox-2']),
+            int(row['bbox-3']),
+        )
+        centroids = (
+            (round(row['centroid-0']), round(row['centroid-1']))
+            if 'centroid-0' in row and 'centroid-1' in row
+            else None
+        )
+        axis_l = (
+            round(row['minor_axis_length'])
+            if 'minor_axis_length' in row
+            else (int(row['axis_length']) if 'axis_length' in row else None)
+        )
+        sys.stdout.write(
+            f'\r[w-seg] Cropping cells for YOLO: {idx + 1}/{tot_rows}'
+        )
+        sys.stdout.flush()
+        # Crop directly from CPU NumPy array
+        crop = crop_yolo_bbox_torch(
+            bbox=bbox,
+            image_np=image_np,
+            centroids=centroids,
+            axis_l=axis_l,
+            scale=img_scale,
+            translate=img_translation,
+            target_size=target_size,
+            min_crop_size=min_crop_size,
+            max_crop_size=max_crop_size,
+            context_factor=context_factor,
+        )
+
+        crop_list.append(crop)
+    print('\n')
+    # 3. Stream mini-batches to GPU for vectorized forward pass
+    all_probs = []
+    print('[w-seg] predicting YOLO cell types')
+    for i in range(0, len(crop_list), batch_size):
+        batch_crops = crop_list[i : i + batch_size]
+
+        # Stack mini-batch and push to GPU
+        gpu_batch = torch.stack(batch_crops).to(device, non_blocking=True)
+
+        logits = torch_model(gpu_batch)
+        if isinstance(logits, (tuple, list)):
+            logits = logits[0]
+        elif hasattr(logits, 'logits'):
+            logits = logits.logits
+
+        probs = torch.softmax(logits, dim=1)
+
+        # Instantly pull back predictions to CPU memory
+        all_probs.append(probs.cpu())
+
+    # 4. Format predictions DataFrame
+    probs_cat = torch.cat(all_probs, dim=0)
+    confidences, top_class_ids = torch.max(probs_cat, dim=1)
+
+    probs_np = probs_cat.numpy()
+    confidences_np = confidences.numpy()
+    top_class_ids_np = top_class_ids.numpy()
+
+    pred_classes = [class_names_map[cid] for cid in top_class_ids_np]
+
+    df_out['yolo_pred_tissue'] = pred_classes
+    df_out['yolo_pred_confidence'] = confidences_np
+
+    df_probs = pd.DataFrame(
+        probs_np, columns=prob_col_names, index=df_out.index
+    )
+    df_out = pd.concat([df_out, df_probs], axis=1)
+
+    return df_out, class_names
+
+
+def create_yolo_classification_labels_layer(
+    viewer: napari.Viewer,
+    df_results: pd.DataFrame,
+    reference_labels_layer: napari.layers.Labels,
+    class_names_map: Union[dict, list, tuple] | None = None,
+    pred_column: str = 'yolo_pred_tissue',
+    layer_name: str = 'YOLO Classification',
+    scale: tuple | list | np.ndarray | None = None,
+    translate: tuple | list | np.ndarray | None = None,
+) -> napari.layers.Labels | None:
+    """Creates a new Napari Labels layer where each cell region is colored by its predicted YOLO class.
+    Vectorized using skimage.util.map_array for instant rendering.
+    """
+    if df_results.empty or pred_column not in df_results.columns:
+        print(
+            f"Skipping layer creation: '{pred_column}' not found in DataFrame."
+        )
+        return None
+
+    ref_data = reference_labels_layer.data
+
+    # Initialize class map with explicit background at 0
+    class_to_id = {'background': 0}
+
+    if class_names_map:
+        if isinstance(class_names_map, (list, tuple)):
+            for idx, cls_name in enumerate(class_names_map):
+                class_to_id[cls_name] = int(idx) + 1
+        elif isinstance(class_names_map, dict):
+            for cls_idx, cls_name in class_names_map.items():
+                class_to_id[cls_name] = int(cls_idx) + 1
+    else:
+        unique_classes = sorted(df_results[pred_column].dropna().unique())
+        for idx, cls_name in enumerate(unique_classes):
+            class_to_id[cls_name] = idx + 1
+
+    # Extract valid label IDs and map them directly to class IDs
+    valid_df = df_results.dropna(subset=[pred_column]).copy()
+
+    if 'label_id' in valid_df.columns:
+        input_label_ids = valid_df['label_id'].values.astype(ref_data.dtype)
+    else:
+        input_label_ids = valid_df.index.values.astype(ref_data.dtype)
+
+    # Map text class names -> numeric class IDs
+    mapped_class_ids = (
+        valid_df[pred_column]
+        .map(class_to_id)
+        .fillna(0)
+        .values.astype(np.uint32)
+    )
+
+    # Ensure background (0) remains 0
+    input_label_ids = np.append(input_label_ids, 0)
+    mapped_class_ids = np.append(mapped_class_ids, 0)
+
+    # Vectorized 1-pass C-remapping over the image
+    class_mask_data = map_array(
+        ref_data, input_vals=input_label_ids, output_vals=mapped_class_ids
+    )
+
+    properties = {
+        'class_id': list(class_to_id.values()),
+        'class_name': list(class_to_id.keys()),
+    }
+
+    new_layer = viewer.add_labels(
+        class_mask_data,
+        name=layer_name,
+        properties=properties,
+        scale=scale,
+        translate=translate,
+    )
+
+    return new_layer
+
+
+def remove_small_objects_safe(
+    ar: np.ndarray, max_size: int, **kwargs
+) -> np.ndarray:
+    """Safely calls remove_small_objects regardless of scikit-image version.
+
+    Handles the parameter name flip between min_size (<0.23, >=0.25) and
+    max_size (0.23-0.24).
+    """
+    if max_size <= 0:
+        return ar
+
+    sig = inspect.signature(remove_small_objects)
+
+    # 1. Try passing positional argument first (works across almost all versions)
+    try:
+        return remove_small_objects(ar, max_size, **kwargs)
+    except TypeError:
+        pass
+
+    # 2. Fall back to keyword argument matching based on signature
+    if 'max_size' in sig.parameters:
+        return remove_small_objects(ar, max_size=max_size, **kwargs)
+    else:
+        return remove_small_objects(ar, min_size=max_size, **kwargs)

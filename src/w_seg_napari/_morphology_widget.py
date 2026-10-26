@@ -5,15 +5,22 @@ from concurrent.futures import as_completed
 import napari
 import numpy as np
 import pandas as pd
-from magicgui.widgets import (
-    CheckBox,
-    ComboBox,
-    Container,
-    FloatSpinBox,
-    PushButton,
-    SpinBox,
+import torch
+from napari.qt.threading import thread_worker
+from napari.utils.colormaps import AVAILABLE_COLORMAPS, DirectLabelColormap
+from qtpy.QtCore import QSignalBlocker, Signal
+from qtpy.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from napari.utils.colormaps import DirectLabelColormap
 from scipy.ndimage import (
     binary_erosion,
     find_objects,
@@ -31,9 +38,13 @@ from skimage.segmentation import (
 )
 
 from w_seg_napari._wsegutils import (
+    YOLO_WEIGHT_URL_MAP,
     apply_feature_colormap,
     build_cell_contact_graph,
+    create_yolo_classification_labels_layer,
     extract_spatial_feature_matrix,
+    load_yolo_model,
+    predict_yolo_tissue_on_image,
 )
 
 # =========================================================================
@@ -910,7 +921,10 @@ def measure_cell_morphology(
     clear_borders: bool = True,
     invert_signal: bool = False,
     center_coords: tuple = None,
-    radial_symmetry: bool = False,
+    radial_sym: bool = False,
+    use_YOLO: bool = False,
+    YOLO_weights: str = '',
+    worker=None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -923,12 +937,12 @@ def measure_cell_morphology(
     if clear_borders:
         labels_layer = clean_border_cells(labels_layer)
     # Relabel from 1 to n
-    labels_layer = fix_labels(labels_layer)
+    # labels_layer = fix_labels(labels_layer)
     unique_ids = np.unique(labels_layer)
     unique_ids = unique_ids[unique_ids != 0]
 
     if len(unique_ids) == 0:
-        print('[w-seg] Warning: No labels found after border clearing.')
+        print('[w-seg] Warning: No labels found.')
         return pd.DataFrame(), labels_layer
 
     # Preprocess Signal
@@ -1017,6 +1031,14 @@ def measure_cell_morphology(
         }
         completed = 0
         for future in as_completed(future_to_cell):
+            # 1st cancellation check
+            if worker is not None and worker.abort_requested:
+                print(
+                    '\n[w-seg] Cancellation requested. Shutting down worker threads...'
+                )
+                executor.shutdown(wait=False, cancel_futures=True)
+                return pd.DataFrame(), labels_layer, {}
+
             cell_id = future_to_cell[future]
             try:
                 res = future.result()
@@ -1033,6 +1055,13 @@ def measure_cell_morphology(
                 print(f'\n[w-seg] Cell {cell_id} failed measurement: {e}')
 
             completed += 1
+            # Yield progress
+            if worker is not None:
+                yield (
+                    completed,
+                    tot_cells,
+                    f'Ray sampling: {completed}/{tot_cells} cells',
+                )
             if verbose:
                 sys.stdout.write(
                     f'\r[w-seg] Extracting cell wall features: {completed}/{tot_cells}'
@@ -1083,7 +1112,7 @@ def measure_cell_morphology(
         )
 
     # Check if center point is defined
-    if center_coords is None and radial_symmetry:
+    if center_coords is None and radial_sym:
         print('[w-seg] calculating center point')
         center_coords = resolve_center_coords(df_combined)
 
@@ -1091,482 +1120,882 @@ def measure_cell_morphology(
     df_combined = add_radial_features(
         df_combined,
         center_coords=center_coords,
-        enabled=radial_symmetry,
+        enabled=radial_sym,
         pixel_scale=pixel_spacing,
         angle_unit='degrees',
     )
 
+    # Classify cell crops using YOLO model
+    class_map = {}
+    if use_YOLO and YOLO_weights:
+        # 2nd Cancellation check
+        if worker is not None and worker.abort_requested:
+            return pd.DataFrame(), labels_layer, {}
+        if worker is not None:
+            yield (tot_cells, tot_cells, 'Running YOLO classification....')
+        print('[w-seg] Running YOLO cell-type classification...')
+        yolo_model = load_yolo_model(YOLO_weights)
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        # Load weights and insantiate YOLO model
+        weights_key = YOLO_weights
+        yolo_model = load_yolo_model(weights_key)
+        df_combined, class_map = predict_yolo_tissue_on_image(
+            df_new=df_combined,
+            image_np=raw_signal,
+            img_translation=None,
+            img_scale=None,
+            yolo_model=yolo_model,
+            target_size=256,
+            context_factor=2.5,
+            device=device,
+        )
+    if worker is not None and worker._abort_requested:
+        return pd.DataFrame(), labels_layer, {}
+    if worker is not None:
+        yield (tot_cells, tot_cells, 'Exctracting spatial feature matirx...')
     # Finally build and return spatial features for each cell
-    print('[w-seg] Extracting spatial features for all cells...')
     df_final = extract_spatial_feature_matrix(
         labels_layer, df_combined, search_radius=max_search_radius
     )
 
-    return df_final, labels_layer
+    return df_final, labels_layer, class_map
 
 
 # =========================================================================
-# Get morphology statistics class
+# MorphologyWidget: Napari GUI Container for Morphology Measurement and Visualization
 # =========================================================================
-# w_seg_napari/widgets/morphology_widget.py
 
 
-class MorphologyWidget(Container):
+class MorphologyWidget(QWidget):
     """
     Standalone Container class managing morphology calculation, feature colormap visualization,
     and ray tracing debugging in napari.
     """
 
-    def __init__(self, viewer: 'napari.Viewer'):
-        super().__init__(labels=True)
+    # Signal for passing measurement results back to tab4
+    measurement_finished_signal = Signal(pd.DataFrame, np.ndarray, str, dict)
+
+    def __init__(self, viewer: 'napari.Viewer', parent=None):
+        super().__init__(parent)
         self.viewer = viewer
+        self._current_worker = None
 
         # Internal state caches
         self.cached_df = None
         self.cached_labels_data = None
-        self.cached_feature_extraction_config = None
+        self.cached_feature_extraction_config = {}
 
         # Center point tracking
         self.center_layer_name = 'Center point'
         self.center_coords = None  # (y, x) coordinates of the center point
 
-        # ---------------------------------------------------------------------
-        # 1. Instantiate UI Controls
-        # ---------------------------------------------------------------------
-        self.labels_layer = ComboBox(
-            label='Labels Layer:', annotation='napari.layers.Labels'
+        # Build UI & Connect Signals
+        self._init_ui()
+        self._connect_signals()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        # -----------------------------------------------------------------
+        # LAYER SELECTION GROUP (Form Layout)
+        # -----------------------------------------------------------------
+        layer_group = QGroupBox('Layer Selection')
+        layer_layout = QFormLayout()
+
+        self.labels_combo = QComboBox()
+        self.signal_combo = QComboBox()
+
+        layer_layout.addRow('Labels Layer:', self.labels_combo)
+        layer_layout.addRow('Signal Layer:', self.signal_combo)
+        layer_group.setLayout(layer_layout)
+        layout.addWidget(layer_group)
+
+        # -----------------------------------------------------------------
+        # MORPHOLOGY PARAMETERS GROUP (Form Layout)
+        # -----------------------------------------------------------------
+        params_group = QGroupBox('Sampling Parameters')
+        params_layout = QFormLayout()
+
+        self.pixel_spacing_spin = QDoubleSpinBox()
+        self.pixel_spacing_spin.setRange(0.001, 100.0)
+        self.pixel_spacing_spin.setValue(1.0)
+
+        self.max_search_spin = QSpinBox()
+        self.max_search_spin.setRange(1, 200)
+        self.max_search_spin.setValue(30)
+
+        self.min_search_spin = QSpinBox()
+        self.min_search_spin.setRange(2, 10)
+        self.min_search_spin.setValue(4)
+
+        self.radius_scale_spin = QDoubleSpinBox()
+        self.radius_scale_spin.setRange(0.1, 1.0)
+        self.radius_scale_spin.setValue(0.33)
+
+        self.expand_labs_spin = QSpinBox()
+        self.expand_labs_spin.setRange(0, 20)
+        self.expand_labs_spin.setValue(4)
+
+        self.erode_labs_spin = QSpinBox()
+        self.erode_labs_spin.setRange(1, 20)
+        self.erode_labs_spin.setValue(4)
+
+        self.sample_step_spin = QSpinBox()
+        self.sample_step_spin.setRange(1, 50)
+        self.sample_step_spin.setValue(3)
+
+        self.max_rays_spin = QSpinBox()
+        self.max_rays_spin.setRange(5, 1000)
+        self.max_rays_spin.setValue(80)
+
+        self.offset_spin = QDoubleSpinBox()
+        self.offset_spin.setRange(-10.0, 15.0)
+        self.offset_spin.setValue(0.5)
+
+        self.num_workers_spin = QSpinBox()
+        self.num_workers_spin.setRange(1, 32)
+        self.num_workers_spin.setValue(8)
+
+        # Add pairs directly to the form
+        params_layout.addRow('Pixel Spacing (um/px):', self.pixel_spacing_spin)
+        params_layout.addRow('Max Search Radius (px):', self.max_search_spin)
+        params_layout.addRow('Min Search Radius (px):', self.min_search_spin)
+        params_layout.addRow('Ray search scale:', self.radius_scale_spin)
+        params_layout.addRow('Label Expansion (px):', self.expand_labs_spin)
+        params_layout.addRow('Lumen Erosion (px):', self.erode_labs_spin)
+        params_layout.addRow('Ray Sampling step:', self.sample_step_spin)
+        params_layout.addRow('Max Ray samples:', self.max_rays_spin)
+        params_layout.addRow('Threshold Offset (σ):', self.offset_spin)
+        params_layout.addRow('Parallel Threads:', self.num_workers_spin)
+
+        # Checkboxes spans both columns
+        self.clear_border_cb = QCheckBox('Clear Border Cells')
+        self.clear_border_cb.setChecked(False)
+        self.invert_signal_cb = QCheckBox('Invert Signal Intensity')
+        self.invert_signal_cb.setChecked(True)
+        self.show_processed_signal_cb = QCheckBox(
+            'Show processed Signal Image'
         )
-        self.signal_layer = ComboBox(
-            label='Signal Image / Pred:',
-            annotation='napari.layers.Image',
-            nullable=True,
+        self.radial_symmetry_cb = QCheckBox(
+            'Use Radial Symmetry and center point'
         )
 
-        self.pixel_spacing = FloatSpinBox(
-            label='Pixel Scale (µm/px):',
-            value=1.0,
-            min=0.001,
-            max=100.0,
-            step=0.01,
-        )
-        self.max_search_radius = SpinBox(
-            label='Max Ray Search Radius (px):', value=30, min=10, max=150
-        )
-        self.min_search_radius = SpinBox(
-            label='Min Ray Search Radius (px)', value=4, min=2, max=10
-        )
-        self.radius_scale = FloatSpinBox(
-            label='Ray Search scale',
-            value=0.33,
-            min=0.1,
-            max=1.0,
-            step=0.05,
-        )
-        self.expand_labs_dist = SpinBox(
-            label='Label Expansion (px):', value=4, min=0, max=20
-        )
-        self.erode_labs = SpinBox(
-            label='Lumen Erosion (px):', value=4, min=1, max=20
-        )
-        self.sample_step = SpinBox(
-            label='Ray Sampling Step:', value=3, min=1, max=10
-        )
-        self.max_rays = SpinBox(
-            label='Max ray samples:', value=80, min=5, max=1000
-        )
-        self.offset = FloatSpinBox(
-            label='Threshold Offset (σ):',
-            value=0.5,
-            min=-10.0,
-            max=15.0,
-            step=0.05,
-        )
-        self.num_workers = SpinBox(
-            label='Parallel Threads:', value=8, min=1, max=32
-        )
-        # Checkboxes for boolean options
-        self.clear_borders = CheckBox(label='Clear Border Cells:', value=False)
-        self.invert_signal = CheckBox(
-            label='Invert Signal Polarity (1 - S):', value=True
-        )
-        self.show_processed_signal = CheckBox(
-            label='Show Processed Signal Image:', value=False
-        )
-        self.radial_symmetry = CheckBox(
-            label='Use Radial Symmetry and center point:', value=True
-        )
-        self.set_center_point_btn = PushButton(text='Set Center Point')
-        self.run_btn = PushButton(text='Measure Cell Walls & Morphology')
+        params_layout.addRow(self.clear_border_cb)
+        params_layout.addRow(self.invert_signal_cb)
+        params_layout.addRow(self.show_processed_signal_cb)
+        params_layout.addRow(self.radial_symmetry_cb)
 
-        # Visualization controls
-        self.feature_to_plot = ComboBox(
-            label='Feature to Visualize:', choices=['mean_wall_thickness']
-        )
-        self.colormap = ComboBox(
-            label='Colormap:',
-            choices=[
-                'viridis',
-                'magma',
-                'plasma',
-                'inferno',
-                'coolwarm',
-                'turbo',
-            ],
-        )
-        self.vis_btn = PushButton(text='Visualize Feature Map')
+        params_group.setLayout(params_layout)
+        layout.addWidget(params_group)
 
-        # Ray inspection controls
-        self.inspect_cell_id = SpinBox(
-            label='Label ID to Inspect:', value=1, min=1, max=99999
+        # -----------------------------------------------------------------
+        # YOLO SETTINGS GROUP (Form Layout)
+        # -----------------------------------------------------------------
+        YOLO_group = QGroupBox('YOLO Parameters')
+        YOLO_layout = QFormLayout()
+
+        self.use_YOLO_cb = QCheckBox('Use YOLO Classifier')
+        self.use_YOLO_cb.setChecked(True)
+        self.YOLO_layer_combo = QComboBox()
+        self.YOLO_weights_combo = QComboBox()
+        self.YOLO_weights_combo.addItems(list(YOLO_WEIGHT_URL_MAP.keys()))
+
+        YOLO_layout.addRow(self.use_YOLO_cb)
+        YOLO_layout.addRow('RGB image for YOLO:', self.YOLO_layer_combo)
+        YOLO_layout.addRow('Select YOLO weights:', self.YOLO_weights_combo)
+
+        YOLO_group.setLayout(YOLO_layout)
+        layout.addWidget(YOLO_group)
+
+        # -----------------------------------------------------------------
+        # ACTION CONTROL GROUP (Vertical + Horizontal Button Pair)
+        # -----------------------------------------------------------------
+        action_group = QGroupBox('Measure Morphology')
+        action_layout = QVBoxLayout()
+
+        self.set_center_point_btn = QPushButton('Manually Set Center Point')
+
+        self.run_btn = QPushButton('Measure Cell Walls & Morphology')
+        self.run_btn.setStyleSheet(
+            'font-weight: bold; background-color: #2b5b84; color: white; padding: 6px; border-radius: 4px;'
         )
-        self.draw_rays_btn = PushButton(text='Draw Sampling Rays')
 
-        # Neighbour inspection
-        self.draw_neighbours_btn = PushButton(text='Draw Neighbours')
+        self.cancel_btn = QPushButton('Cancel Measurement')
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setStyleSheet(
+            'font-weight: bold; background-color: #8b2626; color: white; padding: 6px; border-radius: 4px;'
+        )
 
-        # Connect center point button to callback and layer visibility toggle
-        self.radial_symmetry.changed.connect(self._on_radial_symmetry_toggled)
-        # Connect push button to activate interactive point selection in Napari
-        self.set_center_point_btn.changed.connect(
+        # Side-by-side run / cancel buttons
+        run_cancel_layout = QHBoxLayout()
+        run_cancel_layout.addWidget(self.run_btn)
+        run_cancel_layout.addWidget(self.cancel_btn)
+
+        action_layout.addWidget(self.set_center_point_btn)
+        action_layout.addLayout(run_cancel_layout)
+
+        action_group.setLayout(action_layout)
+        layout.addWidget(action_group)
+
+        # -----------------------------------------------------------------
+        # VISUALIZATION GROUP (Form Layout)
+        # -----------------------------------------------------------------
+        vis_group = QGroupBox('Feature Visualization')
+        vis_layout = QFormLayout()
+
+        self.feature_combo = QComboBox()
+        self.colormap_combo = QComboBox()
+        self.vis_btn = QPushButton('Visualize Feature Map')
+
+        colormap_names = sorted(AVAILABLE_COLORMAPS.keys())
+        self.colormap_combo.addItems(colormap_names)
+        default_cmap = 'viridis'
+        if default_cmap in colormap_names:
+            self.colormap_combo.setCurrentText(default_cmap)
+
+        vis_layout.addRow('Feature to Visualize:', self.feature_combo)
+        vis_layout.addRow('Colormap:', self.colormap_combo)
+        vis_layout.addRow(self.vis_btn)
+
+        vis_group.setLayout(vis_layout)
+        layout.addWidget(vis_group)
+
+        # -----------------------------------------------------------------
+        # INSPECTION TOOLS (Form Layout + Horizontal Buttons)
+        # -----------------------------------------------------------------
+        inspect_group = QGroupBox('Label Inspection Tools')
+        inspect_layout = QFormLayout()
+
+        self.inspect_cell_id_spin = QSpinBox()
+        self.inspect_cell_id_spin.setRange(1, 999999)
+        self.inspect_cell_id_spin.setValue(1)
+
+        self.draw_rays_btn = QPushButton('Draw Sampling Rays')
+        self.draw_neighbours_btn = QPushButton('Draw Neighbours')
+
+        inspect_btn_layout = QHBoxLayout()
+        inspect_btn_layout.addWidget(self.draw_rays_btn)
+        inspect_btn_layout.addWidget(self.draw_neighbours_btn)
+
+        inspect_layout.addRow(
+            'Label ID to inspect:', self.inspect_cell_id_spin
+        )
+        inspect_layout.addRow(inspect_btn_layout)
+
+        inspect_group.setLayout(inspect_layout)
+        layout.addWidget(inspect_group)
+
+        layout.addStretch()
+
+    # -------------------------------------------------------------------------
+    # Callbacks
+    # -------------------------------------------------------------------------
+    def _connect_signals(self):
+        """Connects all PyQt/PySide UI signals, button callbacks, and Napari viewer listeners."""
+        # --- Action Button Connections ---
+        self.set_center_point_btn.clicked.connect(
             self._enable_center_point_picking
         )
-        # Initialize state sync
-        self._on_radial_symmetry_toggled(self.radial_symmetry.value)
-
-        # ---------------------------------------------------------------------
-        # 2. Add Controls to Widget Container
-        # ---------------------------------------------------------------------
-        self.extend(
-            [
-                self.labels_layer,
-                self.signal_layer,
-                self.pixel_spacing,
-                self.max_search_radius,
-                self.min_search_radius,
-                self.radius_scale,
-                self.expand_labs_dist,
-                self.erode_labs,
-                self.sample_step,
-                self.max_rays,
-                self.offset,
-                self.num_workers,
-                self.clear_borders,
-                self.invert_signal,
-                self.show_processed_signal,
-                self.radial_symmetry,
-                self.set_center_point_btn,
-                self.run_btn,
-                self.feature_to_plot,
-                self.colormap,
-                self.vis_btn,
-                self.inspect_cell_id,
-                self.draw_rays_btn,
-                self.draw_neighbours_btn,
-            ]
-        )
-
-        # ---------------------------------------------------------------------
-        # 3. Connect Event Handlers
-        # ---------------------------------------------------------------------
-        self.run_btn.changed.connect(self._on_measure_clicked)
-        self.vis_btn.changed.connect(self._on_visualize_clicked)
-        self.draw_rays_btn.changed.connect(self._on_draw_rays_clicked)
-        self.draw_neighbours_btn.changed.connect(
+        self.run_btn.clicked.connect(self._on_measure_clicked)
+        self.cancel_btn.clicked.connect(self._on_cancel_clicked)
+        self.vis_btn.clicked.connect(self._on_visualize_clicked)
+        self.draw_rays_btn.clicked.connect(self._on_draw_rays_clicked)
+        self.draw_neighbours_btn.clicked.connect(
             self._on_draw_neighbours_clicked
         )
 
+        # --- Checkbox Dependent UI Toggles ---
+        # YOLO Controls enable/disable
+        self.use_YOLO_cb.toggled.connect(self.YOLO_weights_combo.setEnabled)
+        self.use_YOLO_cb.toggled.connect(self.YOLO_layer_combo.setEnabled)
+        self.YOLO_weights_combo.setEnabled(self.use_YOLO_cb.isChecked())
+        self.YOLO_layer_combo.setEnabled(self.use_YOLO_cb.isChecked())
+
+        # Radial Symmetry / Center Point Button toggle
+        self.radial_symmetry_cb.toggled.connect(
+            self._on_radial_symmetry_toggled
+        )
+        self.set_center_point_btn.setEnabled(
+            self.radial_symmetry_cb.isChecked()
+        )
+
+        # --- Dropdown Selection Sync ---
+        # Update spinbox bounds when selected label layer changes
+        self.labels_combo.currentIndexChanged.connect(
+            self._update_inspection_bounds
+        )
+
+        # --- Napari Layer List Event Listeners ---
         if self.viewer is not None:
+            # Refresh layer combo boxes on layer addition, removal, or reordering
             self.viewer.layers.events.inserted.connect(
                 self.refresh_layer_choices
             )
             self.viewer.layers.events.removed.connect(
                 self.refresh_layer_choices
             )
-            self.viewer.layers.events.changed.connect(
+            self.viewer.layers.events.reordered.connect(
                 self.refresh_layer_choices
             )
-            self.labels_layer.changed.connect(self.refresh_layer_choices)
+
+            # Initial populating of layer choices
             self.refresh_layer_choices()
 
-    # -------------------------------------------------------------------------
-    # Callbacks
-    # -------------------------------------------------------------------------
     def _on_measure_clicked(self):
-        lbl_layer = self.labels_layer.value
-        sig_layer = self.signal_layer.value
+        """Snapshots parameters on main thread and launches background measurement worker."""
+        if self._current_worker is not None:
+            print('[w-seg] Job already running. Please wait or cancel.')
+            return
 
-        if lbl_layer is None:
+        lbl_layer = self.labels_combo.currentData()
+        sig_layer = self.signal_combo.currentData()
+
+        if lbl_layer is None or lbl_layer.data is None:
             print('[w-seg] Error: Please select a valid Labels layer.')
             return
 
+        # 1. Snapshot UI parameters ON MAIN THREAD prior to worker thread start
         lbl_data = lbl_layer.data
         sig_data = sig_layer.data if sig_layer is not None else None
 
-        # Execute standalone backend engine function
-        df_results, measured_labels_layer = measure_cell_morphology(
-            labels_layer=lbl_data,
-            cell_wall_signal=sig_data,
-            pixel_spacing=self.pixel_spacing.value,
-            max_search_radius=self.max_search_radius.value,
-            min_search_radius=self.min_search_radius.value,
-            radius_scale=self.radius_scale.value,
-            sample_step=self.sample_step.value,
-            max_rays=self.max_rays.value,
-            offset=self.offset.value,
-            erode_labs=self.erode_labs.value,
-            expand_labs_dist=self.expand_labs_dist.value,
-            num_workers=self.num_workers.value,
-            invert_signal=self.invert_signal.value,
-            center_coords=self.center_coords,
-            radial_symmetry=self.radial_symmetry,
-            clear_borders=self.clear_borders.value,
-        )
+        fe_config = self.get_feature_extraction_config()
+        num_workers = self.num_workers_spin.value()
+        invert_signal = self.invert_signal_cb.isChecked()
+        use_yolo = self.use_YOLO_cb.isChecked()
+        yolo_weights = self.YOLO_weights_combo.currentText()
+        clear_borders = self.clear_border_cb.isChecked()
+        center_coords = self.center_coords
+
+        # Snapshot worker reference on main thread
+        worker_ref = None
+
+        @thread_worker
+        def run_measurement_worker():
+            return (
+                yield from measure_cell_morphology(
+                    labels_layer=lbl_data,
+                    cell_wall_signal=sig_data,
+                    num_workers=num_workers,
+                    invert_signal=invert_signal,
+                    center_coords=center_coords,
+                    use_YOLO=use_yolo,
+                    YOLO_weights=yolo_weights,
+                    clear_borders=clear_borders,
+                    worker=worker_ref,
+                    **fe_config,
+                )
+            )
+
+        self._current_worker = run_measurement_worker()
+        worker_ref = self._current_worker
+
+        # 4. Connect worker Qt signals
+        self._current_worker.yielded.connect(self._on_yield_progress)
+        self._current_worker.returned.connect(self._on_measurement_finished)
+        self._current_worker.finished.connect(self._on_worker_finished)
+        self._current_worker.errored.connect(self._on_worker_errored)
+
+        # 5. Update Qt UI Controls
+        self.run_btn.setEnabled(False)
+        self.run_btn.setText('Measuring...')
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setText('Cancel Measurement')
+
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setValue(0)
+            self.progress_bar.setVisible(True)
+
+        # Start thread execution
+        self._current_worker.start()
+
+    def _on_cancel_clicked(self):
+        """Triggers cancellation request on active thread worker."""
+        if self._current_worker is not None:
+            self.cancel_btn.setText('Cancelling...')
+            self.cancel_btn.setEnabled(False)
+            self._current_worker.quit()  # Signals worker.abort_requested = True
+
+    def _on_yield_progress(self, progress_info):
+        """Runs on UI thread whenever worker yields (completed, total, status_msg)."""
+        if not progress_info or len(progress_info) < 3:
+            return
+
+        completed, total, status_msg = progress_info
+
+        # Update Napari status bar
+        if self.viewer is not None:
+            self.viewer.status = f'[w-seg] {status_msg}'
+
+        # Update QProgressBar if available
+        if hasattr(self, 'progress_bar') and total > 0:
+            progress_pct = int((completed / total) * 100)
+            self.progress_bar.setValue(progress_pct)
+
+    def _on_measurement_finished(self, return_value):
+        """Runs on UI thread when measure_cell_morphology completes and returns data."""
+        if not return_value:
+            print('[w-seg] Measurement returned no results or was cancelled.')
+            return
+
+        df_results, measured_labels_data, class_map = return_value
 
         # Cache data directly on instance
         self.cached_df = df_results
-        self.cached_labels_data = measured_labels_layer
+        self.cached_labels_data = measured_labels_data
         self.cached_feature_extraction_config = (
             self.get_feature_extraction_config()
         )
 
-        # Pass data to classifier widget
-        if (
-            hasattr(self, 'classification_widget')
-            and self.classification_widget is not None
-        ):
-            self.classification_widget.bind_measured_data(
-                df=self.cached_df,
-                labels_data=self.cached_labels_data,
-                layer_name=lbl_layer.name,
-                feature_extraction_config=self.cached_feature_extraction_config,  # <-- CRITICAL PASS
-            )
+        if df_results.empty:
+            print('[w-seg] Measurement returned empty dataframe.')
+            return
 
-        # Update available numeric features dropdown
-        numeric_cols = [
-            c
-            for c in df_results.select_dtypes(include=[np.number]).columns
-            if c not in ['label_id', 'bbox-0', 'bbox-1', 'bbox-2', 'bbox-3']
-        ]
-        self.feature_to_plot.choices = numeric_cols
-        if 'mean_wall_thickness' in numeric_cols:
-            self.feature_to_plot.value = 'mean_wall_thickness'
+        # Pass signal to tab4 for downstream processing
+        self.measurement_finished_signal.emit(
+            df_results,
+            measured_labels_data,
+            self.labels_combo.currentText(),
+            self.cached_feature_extraction_config,
+        )
 
-        print('[w-seg] Done!')
+        # Populate numeric features dropdown for visualization
+        self._update_feature_dropdown(df_results)
+
+        # Create YOLO Cell Types overlay layer if classification map returned
+        if self.use_YOLO_cb.isChecked() and class_map:
+            ref_layer = self.labels_combo.currentData()
+            if ref_layer is not None:
+                create_yolo_classification_labels_layer(
+                    viewer=self.viewer,
+                    df_results=df_results,
+                    reference_labels_layer=ref_layer,
+                    class_names_map=class_map,
+                    pred_column='yolo_pred_tissue',
+                    layer_name='YOLO Cell Types',
+                    scale=getattr(ref_layer, 'scale', None),
+                    translate=getattr(ref_layer, 'translate', None),
+                )
+
+        print(f'[w-seg] Successfully processed {len(df_results)} cells!')
+
+    def _on_worker_finished(self):
+        """Resets buttons and progress UI when worker finishes normally or aborts."""
+        self._current_worker = None
+        self.run_btn.setEnabled(True)
+        self.run_btn.setText('Measure Cell Walls & Morphology')
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText('Cancel Measurement')
+
+        if hasattr(self, 'progress_bar'):
+            self.progress_bar.setVisible(False)
+
+    def _on_worker_errored(self, exc):
+        """Handles background exceptions raised inside worker thread."""
+        print(f'[w-seg] Worker error occurred: {exc}')
+        self._on_worker_finished()
 
     def _on_visualize_clicked(self):
-        lbl_layer = self.labels_layer.value
-        feat = self.feature_to_plot.value
-        cmap = self.colormap.value
+        """Maps quantitative cell feature values onto a copy of the Labels layer using a custom colormap."""
+        lbl_layer = self.labels_combo.currentData()
+        feat = self.feature_combo.currentText()
+        cmap = self.colormap_combo.currentText()
 
-        if (
-            lbl_layer is None
-            or self.cached_df is None
-            or self.cached_labels_data is None
-        ):
-            print('[w-seg] Please select a layer and run measurements first.')
+        if lbl_layer is None or lbl_layer.data is None:
+            print('[w-seg] Error: Please select a valid Labels layer.')
             return
 
-        if feat not in self.cached_df.columns:
-            print(f"[w-seg] Feature '{feat}' not found in calculated data.")
+        df_metrics = getattr(self, 'cached_df', None)
+        if df_metrics is None or df_metrics.empty:
+            print(
+                '[w-seg] Error: No cached measurement data found. Run measurements first.'
+            )
             return
 
+        if feat not in df_metrics.columns:
+            print(
+                f"[w-seg] Error: Feature '{feat}' not found in measurement results."
+            )
+            return
+
+        # Extract spatial transform metadata to align colormapped overlay with original image
+        layer_scale = getattr(lbl_layer, 'scale', (1.0, 1.0))
+        layer_translate = getattr(lbl_layer, 'translate', (0.0, 0.0))
+
+        # Colorize features directly on the Napari layer
         apply_feature_colormap(
             viewer=self.viewer,
             base_layer_name=lbl_layer.name,
-            labels_layer=self.cached_labels_data,
-            df_features=self.cached_df,
+            labels_layer=lbl_layer.data,
+            df_features=df_metrics,
             feature_name=feat,
             cmap_name=cmap,
+            scale=layer_scale,
+            translate=layer_translate,
         )
 
-    def _on_draw_rays_clicked(self):
-        lbl_layer = self.labels_layer.value
-        sig_layer = self.signal_layer.value
+    def _update_feature_dropdown(self, df: pd.DataFrame):
+        """Populates the feature selection combobox with numerical columns from measurement results."""
+        if df is None or df.empty:
+            return
 
-        if lbl_layer is None:
-            print('[w-seg] Select a Labels layer first.')
+        # Block signals during combobox update to prevent premature triggers
+        _blocker = QSignalBlocker(self.feature_combo)
+
+        cur_feature = self.feature_combo.currentText()
+        self.feature_combo.clear()
+
+        # Filter out non-numeric and identifier metadata columns
+        exclude_cols = {
+            'label',
+            'label_id',
+            'centroid-0',
+            'centroid-1',
+            'bbox-0',
+            'bbox-1',
+            'bbox-2',
+            'bbox-3',
+        }
+        numeric_df = df.select_dtypes(include=['number'])
+        numeric_cols = [
+            col for col in numeric_df.columns if col not in exclude_cols
+        ]
+
+        self.feature_combo.addItems(numeric_cols)
+
+        # Restore previous feature selection if still available
+        idx = self.feature_combo.findText(cur_feature)
+        if idx != -1:
+            self.feature_combo.setCurrentIndex(idx)
+
+    def _on_draw_rays_clicked(self):
+        """Visualizes sampling rays and profiles for the targeted cell ID in Napari."""
+        lbl_layer = self.labels_combo.currentData()
+        sig_layer = self.signal_combo.currentData()
+
+        if lbl_layer is None or lbl_layer.data is None:
+            print('[w-seg] Error: Select a valid Labels layer first.')
+            return
+
+        target_id = self.inspect_cell_id_spin.value()
+
+        # Verify the target label ID actually exists in the layer
+        if target_id not in lbl_layer.data:
+            print(
+                f'[w-seg] Warning: Label ID {target_id} not found in active Labels layer.'
+            )
             return
 
         visualize_cell_rays(
             viewer=self.viewer,
             labels_layer=lbl_layer.data,
-            cell_wall_signal=sig_layer.data if sig_layer else None,
-            target_label_id=int(self.inspect_cell_id.value),
-            max_search_radius=self.max_search_radius.value,
-            min_search_radius=self.min_search_radius.value,
-            radius_scale=self.radius_scale.value,
-            expand_labs_dist=self.expand_labs_dist.value,
-            erode_labs=self.erode_labs.value,
-            sample_step=self.sample_step.value,
-            max_rays=self.max_rays.value,
-            offset=self.offset.value,
-            invert_signal=self.invert_signal.value,
-            show_processed_signal=self.show_processed_signal.value,
+            cell_wall_signal=sig_layer.data if sig_layer is not None else None,
+            target_label_id=target_id,
+            max_search_radius=self.max_search_spin.value(),
+            min_search_radius=self.min_search_spin.value(),
+            radius_scale=self.radius_scale_spin.value(),
+            expand_labs_dist=self.expand_labs_spin.value(),
+            erode_labs=self.erode_labs_spin.value(),
+            sample_step=self.sample_step_spin.value(),
+            max_rays=self.max_rays_spin.value(),
+            offset=self.offset_spin.value(),
+            invert_signal=self.invert_signal_cb.isChecked(),
+            show_processed_signal=self.show_processed_signal_cb.isChecked(),
         )
 
     def _on_draw_neighbours_clicked(self):
-        lbl_layer = self.labels_layer.value
+        """Visualizes spatial neighbor connections and Delaunay fallback vectors for the targeted cell ID."""
+        lbl_layer = self.labels_combo.currentData()
 
-        if lbl_layer is None:
-            print('[w-seg] Select a Labels layer first.')
+        if lbl_layer is None or lbl_layer.data is None:
+            print('[w-seg] Error: Select a valid Labels layer first.')
             return
+
+        target_id = self.inspect_cell_id_spin.value()
+
+        if target_id not in lbl_layer.data:
+            print(
+                f'[w-seg] Warning: Label ID {target_id} not found in active Labels layer.'
+            )
+            return
+
+        # Check if we have cached dataframe measurements to extract true cell-wall contact neighbors
+        df_metrics = getattr(self, 'df_single_cell_metrics', None)
+
         visualize_cell_neighborhood(
             viewer=self.viewer,
-            cell_id=int(self.inspect_cell_id.value),
+            cell_id=target_id,
             labels_layer=lbl_layer.data,
-            df_single_cell_metrics=None,
-            search_radius=self.max_search_radius.value,
+            df_single_cell_metrics=df_metrics,
+            search_radius=float(self.max_search_spin.value()),
             use_delaunay_fallback=True,
             max_delaunay_dist_px=120.0,
         )
 
-    def _on_radial_symmetry_toggled(self, value=None):
-        """Enable/disable the center point button based on checkbox"""
-        enabled = (
-            bool(value) if value is not None else self.radial_symmetry.value
+    def _init_center_point_signals(self):
+        """Connect center point UI signals. Call this in _connect_signals()."""
+        # Connect checkbox toggle
+        self.radial_symmetry_cb.toggled.connect(
+            self._on_radial_symmetry_toggled
         )
-        self.set_center_point_btn.enabled = enabled
+
+        # Connect button click
+        self.set_center_point_btn.clicked.connect(
+            self._enable_center_point_picking
+        )
+
+        # Initial UI statesync
+        self._on_radial_symmetry_toggled(self.radial_symmetry_cb.isChecked())
+
+    def _on_radial_symmetry_toggled(self, checked: bool):
+        """Enable/disable the center point button and layer visibility based on checkbox."""
+        self.set_center_point_btn.setEnabled(checked)
+
         if self.center_layer_name in self.viewer.layers:
-            self.viewer.layers[self.center_layer_name].visible = enabled
+            self.viewer.layers[self.center_layer_name].visible = checked
 
     def _ensure_center_point_layer(self):
-        """Create aor get the dedicate Points layer for center point selection."""
+        """Create or retrieve the dedicated Points layer for center point selection."""
         if self.viewer is None:
-            return
+            return None
 
         if self.center_layer_name in self.viewer.layers:
             layer = self.viewer.layers[self.center_layer_name]
             layer.visible = True
             return layer
 
-        return self.viewer.add_points(
-            data=np.empty((0, 2)),
+        # Determine ND dimensions from existing layers
+        ndim = self.viewer.dims.ndim if hasattr(self.viewer, 'dims') else 2
+
+        layer = self.viewer.add_points(
+            data=np.empty((0, ndim)),
             name=self.center_layer_name,
-            size=7,
+            size=10,
             face_color='green',
             symbol='cross',
             opacity=0.8,
         )
 
-    def _enable_center_point_picking(self, *args):
-        """Set active layer to Center Point layer and attach click listener."""
+        # Connect layer data event listener for external edits/deletions
+        layer.events.data.connect(self._on_point_data_changed)
+        return layer
+
+    def _enable_center_point_picking(self):
+        """Set active layer to Center Point layer and activate click listener."""
         layer = self._ensure_center_point_layer()
+        if layer is None:
+            return
+
         self.viewer.layers.selection.active = layer
+
+        # Change button visual style to reflect active picking state
+        self.set_center_point_btn.setStyleSheet(
+            'background-color: #2e6f40; color: white; font-weight: bold; padding: 6px; border-radius: 4px;'
+        )
 
         # Ensure we don't attach duplicate callbacks
         if self._on_center_point_clicked not in layer.mouse_drag_callbacks:
             layer.mouse_drag_callbacks.append(self._on_center_point_clicked)
 
-        # Set layer mode to select so standard point adding doesn't fight our callback
-        layer.mode = 'select'
-
-    def _on_point_added(self, event):
-        """Enforce single point behavior without triggering infinite recursion."""
-        if self.center_layer_name not in self.viewer.layers:
-            return
-
-        layer = self.viewer.layers[self.center_layer_name]
-
-        if len(layer.data) > 1:
-            # Block events while updating layer.data to prevent infinite recursion
-            with layer.events.data.blocker():
-                layer.data = layer.data[-1:]
-
-        if len(layer.data) > 0:
-            self.center_coords = layer.data[0]
+        # Switch mode to add points
+        layer.mode = 'add'
 
     def _on_center_point_clicked(self, layer, event):
-        """Single-point picker that bypasses event-loop recursion."""
+        """Single-point picker that captures position on click release."""
         # Only handle left clicks
         if event.button != 1:
             return
 
-        yield  # Wait until mouse release / click completes
+        yield  # Wait until mouse release completes
 
-        # Get spatial cursor position (y, x) from world coordinates
-        cursor_pos = self.viewer.cursor.position
-        if len(cursor_pos) == 3:
-            coords = np.array([[cursor_pos[1], cursor_pos[2]]])
+        # Extract cursor coordinates in layer data spatial coordinates
+        pos = event.position  # Yields tuple matching layer spatial dimensions
+
+        # Format coordinates array matching layer ndim
+        coords = np.array([pos])
+
+        # Overwrite layer data with single new point using event blocker to avoid loop recursion
+        with layer.events.data.blocker():
+            layer.data = coords
+
+        # Store 2D (y, x) or 3D (z, y, x) coordinates internally
+        self.center_coords = tuple(pos)
+        print(f'[w-seg] Center point set at coordinates: {self.center_coords}')
+
+        # Self-cleanup: remove callback and reset interactive states
+        if self._on_center_point_clicked in layer.mouse_drag_callbacks:
+            layer.mouse_drag_callbacks.remove(self._on_center_point_clicked)
+
+        layer.mode = 'pan_zoom'
+
+        # Reset button visual state
+        self.set_center_point_btn.setStyleSheet(
+            'font-weight: bold; background-color: #2b5b84; color: white; padding: 6px; border-radius: 4px;'
+        )
+
+    def _on_point_data_changed(self, event):
+        """Syncs internal center_coords state if user edits or clears points manually."""
+        layer = event.source
+        if len(layer.data) == 0:
+            self.center_coords = None
         else:
-            coords = np.array([[cursor_pos[0], cursor_pos[1]]])
-
-        # Directly overwrite layer data with the single new point
-        # Modifying layer.data here will NOT trigger mouse_drag_callbacks!
-        layer.data = coords
-        self.center_coords = coords[0]
-        print(f'Center point set at (y, x): {self.center_coords}')
+            # Enforce maximum 1 point limit on manual point addition
+            if len(layer.data) > 1:
+                with layer.events.data.blocker():
+                    layer.data = layer.data[-1:]
+            self.center_coords = tuple(layer.data[0])
 
     def refresh_layer_choices(self, event=None):
+        """Populates combo boxes with current napari layers based on type
+
+        and restores previous selections cleanly without triggering signals.
+        """
         if self.viewer is None:
             return
 
-        # Synchronize Napari layers with ComboBoxes
-        label_layers = [
-            lay
-            for lay in self.viewer.layers
-            if isinstance(lay, napari.layers.Labels)
-        ]
-        image_layers = [
-            lay
-            for lay in self.viewer.layers
-            if isinstance(lay, napari.layers.Image)
-        ]
+        # Block signals during combobox updates to avoid cascading callbacks
+        _b1 = QSignalBlocker(self.labels_combo)
+        _b2 = QSignalBlocker(self.signal_combo)
+        _b3 = QSignalBlocker(self.YOLO_layer_combo)
 
-        self.labels_layer.choices = label_layers
-        self.signal_layer.choices = image_layers
+        # Cache previous layer names rather than raw layer instances
+        cur_label_name = self.labels_combo.currentText()
+        cur_signal_name = self.signal_combo.currentText()
+        cur_yolo_name = self.YOLO_layer_combo.currentText()
 
-        # Update available label IDs for inspect_cell_id
-        if self.labels_layer.value is not None:
-            lbls = self.labels_layer.value.data
-            unique_ids = sorted([int(x) for x in np.unique(lbls) if x != 0])
-            if unique_ids:
-                self.inspect_cell_id.choices = unique_ids
+        self.labels_combo.clear()
+        self.signal_combo.clear()
+        self.YOLO_layer_combo.clear()
+
+        # Re-populate choices with current viewer layers
+        for lyr in self.viewer.layers:
+            if isinstance(lyr, napari.layers.Labels):
+                self.labels_combo.addItem(lyr.name, lyr)
+            elif isinstance(lyr, napari.layers.Image):
+                self.signal_combo.addItem(lyr.name, lyr)
+                self.YOLO_layer_combo.addItem(lyr.name, lyr)
+
+        # Restore previous selection by layer name if still present
+        idx_label = self.labels_combo.findText(cur_label_name)
+        if idx_label != -1:
+            self.labels_combo.setCurrentIndex(idx_label)
+
+        idx_signal = self.signal_combo.findText(cur_signal_name)
+        if idx_signal != -1:
+            self.signal_combo.setCurrentIndex(idx_signal)
+
+        idx_yolo = self.YOLO_layer_combo.findText(cur_yolo_name)
+        if idx_yolo != -1:
+            self.YOLO_layer_combo.setCurrentIndex(idx_yolo)
+
+        # Update inspection bounds based on active label layer without locking UI
+        self._update_inspection_bounds()
+
+    def _update_inspection_bounds(self):
+        """Updates min/max bounds for inspect_cell_id_spin based on selected Labels layer."""
+        selected_label_layer = self.labels_combo.currentData()
+
+        if (
+            selected_label_layer is not None
+            and selected_label_layer.data is not None
+        ):
+            lbls = selected_label_layer.data
+            # Fast scalar check using max label ID rather than scanning all unique elements
+            max_id = int(lbls.max()) if lbls.size > 0 else 1
+            if max_id > 0:
+                self.inspect_cell_id_spin.setRange(1, max_id)
+            else:
+                self.inspect_cell_id_spin.setRange(1, 1)
+        else:
+            self.inspect_cell_id_spin.setRange(1, 999999)
 
     def get_feature_extraction_config(self) -> dict:
         """Extracts locked feature extraction parameters from UI widgets."""
         fe_config = {
-            'pixel_spacing': float(self.pixel_spacing.value),
-            'max_search_radius': int(self.max_search_radius.value),
-            'min_search_radius': int(self.min_search_radius.value),
-            'radius_scale': float(self.radius_scale.value),
-            'expand_labs_dist': int(self.expand_labs_dist.value),
-            'erode_labs': int(self.erode_labs.value),
-            'sample_step': int(self.sample_step.value),
-            'max_rays': int(self.max_rays.value),
-            'offset': float(self.offset.value),
-            'radial_sym': bool(self.radial_symmetry),
+            'pixel_spacing': float(self.pixel_spacing_spin.value()),
+            'max_search_radius': int(self.max_search_spin.value()),
+            'min_search_radius': int(self.min_search_spin.value()),
+            'radius_scale': float(self.radius_scale_spin.value()),
+            'expand_labs_dist': int(self.expand_labs_spin.value()),
+            'erode_labs': int(self.erode_labs_spin.value()),
+            'sample_step': int(self.sample_step_spin.value()),
+            'max_rays': int(self.max_rays_spin.value()),
+            'offset': float(self.offset_spin.value()),
+            'radial_sym': bool(self.radial_symmetry_cb.isChecked()),
         }
-        # print(f"DEBUG] Feature extraction config: {fe_config}")
+        # print(f"[DEBUG] Feature extraction config: {fe_config}")
         return fe_config
 
     def set_feature_extraction_config(self, config: dict):
         """Populates UI input controls with values from a config dictionary."""
         if not config or not isinstance(config, dict):
             print(
-                '[DEBUG] Cannot set config: Provided config is empty or invalid.'
+                '[w-seg] Cannot set config: Provided config is empty or invalid.'
             )
             return
 
-        # Directly assign to widget .value attributes
-        if 'pixel_spacing' in config:
-            self.pixel_spacing.value = float(config['pixel_spacing'])
-        if 'max_search_radius' in config:
-            self.max_search_radius.value = int(config['max_search_radius'])
-        if 'min_search_radius' in config:
-            self.min_search_radius.value = int(config['min_search_radius'])
-        if 'radius_scale' in config:
-            self.radius_scale.value = float(config['radius_scale'])
-        if 'expand_labs_dist' in config:
-            self.expand_labs_dist.value = int(config['expand_labs_dist'])
-        if 'erode_labs' in config:
-            self.erode_labs.value = int(config['erode_labs'])
-        if 'sample_step' in config:
-            self.sample_step.value = int(config['sample_step'])
-        if 'max_rays' in config:
-            self.max_rays.value = int(config['max_rays'])
-        if 'offset' in config:
-            self.offset.value = float(config['offset'])
-        if 'radial_sym' in config:
-            self.radial_symmetry = bool(config['radial_sym'])
+        # Block signals during batch updates to prevent unneeded recalculations
+        _blockers = [
+            QSignalBlocker(self.pixel_spacing_spin),
+            QSignalBlocker(self.max_search_spin),
+            QSignalBlocker(self.min_search_spin),
+            QSignalBlocker(self.radius_scale_spin),
+            QSignalBlocker(self.expand_labs_spin),
+            QSignalBlocker(self.erode_labs_spin),
+            QSignalBlocker(self.sample_step_spin),
+            QSignalBlocker(self.max_rays_spin),
+            QSignalBlocker(self.offset_spin),
+            QSignalBlocker(self.radial_symmetry_cb),
+        ]
 
-        print(f'[DEBUG] Updated UI widgets with config: {config}')
+        if 'pixel_spacing' in config:
+            self.pixel_spacing_spin.setValue(float(config['pixel_spacing']))
+        if 'max_search_radius' in config:
+            self.max_search_spin.setValue(int(config['max_search_radius']))
+        if 'min_search_radius' in config:
+            self.min_search_spin.setValue(int(config['min_search_radius']))
+        if 'radius_scale' in config:
+            self.radius_scale_spin.setValue(float(config['radius_scale']))
+        if 'expand_labs_dist' in config:
+            self.expand_labs_spin.setValue(int(config['expand_labs_dist']))
+        if 'erode_labs' in config:
+            self.erode_labs_spin.setValue(int(config['erode_labs']))
+        if 'sample_step' in config:
+            self.sample_step_spin.setValue(int(config['sample_step']))
+        if 'max_rays' in config:
+            self.max_rays_spin.setValue(int(config['max_rays']))
+        if 'offset' in config:
+            self.offset_spin.setValue(float(config['offset']))
+        if 'radial_sym' in config:
+            enabled = bool(config['radial_sym'])
+            self.radial_symmetry_cb.setChecked(enabled)
+            # Sync dependent center point button state explicitly
+            self._on_radial_symmetry_toggled(enabled)
+
+        print(f'[w-seg] Successfully updated UI widgets with config: {config}')
+
+    def load_session_metadata(self, hdf5_path: str):
+        """Loads saved feature extraction settings from an HDF5 session file back into UI."""
+        import json
+
+        import h5py
+
+        with h5py.File(hdf5_path, 'r') as hf:
+            if 'config' in hf.attrs:
+                config = json.loads(hf.attrs['config'])
+                self.set_feature_extraction_config(config)
+
+    # Backward-compatible property wrappers for other tabs/widgets
+    @property
+    def selected_labels_layer(self):
+        """Returns currently selected Labels layer instance."""
+        return self.labels_combo.currentData()
+
+    @property
+    def selected_signal_layer(self):
+        """Returns currently selected Image/Signal layer instance."""
+        return self.signal_combo.currentData()
+
+    @property
+    def is_radial_symmetry_enabled(self) -> bool:
+        """Returns state of radial symmetry checkbox."""
+        return self.radial_symmetry_cb.isChecked()

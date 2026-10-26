@@ -1,13 +1,14 @@
+import threading
+
 import napari
 import numpy as np
 import torch
-from qtpy.QtCore import Qt
+from napari.qt.threading import thread_worker
 from qtpy.QtWidgets import (
     QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -29,10 +30,14 @@ class WNetWidget(QGroupBox):
         super().__init__('W-Net Model Inference', parent)
         self.viewer = viewer
         self.generator = generator
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or (
+            'cuda' if torch.cuda.is_available() else 'cpu'
+        )
 
         self.live_update_layer = None
         self.output_layer = None
+        self.worker = None
+        self.cancel_event = threading.Event()
 
         # Flexible Qt sizing policy
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -42,16 +47,16 @@ class WNetWidget(QGroupBox):
         # Connect Napari layer listeners
         if self.viewer is not None:
             self.viewer.layers.events.inserted.connect(
-                self._update_layer_choices
+                self.refresh_layer_choices
             )
             self.viewer.layers.events.removed.connect(
-                self._update_layer_choices
+                self.refresh_layer_choices
             )
             self.viewer.layers.events.changed.connect(
-                self._update_layer_choices
+                self.refresh_layer_choices
             )
 
-        self._update_layer_choices()
+        self.refresh_layer_choices()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -88,14 +93,28 @@ class WNetWidget(QGroupBox):
         mode_layout.addWidget(self.radio_live)
         form_layout.addRow('Execution Mode:', mode_layout)
 
-        # 5. Predict Button
+        # 5. Action Buttons (Predict & Cancel)
+        btn_layout = QHBoxLayout()
         self.predict_btn = QPushButton('Predict Matrix Output')
+        self.predict_btn.setStyleSheet(
+            'font-weight: bold; background-color: #2b5b84; color: white; padding: 6px;'
+        )
         self.predict_btn.clicked.connect(self._on_predict)
 
-        main_layout.addLayout(form_layout)
-        main_layout.addWidget(self.predict_btn)
+        self.cancel_btn = QPushButton('❌ Cancel')
+        self.cancel_btn.setStyleSheet(
+            'font-weight: bold; background-color: #842b2b; color: white; padding: 6px;'
+        )
+        self.cancel_btn.setEnabled(False)  # Disabled by default
+        self.cancel_btn.clicked.connect(self._on_cancel)
 
-    def _update_layer_choices(self, event=None):
+        btn_layout.addWidget(self.predict_btn)
+        btn_layout.addWidget(self.cancel_btn)
+
+        main_layout.addLayout(form_layout)
+        main_layout.addLayout(btn_layout)
+
+    def refresh_layer_choices(self, event=None):
         """Refreshes Image layer options in the dropdown."""
         if self.viewer is None:
             return
@@ -120,6 +139,26 @@ class WNetWidget(QGroupBox):
 
         self.combo_image_layer.blockSignals(False)
 
+    def _set_ui_processing_state(self, is_processing: bool):
+        """Toggles widget UI controls depending on execution status."""
+        self.predict_btn.setEnabled(not is_processing)
+        self.combo_image_layer.setEnabled(not is_processing)
+        self.spin_patch_size.setEnabled(not is_processing)
+        self.spin_stride.setEnabled(not is_processing)
+        self.radio_normal.setEnabled(not is_processing)
+        self.radio_live.setEnabled(not is_processing)
+
+        self.cancel_btn.setEnabled(is_processing)
+
+    def _on_cancel(self):
+        """Triggers cancellation of background worker."""
+        if self.worker is not None:
+            print('[w-seg] Cancelling inference request...')
+            self.cancel_event.set()
+            if self.viewer:
+                self.viewer.status = '[w-seg] Cancelling inference process...'
+            self.cancel_btn.setEnabled(False)
+
     def _on_predict(self):
         """Callback executed when clicking the predict button."""
         image_layer = self.combo_image_layer.currentData()
@@ -132,7 +171,9 @@ class WNetWidget(QGroupBox):
         if image_layer is None:
             print('[w-seg] Error: Please select an Image layer.')
             if self.viewer:
-                self.viewer.status = '[w-seg] Error: Please select an Image layer.'
+                self.viewer.status = (
+                    '[w-seg] Error: Please select an Image layer.'
+                )
             return
 
         if self.generator is None:
@@ -147,7 +188,9 @@ class WNetWidget(QGroupBox):
 
         print(f'[w-seg] Running prediction with model on {self.device}...')
         if self.viewer:
-            self.viewer.status = f'[w-seg] Running prediction on {self.device}...'
+            self.viewer.status = (
+                f'[w-seg] Running prediction on {self.device}...'
+            )
 
         raw_data = image_layer.data
         H, W = raw_data.shape[0], raw_data.shape[1]
@@ -159,12 +202,18 @@ class WNetWidget(QGroupBox):
 
         input_tensor = torch.from_numpy(raw_data).permute(2, 0, 1).float()
 
+        # Capture spatial metadata from cropped input layer
+        layer_scale = image_layer.scale
+        layer_translate = image_layer.translate
+
         canvas = np.zeros((H, W), dtype=np.float32)
         if (
             self.live_update_layer is not None
             and self.live_update_layer in self.viewer.layers
         ):
             self.live_update_layer.data = canvas
+            self.live_update_layer.scale = layer_scale
+            self.live_update_layer.translate = layer_translate
             self.live_update_layer.opacity = 0.8 if is_live else 0.0
         else:
             self.live_update_layer = self.viewer.add_image(
@@ -174,6 +223,8 @@ class WNetWidget(QGroupBox):
                 contrast_limits=[0.0, 1.0],
                 blending='additive',
                 opacity=0.8 if is_live else 0.0,
+                scale=layer_scale,
+                translate=layer_translate,
             )
 
         mode_str = 'Live View' if is_live else 'Normal (Fast)'
@@ -181,20 +232,87 @@ class WNetWidget(QGroupBox):
             f'[w-seg] Stitching processing initialized using patches of size {patch_size} [{mode_str}]...'
         )
 
-        final_sem, final_aff = process_large_image(
-            image=input_tensor,
-            model=self.generator,
-            patch_size=patch_size,
-            stride=stride,
-            device=self.device,
-            live_layer=self.live_update_layer,
-            live_view=is_live,
+        self._set_ui_processing_state(True)
+        self.cancel_event.clear()
+
+        # Instantiate background thread worker using napari.qt.thread_worker
+        @thread_worker
+        def _run_inference_worker():
+            return (
+                yield from process_large_image(
+                    image=input_tensor,
+                    model=self.generator,
+                    patch_size=patch_size,
+                    stride=stride,
+                    device=self.device,
+                    live_view=is_live,
+                    is_cancelled=self.cancel_event.is_set,
+                )
+            )
+
+        self.worker = _run_inference_worker()
+        self.worker.yielded.connect(self._update_live_canvas)
+        self.worker.returned.connect(
+            lambda res: self._on_prediction_finished(
+                res, image_layer.name, layer_scale, layer_translate
+            )
         )
+        self.worker.errored.connect(self._on_prediction_error)
+        self.worker.start()
+
+    def _update_live_canvas(self, update_info):
+        """Safely updates live display canvas on the Qt main thread."""
+        if update_info is None:
+            return
+
+        if (
+            self.live_update_layer is not None
+            and self.live_update_layer in self.viewer.layers
+        ):
+            y, x, patch_size, local_norm = update_info
+
+            # Direct slice update on main thread array
+            self.live_update_layer.data[
+                y : y + patch_size, x : x + patch_size
+            ] = local_norm
+
+            # Trigger VisPy redrawing
+        self.live_update_layer.refresh()
+
+    def _cleanup_live_layer(self):
+        """Removes the live processing layer."""
+        if (
+            self.live_update_layer is not None
+            and self.live_update_layer in self.viewer.layers
+        ):
+            self.viewer.layers.remove(self.live_update_layer)
+            self.live_update_layer = None
+
+    def _on_prediction_error(self, exc):
+        """Handles worker thread exception."""
+        self._cleanup_live_layer()
+        self._set_ui_processing_state(False)
+        print(f'[w-seg] Error during processing: {exc}')
+        if self.viewer:
+            self.viewer.status = f'[w-seg] Error: {exc}'
+
+    def _on_prediction_finished(
+        self, result, original_name, layer_scale, layer_translate
+    ):
+        """Called when thread returns output or gets cancelled."""
+        final_sem, final_aff = result if result else (None, None)
+
+        self._cleanup_live_layer()
+        self._set_ui_processing_state(False)
+
+        if self.cancel_event.is_set() or final_sem is None:
+            print('[w-seg] Prediction was cancelled or returned empty.')
+            if self.viewer:
+                self.viewer.status = '[w-seg] Prediction cancelled.'
+            return
 
         sem_numpy = np.squeeze(final_sem)
         aff_numpy = np.clip(final_aff, 0.0, 1.0)
-
-        original_name = image_layer.name
         predicted_layer_name = f'pred_{original_name}'
 
         # Add affinity layers
@@ -204,23 +322,19 @@ class WNetWidget(QGroupBox):
             channel_axis=0,
             colormap='gray',
             blending='additive',
+            scale=layer_scale,
+            translate=layer_translate,
         )
 
         for layer in aff_layers:
             current_idx = self.viewer.layers.index(layer)
             self.viewer.layers.move(current_idx, 0)
 
-        # Cleanup live layer
-        if (
-            self.live_update_layer is not None
-            and self.live_update_layer in self.viewer.layers
-        ):
-            self.viewer.layers.remove(self.live_update_layer)
-            self.live_update_layer = None
-
         if predicted_layer_name in self.viewer.layers:
             final_layer = self.viewer.layers[predicted_layer_name]
             final_layer.data = sem_numpy
+            final_layer.scale = layer_scale
+            final_layer.translate = layer_translate
             final_layer.refresh()
         else:
             final_layer = self.viewer.add_image(
@@ -230,6 +344,8 @@ class WNetWidget(QGroupBox):
                 contrast_limits=[0.0, 1.0],
                 blending='additive',
                 opacity=1.0,
+                scale=layer_scale,
+                translate=layer_translate,
             )
 
         self.viewer.layers.selection.clear()
@@ -238,6 +354,15 @@ class WNetWidget(QGroupBox):
         sem_idx = self.viewer.layers.index(final_layer)
         self.viewer.layers.move(sem_idx, -1)
 
-        print('[w-seg] Processing complete! Final canvas layers blended successfully.')
+        print('[w-seg] Processing complete!')
         if self.viewer:
             self.viewer.status = '[w-seg] Prediction complete!'
+
+    def get_settings(self):
+        return {
+            'patch_size': self.spin_patch_size.value(),
+            'stride': self.spin_stride.value(),
+            'execution_mode': 'live'
+            if self.radio_live.isChecked()
+            else 'normal',
+        }

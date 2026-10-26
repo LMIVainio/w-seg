@@ -1,6 +1,5 @@
 import napari
 import numpy as np
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -25,9 +24,15 @@ class GaspWidget(QGroupBox):
 
         # Wire up layer event listeners for automatic dropdown population
         if self.viewer is not None:
-            self.viewer.layers.events.inserted.connect(self.refresh_layer_choices)
-            self.viewer.layers.events.removed.connect(self.refresh_layer_choices)
-            self.viewer.layers.events.changed.connect(self.refresh_layer_choices)
+            self.viewer.layers.events.inserted.connect(
+                self.refresh_layer_choices
+            )
+            self.viewer.layers.events.removed.connect(
+                self.refresh_layer_choices
+            )
+            self.viewer.layers.events.changed.connect(
+                self.refresh_layer_choices
+            )
 
         self.refresh_layer_choices()
 
@@ -37,11 +42,15 @@ class GaspWidget(QGroupBox):
 
         # 1. Layer Selection Controls
         self.combo_aff_h = QComboBox()
-        self.combo_aff_h.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_aff_h.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
         form_layout.addRow('Horizontal Affinity:', self.combo_aff_h)
 
         self.combo_aff_v = QComboBox()
-        self.combo_aff_v.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo_aff_v.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
         form_layout.addRow('Vertical Affinity:', self.combo_aff_v)
 
         self.combo_superpixel = QComboBox()
@@ -76,6 +85,9 @@ class GaspWidget(QGroupBox):
 
         # 3. Action Button
         self.btn_run = QPushButton('Run GASP Clustering')
+        self.btn_run.setStyleSheet(
+            'font-weight: bold; background-color: #2b5b84; color: white; padding: 6px;'
+        )
         self.btn_run.clicked.connect(self._on_run_clicked)
 
         main_layout.addLayout(form_layout)
@@ -143,21 +155,40 @@ class GaspWidget(QGroupBox):
 
         if final_instances is None:
             if self.viewer:
-                self.viewer.status = '[w-seg] GASP failed due to input shape mismatch.'
+                self.viewer.status = (
+                    '[w-seg] GASP failed due to input shape mismatch.'
+                )
             return
+
+        # Hide superpixel layer upon successful clustering completion
+        sp_layer.visible = False
+
+        # Retrieve spatial coordinate metadata from input superpixel layer
+        layer_scale = sp_layer.scale
+        layer_translate = sp_layer.translate
 
         # Derive clean layer name
         clean_sp_name = sp_layer.name.replace('sp_', '')
         layer_name = f'gasp_cells_{clean_sp_name}'
 
-        # Update layer if existing, or add a fresh Labels layer
+        # Update existing layer or add new Labels layer matching spatial offset
         if layer_name in self.viewer.layers:
-            self.viewer.layers[layer_name].data = final_instances
+            existing_layer = self.viewer.layers[layer_name]
+            existing_layer.data = final_instances
+            existing_layer.scale = layer_scale
+            existing_layer.translate = layer_translate
+            existing_layer.refresh()
             if self.viewer:
-                self.viewer.status = f'[w-seg] Updated GASP layer: {layer_name}'
+                self.viewer.status = (
+                    f'[w-seg] Updated GASP layer: {layer_name}'
+                )
         else:
             self.viewer.add_labels(
-                final_instances, name=layer_name, opacity=0.8
+                final_instances,
+                name=layer_name,
+                opacity=0.8,
+                scale=layer_scale,
+                translate=layer_translate,
             )
             if self.viewer:
                 self.viewer.status = f'[w-seg] Added GASP layer: {layer_name}'
@@ -188,7 +219,9 @@ class GaspWidget(QGroupBox):
 
         # 3. Format into 4D (C, Z, Y, X) and 3D (Z, Y, X) for elf/gasp
         if aff_h.ndim == 2:
-            aff_channels = np.stack([aff_h, aff_v], axis=0)[:, np.newaxis, :, :]
+            aff_channels = np.stack([aff_h, aff_v], axis=0)[
+                :, np.newaxis, :, :
+            ]
             fragments_3d = fragments[np.newaxis, :, :]
         elif aff_h.ndim == 3:
             aff_channels = np.stack([aff_h, aff_v], axis=0)
@@ -225,3 +258,10 @@ class GaspWidget(QGroupBox):
 
         # Squeeze back to match input layout (2D vs 3D)
         return np.squeeze(final_instances_3d)
+
+    def get_settings(self):
+        return {
+            'linkage': self.combo_linkage.currentText(),
+            'beta_bias': self.spin_beta.value(),
+            'k_offset': self.spin_k_offset.value(),
+        }

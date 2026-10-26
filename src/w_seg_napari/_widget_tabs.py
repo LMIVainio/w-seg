@@ -1,10 +1,10 @@
 import sys
 
 import napari
-from qtpy.QtCore import QSize, Qt, Signal, Slot, QThread
+from qtpy.QtCore import QSize, Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
-    QCheckBox,
+    QFrame,
     QGroupBox,
     QLabel,
     QPushButton,
@@ -12,20 +12,21 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
-    QProgressBar,
-    QFileDialog,
-    QMessageBox,
 )
 
 import w_seg_napari._wsegutils as w
+from w_seg_napari._batch_widget import BatchTabWidget
 from w_seg_napari._cell_classification_widget import CellClassificationWidget
 from w_seg_napari._combine_layers_widget import create_layer_combination_widget
 from w_seg_napari._gasp_widget import GaspWidget
 from w_seg_napari._morphology_widget import MorphologyWidget
+from w_seg_napari._ROI_selection_widget import (
+    LineLabelSelectionWidget,
+    ROISelectionWidget,
+)
 from w_seg_napari._superpixel_widget import SuperpixelWidget
 from w_seg_napari._w_net_widget import WNetWidget
-from w_seg_napari._wsegutils import CurationWidget
-from w_seg_napari._batch_widget import BatchWorker
+from w_seg_napari._wsegutils import YOLO_WEIGHT_URL_MAP, CurationWidget
 
 # Import your widget instantiators / utilities
 # import w_seg_napari._wsegutils as w
@@ -45,13 +46,14 @@ class Tab1Pipeline(QScrollArea):
 
         self.device = w.get_device()
         self.model_state = {'generator': None, 'device': self.device}
+        self.loaded_weights = 'No weights loaded'
 
         # Build UI
         container = QWidget()
         container.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
         )
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(container)
 
         # Instantiate Sub-widgets
         selected_generator = self.model_state['generator']
@@ -110,9 +112,13 @@ class Tab1Pipeline(QScrollArea):
         return model_group
 
     def _emit_model_change(self, text: str):
-        selected_weight = self.combo_weights.currentData() or text
+        # currentData() can be None or an object/Path; fall back to text string
+        selected_weight = self.combo_weights.currentData()
+        if not selected_weight or not str(selected_weight).strip():
+            selected_weight = text or self.combo_weights.currentText()
+
         if selected_weight:
-            self.model_changed.emit(selected_weight)
+            self.model_changed.emit(str(selected_weight))
 
     def _on_reload_clicked(self):
         selected_weight_identifier = (
@@ -137,6 +143,7 @@ class Tab1Pipeline(QScrollArea):
                 f'Active: {self.combo_weights.currentText()} ({self.device.type.upper()})'
             )
             self.viewer.status = f'[w-seg] Successfully loaded {self.combo_weights.currentText()}'
+            self.loaded_weights = self.combo_weights.currentText()
             # Send signal to morphology widget
             self.model_changed.emit(selected_weight_identifier)
         except (RuntimeError, ValueError, TypeError, OSError) as e:
@@ -145,19 +152,101 @@ class Tab1Pipeline(QScrollArea):
 
     def refresh_layer_choices(self):
         """Refreshes layer dropdown choices for widgets contained in this tab."""
-        if hasattr(self.w_net_widget, 'image_layer'):
-            self.w_net_widget.image_layer.reset_choices()
-        if hasattr(self.superpixel_widget, 'boundary_layer'):
-            self.superpixel_widget.boundary_layer.reset_choices()
-        if hasattr(self.gasp_widget, 'horizontal_affinity'):
-            self.gasp_widget.horizontal_affinity.reset_choices()
-        if hasattr(self.gasp_widget, 'vertical_affinity'):
-            self.gasp_widget.vertical_affinity.reset_choices()
-        if hasattr(self.gasp_widget, 'superpixel_layer'):
-            self.gasp_widget.superpixel_layer.reset_choices()
+        for widget in (
+            self.w_net_widget,
+            self.superpixel_widget,
+            self.gasp_widget,
+        ):
+            if hasattr(widget, 'refresh_layer_choices'):
+                widget.refresh_layer_choices()
+
+    def get_settings(self) -> dict:
+        """Returns a flat dictionary combining Tab1 state and all sub-widget parameters."""
+        # Top-level tab parameters
+        settings = {
+            'generator': self.model_state.get('generator'),
+            'device': self.device,
+            'weights': self.loaded_weights,
+        }
+
+        # Safely extract flat sub-widget dictionaries
+        w_net_settings = (
+            self.w_net_widget.get_settings()
+            if hasattr(self, 'w_net_widget')
+            and hasattr(self.w_net_widget, 'get_settings')
+            else {}
+        )
+        superpixel_settings = (
+            self.superpixel_widget.get_settings()
+            if hasattr(self, 'superpixel_widget')
+            and hasattr(self.superpixel_widget, 'get_settings')
+            else {}
+        )
+        gasp_settings = (
+            self.gasp_widget.get_settings()
+            if hasattr(self, 'gasp_widget')
+            and hasattr(self.gasp_widget, 'get_settings')
+            else {}
+        )
+
+        # Merge all sub-dictionaries into the flat top-level dictionary
+        return {
+            **settings,
+            **w_net_settings,
+            **superpixel_settings,
+            **gasp_settings,
+        }
 
 
-class Tab2Curation(QScrollArea):
+class Tab2ROI_selection(QScrollArea):
+    """Tab 2 Container in w-seg-napari."""
+
+    def __init__(self, viewer: napari.Viewer, parent=None):
+        super().__init__(parent=parent)
+        self.viewer = viewer
+
+        # QScrollArea Layout setup
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setWidgetResizable(True)
+
+        # Internal scroll container
+        self.container = QWidget()
+        self.container.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
+        self.main_layout = QVBoxLayout(self.container)
+
+        # 1. GroupBox for ROI Selection
+        self.roi_group = QGroupBox('ROI selection')
+        roi_group_layout = QVBoxLayout(self.roi_group)
+        roi_group_layout.setContentsMargins(8, 12, 8, 8)
+
+        self.ROI_selection = ROISelectionWidget(viewer=self.viewer)
+        roi_group_layout.addWidget(self.ROI_selection)
+        self.main_layout.addWidget(self.roi_group)
+
+        # 2. GroupBox for Select Labels Lineage
+        self.lineage_group = QGroupBox('Select labels lineage')
+        lineage_group_layout = QVBoxLayout(self.lineage_group)
+        lineage_group_layout.setContentsMargins(8, 12, 8, 8)
+
+        self.labels_line_selection = LineLabelSelectionWidget(
+            viewer=self.viewer
+        )
+        lineage_group_layout.addWidget(self.labels_line_selection)
+        self.main_layout.addWidget(self.lineage_group)
+
+        self.refresh_layer_choices = self.ROI_selection.refresh_layer_choices
+        self.refresh_labels_choices = (
+            self.labels_line_selection.refresh_layer_choices
+        )
+        self.main_layout.addStretch()
+        self.setWidget(self.container)
+
+
+class Tab3Curation(QScrollArea):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
@@ -196,7 +285,7 @@ class Tab2Curation(QScrollArea):
             self.layer_blender_widget.clean_target_layer.reset_choices()
 
 
-class Tab3Analysis(QScrollArea):
+class Tab4Analysis(QScrollArea):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
@@ -211,7 +300,7 @@ class Tab3Analysis(QScrollArea):
 
         # Instantiate widgets and pass the cached data
         self.morphology_widget = MorphologyWidget(viewer=self.viewer)
-        self.cell_wall_classification = CellClassificationWidget(
+        self.cell_classifier = CellClassificationWidget(
             viewer=self.viewer,
             df=self.morphology_widget.cached_df,
             labels_data=self.morphology_widget.cached_labels_data,
@@ -219,65 +308,56 @@ class Tab3Analysis(QScrollArea):
         )
 
         original_on_measure = self.morphology_widget._on_measure_clicked
+        # Connect YOLO settings
+        self.morphology_widget.use_YOLO_cb.toggled.connect(
+            self._on_use_YOLO_changed
+        )
+        self._on_use_YOLO_changed(
+            self.morphology_widget.use_YOLO_cb.isChecked()
+        )
 
         def _on_measure_and_forward():
             # 1. Execute standard morphology calculation
             original_on_measure()
 
-            # 2. Extract bound data pair & active layer name
-            cached_df = getattr(self.morphology_widget, 'cached_df', None)
-            cached_labels = getattr(
-                self.morphology_widget, 'cached_labels_data', None
+            # 2. Connect signal to forward results to classifier widget
+            self.morphology_widget.measurement_finished_signal.connect(
+                self.cell_classifier.bind_measured_data
             )
-            cached_feature_config = getattr(
-                self.morphology_widget,
-                'cached_feature_extraction_config',
-                None,
-            )
-
-            # Fetch active label layer name from MorphologyWidget selection dropdown/combo
-            active_layer_name = 'Segmentation Labels'
-            if hasattr(self.morphology_widget, 'labels_select'):
-                selected_layer = self.morphology_widget.labels_select.value
-                if selected_layer is not None:
-                    active_layer_name = selected_layer.name
-
-            # 3. Synchronize immutable data pair to classifier widget
-            if cached_df is not None and cached_labels is not None:
-                self.cell_wall_classification.bind_measured_data(
-                    df=cached_df,
-                    labels_data=cached_labels,
-                    layer_name=active_layer_name,
-                    feature_extraction_config=cached_feature_config,
-                )
 
         # Bridge the "Apply Config" action from ClassificationWidget back to MorphologyWidget
         def _apply_model_config_to_morphology(config: dict):
             self.morphology_widget.set_feature_extraction_config(config)
 
-        self.cell_wall_classification.on_apply_config_callback = (
+        self.cell_classifier.on_apply_config_callback = (
             _apply_model_config_to_morphology
         )
 
         self.morphology_widget._on_measure_clicked = _on_measure_and_forward
         # Re-bind click event to wrapper
-        self.morphology_widget.run_btn.changed.disconnect()
-        self.morphology_widget.run_btn.changed.connect(_on_measure_and_forward)
+        # Safely disconnect any previously bound _on_measure_and_forward slot (if connected)
+        try:
+            self.morphology_widget.run_btn.clicked.disconnect(
+                _on_measure_and_forward
+            )
+        except (TypeError, RuntimeError):
+            # Safe catch in case the slot wasn't previously connected
+            pass
 
-        # layout.addWidget(self.morphology_widget.native)
-        # layout.addWidget(self.cell_wall_classification.native)
+        # Connect the new click handler
+        self.morphology_widget.run_btn.clicked.connect(_on_measure_and_forward)
 
         # Frame each widget cleanly in a titled group box
         morphology_box = QGroupBox('1. Cell Morphology & CW Thickness')
         morphology_layout = QVBoxLayout()
-        morphology_layout.addWidget(self.morphology_widget.native)
+        morphology_layout.addWidget(self.morphology_widget)
         morphology_box.setLayout(morphology_layout)
 
         classification_box = QGroupBox(
             '2. Cell Classification & Contact Topology'
         )
         classification_layout = QVBoxLayout()
-        classification_layout.addWidget(self.cell_wall_classification)
+        classification_layout.addWidget(self.cell_classifier)
         classification_box.setLayout(classification_layout)
         # Add group boxes to layout
         layout.addWidget(morphology_box)
@@ -324,163 +404,131 @@ class Tab3Analysis(QScrollArea):
                 self.morphology_widget.signal_layer.choices = image_layers
 
         # Update Classification Widget
-        if hasattr(self, 'cell_wall_classification'):
-            if hasattr(self.cell_wall_classification, 'labels_layer'):
-                self.cell_wall_classification.labels_layer.choices = (
-                    label_layers
-                )
-            if hasattr(self.cell_wall_classification, 'signal_layer'):
-                self.cell_wall_classification.signal_layer.choices = (
-                    image_layers
-                )
+        if hasattr(self, 'cell_classifier'):
+            if hasattr(self.cell_classifier, 'labels_layer'):
+                self.cell_classifier.labels_layer.choices = label_layers
+            if hasattr(self.cell_classifier, 'signal_layer'):
+                self.cell_classifier.signal_layer.choices = image_layers
 
     def update_model_selection(self, model_weight_name: str):
         """Called when Tab1 changes the active model weights"""
-        is_arabidopsis = 'arabidopsis' in model_weight_name.lower()
-        # Update checkbox
-        if hasattr(self, 'morphology_widget') and hasattr(
-            self.morphology_widget, 'radial_symmetry'
-        ):
-            self.morphology_widget.radial_symmetry.value = is_arabidopsis
 
-
-class Tab4Batch(QScrollArea):
-    """Dedicated tab for automated directory batch processing and HDF5 export."""
-
-    def __init__(self, viewer: napari.Viewer, parent=None):
-        super().__init__(parent)
-        self.viewer = viewer
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setWidgetResizable(True)
-
-        self.worker_thread = None
-        self.worker = None
-
-        container = QWidget()
-        container.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
-        )
-        layout = QVBoxLayout()
-
-        # Build pipeline options group
-        layout.addWidget(self._build_settings_group())
-
-        # Execution controls
-        self.btn_start = QPushButton('📁 Select Folder & Run Batch')
-        self.btn_start.setStyleSheet('font-weight: bold; padding: 8px;')
-        self.btn_start.clicked.connect(self._on_start_batch)
-
-        self.btn_cancel = QPushButton('Cancel Batch')
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self._on_cancel_batch)
-
-        self.status_label = QLabel('Ready for batch processing.')
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-
-        layout.addWidget(self.btn_start)
-        layout.addWidget(self.btn_cancel)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_bar)
-        layout.addStretch()
-
-        container.setLayout(layout)
-        self.setWidget(container)
-
-    def _build_settings_group(self) -> QGroupBox:
-        group = QGroupBox('Batch Pipeline Stages')
-        layout = QVBoxLayout()
-
-        self.chk_superpixels = QCheckBox('Run Superpixels (Watershed)')
-        self.chk_superpixels.setChecked(True)
-
-        self.chk_gasp = QCheckBox('Run GASP Graph Partitioning')
-        self.chk_gasp.setChecked(True)
-
-        self.chk_morphology = QCheckBox('Run Cell Morphology Measurements')
-        self.chk_morphology.setChecked(True)
-
-        self.chk_classification = QCheckBox(
-            'Run Random Forest Cell Classification'
-        )
-        self.chk_classification.setChecked(False)
-
-        self.chk_export_h5 = QCheckBox('Export Session to HDF5 (.h5)')
-        self.chk_export_h5.setChecked(True)
-        self.chk_export_h5.setEnabled(False)  # Mandated output format
-
-        layout.addWidget(self.chk_superpixels)
-        layout.addWidget(self.chk_gasp)
-        layout.addWidget(self.chk_morphology)
-        layout.addWidget(self.chk_classification)
-        layout.addWidget(self.chk_export_h5)
-        group.setLayout(layout)
-        return group
-
-    def refresh_layer_choices(self):
-        """No dynamic layer widgets required for batch configuration."""
-        pass
-
-    def _get_settings(self) -> dict:
-        return {
-            'superpixels': self.chk_superpixels.isChecked(),
-            'gasp': self.chk_gasp.isChecked(),
-            'morphology': self.chk_morphology.isChecked(),
-            'classification': self.chk_classification.isChecked(),
-        }
-
-    def _on_start_batch(self):
-        dirpath = QFileDialog.getExistingDirectory(
-            self,
-            'Select Directory for Batch Processing',
-            '',
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
-        )
-        if not dirpath:
+        if not model_weight_name or not str(model_weight_name).strip():
+            print('[w-seg] Empty model_weight_name received. Aborting sync.')
             return
 
-        settings = self._get_settings()
+        name_lower = str(model_weight_name).lower()
+        is_arabidopsis = 'arabidopsis' in name_lower
+        is_populus = 'populus' in name_lower
 
-        self.btn_start.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-
-        self.worker_thread = QThread()
-        self.worker = BatchWorker(
-            dirpath, settings, self._run_single_file_pipeline
-        )
-        self.worker.moveToThread(self.worker_thread)
-
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.progress_changed.connect(self._on_progress_update)
-        self.worker.finished.connect(self._on_batch_finished)
-        self.worker.finished.connect(self.worker_thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-
-        self.worker_thread.start()
-
-    @Slot(int, str)
-    def _on_progress_update(self, percent: int, msg: str):
-        self.progress_bar.setValue(percent)
-        self.status_label.setText(msg)
-
-    def _on_cancel_batch(self):
-        if self.worker:
-            self.worker.cancel()
-            self.status_label.setText('Cancelling batch run...')
-
-    @Slot(int, list)
-    def _on_batch_finished(self, success_count: int, failed_files: list):
-        self.btn_start.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self.progress_bar.setValue(100)
-
-        msg = f'Batch processing finished.\nSuccessfully processed: {success_count} file(s).'
-        if failed_files:
-            msg += f'\n\nFailed on {len(failed_files)} file(s):\n' + '\n'.join(
-                f'- {f}: {err}' for f, err in failed_files[:5]
+        # 1. Update Checkbox safely
+        if hasattr(self, 'morphology_widget') and hasattr(
+            self.morphology_widget, 'radial_symmetry_cb'
+        ):
+            self.morphology_widget.radial_symmetry_cb.setChecked(
+                is_arabidopsis
             )
-        QMessageBox.information(self, 'Batch Complete', msg)
-        self.status_label.setText('Ready for batch processing.')
+
+        # 2. Update YOLO ComboBox
+        if hasattr(self, 'morphology_widget') and hasattr(
+            self.morphology_widget, 'YOLO_weights_combo'
+        ):
+            target_species = (
+                'arabidopsis'
+                if is_arabidopsis
+                else ('populus' if is_populus else None)
+            )
+
+            if target_species:
+                # Extract keys from  choices tuple/list format
+                available_choices = [
+                    c[0] if isinstance(c, tuple) else c
+                    for c in self.morphology_widget.YOLO_weights_combo.choices
+                ]
+                matching_key = next(
+                    (
+                        key
+                        for key in available_choices
+                        if target_species in str(key).lower()
+                    ),
+                    None,
+                )
+                if matching_key is not None:
+                    self.morphology_widget.YOLO_weights_combo.setCurrentText(
+                        matching_key
+                    )
+
+    def _on_use_YOLO_changed(self, enabled: bool):
+        self.morphology_widget.YOLO_weights_combo.enabled = enabled
+        self.morphology_widget.YOLO_layer_combo.enabled = enabled
+        if enabled:
+            self.morphology_widget.YOLO_weights_combo.choices = list(
+                YOLO_WEIGHT_URL_MAP.keys()
+            )
+        else:
+            self.morphology_widget.YOLO_weights_combo.choices = []
+
+    def get_settings(self):
+        return self.cell_classifier.get_settings()
+
+
+class Tab5Batch(QScrollArea):
+    """Dedicated tab container for automated directory batch processing and HDF5 export."""
+
+    def __init__(self, viewer: 'napari.Viewer', main_widget=None, parent=None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self.main_widget = main_widget  # Reference to master plugin widget (e.g., CellClassificationWidget)
+
+        # ----------------------------------------------------------------------
+        # Scroll Area Setup
+        # ----------------------------------------------------------------------
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # ----------------------------------------------------------------------
+        # Main Scroll Container & Layout
+        # ----------------------------------------------------------------------
+        self.container = QWidget()
+        self.container.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.MinimumExpanding
+        )
+
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
+
+        # ----------------------------------------------------------------------
+        # Inner Batch Widget Instantiation
+        # ----------------------------------------------------------------------
+        # We pass self.main_widget so BatchTabWidget can call parent pipeline runners
+        self.batch_widget = BatchTabWidget(
+            parent_widget=self.main_widget, parent=self.container
+        )
+
+        layout.addWidget(self.batch_widget)
+        layout.addStretch()
+
+        self.setWidget(self.container)
+
+    # --------------------------------------------------------------------------
+    # Sync Hooks & Layer Refreshing
+    # --------------------------------------------------------------------------
+    def refresh_layer_choices(self):
+        """Refreshes dynamic layer dropdowns in batch UI when napari layers change."""
+        if hasattr(self.batch_widget, 'refresh_layer_choices'):
+            self.batch_widget.refresh_layer_choices()
+
+    def update_active_models_summary(self):
+        """Refreshes active model/segmentation snapshots from sibling tabs."""
+        if hasattr(self.batch_widget, 'update_model_summary'):
+            self.batch_widget.update_model_summary()
+
+    def showEvent(self, event):
+        """Automatically refresh layer dropdowns and model summaries whenever tab becomes visible."""
+        super().showEvent(event)
+        self.refresh_layer_choices()
+        self.update_active_models_summary()
