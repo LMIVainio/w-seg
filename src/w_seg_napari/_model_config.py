@@ -28,6 +28,11 @@ DIRECTION_NAMES = ('E', 'S', 'SE', 'SW')
 DIRECTIONS = ((0, 1), (1, 0), (1, 1), (1, -1))  # unit steps (dy, dx)
 
 DEFAULT_RANGES = (6, 32)
+# Things that travel with a model and are used by other plugin tabs:
+#   yolo            file name of a YOLO cell-type classifier inside the bundle (or None)
+#   radial_symmetry True/False = preset the 'radial symmetry' option, None = leave as is
+DEFAULT_COMPANIONS = {'yolo': None, 'radial_symmetry': None}
+
 DEFAULT_DENOISE = {
     'kind': 'bilateral',
     'kernel_size': [5, 5],
@@ -50,6 +55,7 @@ def make_config(
     patch_size=256,
     input_channels=6,
     denoise=None,
+    companions=None,
 ):
     """The config dict that is saved next to the model weights."""
     if len(directions) != len(direction_names):
@@ -67,6 +73,7 @@ def make_config(
             'denoise': denoise if denoise is not None else DEFAULT_DENOISE,
         },
         'outputs': {'wall': 'semantic_head', 'affinity': 'affinity_head'},
+        'companions': {**DEFAULT_COMPANIONS, **(companions or {})},
         'affinity': {
             'ranges': list(ranges),
             'direction_names': list(direction_names),
@@ -104,6 +111,11 @@ def validate_config(cfg):
     if len(aff['direction_names']) != len(aff['directions']):
         raise ValueError('direction_names and directions differ in length')
     return cfg
+
+
+def get_companions(cfg):
+    """The companions of a model (older configs without the key get the defaults)."""
+    return {**DEFAULT_COMPANIONS, **(cfg.get('companions') or {})}
 
 
 def save_config(path, cfg):

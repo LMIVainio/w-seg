@@ -325,6 +325,25 @@ class GaspWidget(QGroupBox):
         # Squeeze back to match input layout (2D vs 3D)
         return np.squeeze(final_instances_3d)
 
+    def snapshot_params(self) -> dict:
+        """Values read from the UI (take on the main thread, use anywhere)."""
+        return {
+            'linkage': self.combo_linkage.currentText(),
+            'beta_bias': self.spin_beta.value(),
+            'ranges': self.combo_ranges.currentData(),
+            'k_offset': self.spin_k_offset.value(),
+        }
+
+    @classmethod
+    def run_gasp(cls, params: dict, aset, superpixels: np.ndarray):
+        """GASP on an AffinitySet with the settings of snapshot_params()."""
+        return cls._compute_gasp_from_set(
+            aset.select(params['ranges']),
+            superpixels=superpixels,
+            linkage=params['linkage'],
+            beta_bias=params['beta_bias'],
+        )
+
     def get_settings(self):
         return {
             'linkage': self.combo_linkage.currentText(),

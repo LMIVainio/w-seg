@@ -355,13 +355,167 @@ class SuperpixelWidget(QGroupBox):
         _update_combo(self.smutex_signal, prefix='pred_', allow_none=True)
         _update_combo(self.mutex_signal, prefix='pred_', allow_none=True)
 
+    def snapshot_params(self) -> dict:
+        """Every value the algorithms read from the UI, as one plain dict.
+
+        Take it on the main thread; run_algorithm() can then run anywhere
+        (the batch tab runs it in a background thread).
+        """
+
+        def signal_kind(combo):
+            # Which map the optional 'Signal layer' stands for, so that the
+            # batch tab can pick the same kind of map for every image.
+            layer = combo.currentData()
+            if layer is None:
+                return None
+            return 'prediction' if layer.name.startswith('pred_') else 'image'
+
+        return {
+            'felz_signal_kind': signal_kind(self.felz_signal),
+            'smutex_signal_kind': signal_kind(self.smutex_signal),
+            'mutex_signal_kind': signal_kind(self.mutex_signal),
+            'algo_idx': self.combo_algorithm.currentIndex(),
+            'algo_name': self.combo_algorithm.currentText(),
+            'sigma': self.spin_smooth_sigma.value(),
+            'aff_sigma': self.spin_aff_sigma.value(),
+            'mask_thresh': self.spin_mask_thresh.value(),
+            'min_cell_size': self.spin_min_cell_size.value(),
+            # 0: Distance Watershed
+            'min_dist': self.spin_min_dist.value(),
+            'min_peak_height': self.spin_min_peak_height.value(),
+            'compactness': self.spin_compactness.value(),
+            # 1: Local Affinity Watershed
+            'aff_compactness': self.spin_aff_compactness.value(),
+            'aff_min_dist': self.spin_aff_min_dist.value(),
+            'aff_threshold': self.spin_aff_threshold.value(),
+            'aff_min_peak_height': self.spin_aff_min_peak_height.value(),
+            # 2: Felzenszwalb
+            'felz_scale': self.spin_felz_scale.value(),
+            'felz_aff_weight': self.spin_felz_aff_weight.value(),
+            # 3: Seeded Mutex Watershed
+            'smutex_strides': self.spin_smutex_strides.value(),
+            'smutex_randomize': self.check_smutex_randomize_strides.isChecked(),
+            'smutex_noise': self.spin_smutex_noise_level.value(),
+            'smutex_seed_min_distance': self.spin_smutex_seed_min_distance.value(),
+            # 4: Mutex Watershed
+            'mutex_strides': self.spin_mutex_strides.value(),
+            'mutex_randomize': self.check_mutex_randomize_strides.isChecked(),
+            'mutex_noise': self.spin_mutex_noise_level.value(),
+        }
+
+    @classmethod
+    def run_algorithm(
+        cls,
+        params: dict,
+        sem_data=None,
+        aset=None,
+        felz_signal=None,
+        smutex_sem=None,
+        mutex_sem=None,
+    ):
+        """Runs the algorithm chosen in ``params`` (see snapshot_params).
+
+        sem_data   semantic (wall) prediction, used by algorithms 0 and 1
+        aset       AffinitySet, used by algorithms 1-4
+        felz_signal / smutex_sem / mutex_sem   optional extra maps
+        Returns the superpixel labels; raises ValueError when an input the
+        algorithm needs is missing.
+        """
+        algo_idx = params['algo_idx']
+        sigma = params['sigma']
+        aff_sigma = params['aff_sigma']
+
+        if algo_idx == 0:  # Distance Watershed
+            if sem_data is None:
+                raise ValueError('Semantic prediction layer required.')
+            return cls._compute_distance_watershed(
+                sem_data,
+                min_distance=params['min_dist'],
+                threshold=params['mask_thresh'],
+                sigma=sigma,
+                min_peak_height=params['min_peak_height'],
+                compactness=params['compactness'],
+                min_cell_size=params['min_cell_size'],
+                fill_holes=False,
+            )
+
+        if aset is None:
+            raise ValueError('Affinity layers are required.')
+
+        if algo_idx == 1:  # Local Affinity Watershed
+            return cls._compute_affinity_watershed(
+                None,
+                None,
+                boundary_map=boundary_magnitude(aset),
+                sem_mask=sem_data,
+                compactness=params['aff_compactness'],
+                min_distance=params['aff_min_dist'],
+                threshold=params['mask_thresh'],
+                aff_threshold=params['aff_threshold'],
+                min_cell_size=params['min_cell_size'],
+                sigma=sigma,
+                aff_sigma=aff_sigma,
+                min_peak_height=params['aff_min_peak_height'],
+            )
+
+        if algo_idx == 2:  # Felzenszwalb Superpixels
+            return cls._compute_felzenszwalb(
+                None,
+                None,
+                boundary_mag=boundary_magnitude(aset),
+                scale=params['felz_scale'],
+                aff_sigma=aff_sigma,
+                sigma=sigma,
+                min_size=params['min_cell_size'],
+                signal_or_sem=felz_signal,
+                affinity_weight=params['felz_aff_weight'],
+                bg_threshold=params['mask_thresh'],
+            )
+
+        if algo_idx == 3:  # Mutex seeded Watershed
+            mutex_fn = (
+                cls._compute_mutex_watershed_seeded
+                if aset.legacy
+                else cls._compute_mutex_multi_seeded
+            )
+            return mutex_fn(
+                *cls._mutex_affinity_args(aset),
+                semantic_map=smutex_sem,
+                strides=params['smutex_strides'],
+                randomize_strides=params['smutex_randomize'],
+                noise_level=params['smutex_noise'],
+                min_cell_size=params['min_cell_size'],
+                sigma=sigma,
+                aff_sigma=aff_sigma,
+                seed_min_distance=params['smutex_seed_min_distance'],
+                mask_threshold=params['mask_thresh'],
+            )
+
+        if algo_idx == 4:  # Mutex Watershed
+            mutex_fn = (
+                cls._compute_mutex_watershed
+                if aset.legacy
+                else cls._compute_mutex_multi
+            )
+            return mutex_fn(
+                *cls._mutex_affinity_args(aset),
+                semantic_map=mutex_sem,
+                strides=params['mutex_strides'],
+                randomize_strides=params['mutex_randomize'],
+                noise_level=params['mutex_noise'],
+                min_cell_size=params['min_cell_size'],
+                sigma=sigma,
+                aff_sigma=aff_sigma,
+                mask_threshold=params['mask_thresh'],
+            )
+
+        raise ValueError(f'Unknown superpixel algorithm index {algo_idx}')
+
     def _on_run_clicked(self):
-        algo_idx = self.combo_algorithm.currentIndex()
-        algo_name = self.combo_algorithm.currentText()
+        params = self.snapshot_params()
+        algo_name = params['algo_name']
 
         sem_layer = self.combo_sem_layer.currentData()
-        sigma = self.spin_smooth_sigma.value()
-        aff_sigma = self.spin_aff_sigma.value()
 
         # All affinity layers of the chosen prediction, as one object
         aset = None
@@ -376,113 +530,22 @@ class SuperpixelWidget(QGroupBox):
         if self.viewer:
             self.viewer.status = f'[w-seg] Computing {algo_name}...'
 
-        superpixels = None
+        def _data(combo):
+            layer = combo.currentData()
+            return layer.data if layer is not None else None
 
-        if algo_idx == 0:  # Distance Watershed
-            if sem_layer is None:
-                print('[w-seg] Error: Semantic prediction layer required.')
-                return
-            superpixels = self._compute_distance_watershed(
-                sem_layer.data,
-                min_distance=self.spin_min_dist.value(),
-                threshold=self.spin_mask_thresh.value(),
-                sigma=sigma,
-                min_peak_height=self.spin_min_peak_height.value(),
-                compactness=self.spin_compactness.value(),
-                min_cell_size=self.spin_min_cell_size.value(),
-                fill_holes=False,
+        try:
+            superpixels = self.run_algorithm(
+                params,
+                sem_data=sem_layer.data if sem_layer is not None else None,
+                aset=aset,
+                felz_signal=_data(self.felz_signal),
+                smutex_sem=_data(self.smutex_signal),
+                mutex_sem=_data(self.mutex_signal),
             )
-
-        elif algo_idx == 1:  # Local Affinity Watershed
-            if aset is None:
-                print('[w-seg] Error: Affinity layers are required.')
-                return
-            superpixels = self._compute_affinity_watershed(
-                None,
-                None,
-                boundary_map=boundary_magnitude(aset),
-                sem_mask=sem_layer.data if sem_layer is not None else None,
-                compactness=self.spin_aff_compactness.value(),
-                min_distance=self.spin_aff_min_dist.value(),
-                threshold=self.spin_mask_thresh.value(),
-                aff_threshold=self.spin_aff_threshold.value(),
-                min_cell_size=self.spin_min_cell_size.value(),
-                sigma=sigma,
-                aff_sigma=aff_sigma,
-                min_peak_height=self.spin_aff_min_peak_height.value(),
-            )
-
-        elif algo_idx == 2:  # Felzenszwalb Superpixels
-            if aset is None:
-                print('[w-seg] Error: Affinity layers are required.')
-                return
-            signal_layer = self.felz_signal.currentData()
-            signal_data = (
-                signal_layer.data if signal_layer is not None else None
-            )
-            superpixels = self._compute_felzenszwalb(
-                None,
-                None,
-                boundary_mag=boundary_magnitude(aset),
-                scale=self.spin_felz_scale.value(),
-                aff_sigma=aff_sigma,
-                sigma=sigma,
-                min_size=self.spin_min_cell_size.value(),
-                signal_or_sem=signal_data,
-                affinity_weight=self.spin_felz_aff_weight.value(),
-                bg_threshold=self.spin_mask_thresh.value(),
-            )
-
-        elif algo_idx == 3:  # Mutex seeded Watershed
-            if aset is None:
-                print('[w-seg] Error: Affinity layers are required.')
-                return
-            smutex_sem_layer = self.smutex_signal.currentData()
-            smutex_sem_data = (
-                smutex_sem_layer.data if smutex_sem_layer is not None else None
-            )
-            mutex_fn = (
-                self._compute_mutex_watershed_seeded
-                if aset.legacy
-                else self._compute_mutex_multi_seeded
-            )
-            superpixels = mutex_fn(
-                *self._mutex_affinity_args(aset),
-                semantic_map=smutex_sem_data,
-                strides=self.spin_smutex_strides.value(),
-                randomize_strides=self.check_smutex_randomize_strides.isChecked(),
-                noise_level=self.spin_smutex_noise_level.value(),
-                min_cell_size=self.spin_min_cell_size.value(),
-                sigma=sigma,
-                aff_sigma=aff_sigma,
-                seed_min_distance=self.spin_smutex_seed_min_distance.value(),
-                mask_threshold=self.spin_mask_thresh.value(),
-            )
-
-        elif algo_idx == 4:  # Mutex Watershed
-            if aset is None:
-                print('[w-seg] Error: Affinity layers are required.')
-                return
-            mutex_sem_layer = self.mutex_signal.currentData()
-            mutex_sem_data = (
-                mutex_sem_layer.data if mutex_sem_layer is not None else None
-            )
-            mutex_fn = (
-                self._compute_mutex_watershed
-                if aset.legacy
-                else self._compute_mutex_multi
-            )
-            superpixels = mutex_fn(
-                *self._mutex_affinity_args(aset),
-                semantic_map=mutex_sem_data,
-                strides=self.spin_mutex_strides.value(),
-                randomize_strides=self.check_mutex_randomize_strides.isChecked(),
-                noise_level=self.spin_mutex_noise_level.value(),
-                min_cell_size=self.spin_min_cell_size.value(),
-                sigma=sigma,
-                aff_sigma=aff_sigma,
-                mask_threshold=self.spin_mask_thresh.value(),
-            )
+        except ValueError as e:
+            print(f'[w-seg] Error: {e}')
+            return
 
         if superpixels is None:
             if self.viewer:

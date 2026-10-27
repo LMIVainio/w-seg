@@ -1,6 +1,7 @@
-import os
+import threading
+from pathlib import Path
 
-from qtpy.QtCore import QObject, QThread, Signal, Slot
+from napari.qt.threading import thread_worker
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -8,7 +9,6 @@ from qtpy.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -16,75 +16,26 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-
-# ==============================================================================
-# Worker Thread to Run Pipeline without Freezing the UI
-# ==============================================================================
-class BatchWorker(QObject):
-    progress_changed = Signal(int, str)
-    finished = Signal(int, list)  # (success_count, list_of_failed_files)
-
-    def __init__(self, dirpath, settings, pipeline_runner):
-        super().__init__()
-        self.dirpath = dirpath
-        self.settings = settings
-        self.pipeline_runner = pipeline_runner
-        self._is_cancelled = False
-
-    def cancel(self):
-        self._is_cancelled = True
-
-    def run(self):
-        valid_exts = ('.tif', '.tiff', '.h5', '.hdf5', '.png')
-        image_files = [
-            f
-            for f in os.listdir(self.dirpath)
-            if f.lower().endswith(valid_exts) and not f.endswith('_session.h5')
-        ]
-
-        total = len(image_files)
-        if total == 0:
-            self.finished.emit(0, [])
-            return
-
-        successful_count = 0
-        failed_files = []
-
-        for idx, fname in enumerate(image_files):
-            if self._is_cancelled:
-                break
-
-            self.progress_changed.emit(
-                int((idx / total) * 100),
-                f'Processing ({idx + 1}/{total}): {fname}',
-            )
-
-            full_path = os.path.join(self.dirpath, fname)
-            base_name, _ = os.path.splitext(fname)
-            out_h5_path = os.path.join(self.dirpath, f'{base_name}_session.h5')
-
-            try:
-                # Delegate execution back to parent/main widget runner
-                self.pipeline_runner(full_path, out_h5_path, self.settings)
-                successful_count += 1
-            except Exception as e:
-                failed_files.append((fname, str(e)))
-
-        self.finished.emit(successful_count, failed_files)
+from w_seg_napari._batch_io import list_input_files, output_dir
+from w_seg_napari._batch_pipeline import run_batch
 
 
-# ==============================================================================
-# Dedicated Batch Tab Widget UI
-# ==============================================================================
 class BatchTabWidget(QWidget):
+    """Batch tab: runs the pipeline of tabs 1 and 4 on every image of a folder.
+
+    The batch runs in a background thread, so napari stays responsive. While it
+    runs, the other tabs are locked (their settings were copied when the batch
+    started) and this tab shows a progress bar and a cancel button.
+    """
+
     def __init__(self, parent_widget, parent=None):
         super().__init__(parent)
-        self.main_widget = (
-            parent_widget  # Reference to CellClassificationWidget
-        )
+        self.main_widget = parent_widget  # the WSegMasterWidget
         self.selected_dir = ''
-        self.worker_thread = None
+        self.files = []
         self.worker = None
+        self.cancel_event = threading.Event()
+        self.failed = []
 
         self._init_ui()
 
@@ -92,9 +43,7 @@ class BatchTabWidget(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(12)
 
-        # ----------------------------------------------------------------------
-        # Section 1: Input / Output Directory Selection
-        # ----------------------------------------------------------------------
+        # --- Section 1: folder --------------------------------------------
         group_io = QGroupBox('Target Directory')
         io_layout = QVBoxLayout()
 
@@ -104,22 +53,21 @@ class BatchTabWidget(QWidget):
         self.lbl_selected_dir = QLabel('No folder selected.')
         self.lbl_selected_dir.setStyleSheet('color: gray; font-style: italic;')
         self.lbl_selected_dir.setWordWrap(True)
-
         dir_btn_layout.addWidget(self.btn_select_dir)
         dir_btn_layout.addWidget(self.lbl_selected_dir, stretch=1)
 
         self.lbl_file_count = QLabel('Found: 0 compatible image files')
+        self.lbl_output = QLabel('')
+        self.lbl_output.setWordWrap(True)
 
         io_layout.addLayout(dir_btn_layout)
         io_layout.addWidget(self.lbl_file_count)
+        io_layout.addWidget(self.lbl_output)
         group_io.setLayout(io_layout)
 
-        # ----------------------------------------------------------------------
-        # Section 2: Active Model & Settings Snapshot Summary
-        # ----------------------------------------------------------------------
+        # --- Section 2: active models ---------------------------------------
         group_summary = QGroupBox('Active Pipeline Models & Configurations')
         summary_layout = QVBoxLayout()
-
         self.predict_label = QLabel('<b>Model:</b> No model loaded')
         self.superpixel_label = QLabel(
             '<b>Superpixels:</b> Default parameters'
@@ -128,126 +76,85 @@ class BatchTabWidget(QWidget):
             '<b>GASP linkage:</b> Default linkage'
         )
         self.classifier_label = QLabel('<b>Classifier:</b> No model loaded')
-
-        summary_layout.addWidget(self.predict_label)
-        summary_layout.addWidget(self.superpixel_label)
-        summary_layout.addWidget(self.gasp_linkage_label)
-        summary_layout.addWidget(self.classifier_label)
+        for lbl in (
+            self.predict_label,
+            self.superpixel_label,
+            self.gasp_linkage_label,
+            self.classifier_label,
+        ):
+            summary_layout.addWidget(lbl)
         group_summary.setLayout(summary_layout)
 
-        # ----------------------------------------------------------------------
-        # Section 3: Batch Pipeline Stages Selection & Layer Routing
-        # ----------------------------------------------------------------------
-        group_stages = QGroupBox('Execution Stages & Layer Naming')
+        # --- Section 3: stages ------------------------------------------------
+        group_stages = QGroupBox('Execution Stages')
         stage_layout = QVBoxLayout()
 
-        # Step 0: Interactive mode
         self.chk_render_viewer = QCheckBox(
-            'Render results in Napari viewer during batch processing'
+            'Show results in the viewer while processing'
         )
-        self.chk_render_viewer.setChecked(
-            False
-        )  # Default to Fast Headless mode
+        self.chk_render_viewer.setChecked(False)
         self.chk_render_viewer.setToolTip(
-            'If checked, each processed file will load and update Napari layers in real time.\n'
-            'Disabling this speeds up batch execution significantly.'
+            'Adds the layers of each processed image to the viewer.\n'
+            'Off is faster and uses less memory; results are saved to disk either way.'
         )
-        self.layout().addWidget(self.chk_render_viewer)
 
-        # Step 1: Prediction
         self.chk_predict = QCheckBox(
-            '1. Run Model Prediction / Feature Extraction'
+            '1. Run Model Prediction (walls + affinities)'
         )
         self.chk_predict.setChecked(True)
-
-        # Step 2: Superpixels
         self.chk_superpixels = QCheckBox('2. Run Superpixel Segmentation')
         self.chk_superpixels.setChecked(True)
-
-        # Step 3: GASP
         self.chk_gasp = QCheckBox('3. Run GASP Graph Partitioning')
         self.chk_gasp.setChecked(True)
-
-        # Step 4: Morphology Post-processing
         self.chk_morphology = QCheckBox(
-            '4. Run Morphological Filtering & Extraction'
+            '4. Run Morphology & Cell Wall Measurements'
         )
         self.chk_morphology.setChecked(True)
         self.chk_morphology.toggled.connect(self._toggle_morphology_options)
 
-        # Morphology Layer Routing Options
-        self.layout_morph_opts = QVBoxLayout()
-        self.layout_morph_opts.setContentsMargins(20, 0, 0, 0)
-
-        # Labels Layer selection
+        morph_opts = QVBoxLayout()
+        morph_opts.setContentsMargins(20, 0, 0, 0)
         lbl_layout = QHBoxLayout()
         lbl_layout.addWidget(QLabel('Labels Input:'))
-        self.morphology_labels_layer = QComboBox()
-        self.morphology_labels_layer.addItem('GASP labels', 'gasp_')
-        self.morphology_labels_layer.addItem('Superpixel labels', 'sp_')
-        self.morphology_labels_layer.addItem('Custom prefix...', 'custom')
-        self.morphology_labels_layer.currentIndexChanged.connect(
-            self._on_labels_combo_changed
-        )
-
-        self.txt_custom_labels_prefix = QLineEdit()
-        self.txt_custom_labels_prefix.setPlaceholderText('e.g. seg_')
-        self.txt_custom_labels_prefix.setEnabled(False)
-
-        lbl_layout.addWidget(self.morphology_labels_layer)
-        lbl_layout.addWidget(self.txt_custom_labels_prefix)
-        self.layout_morph_opts.addLayout(lbl_layout)
-
-        # Signal Layer selection
+        self.morphology_labels = QComboBox()
+        self.morphology_labels.addItem('GASP labels', 'gasp')
+        self.morphology_labels.addItem('Superpixel labels', 'sp')
+        lbl_layout.addWidget(self.morphology_labels)
+        morph_opts.addLayout(lbl_layout)
         sig_layout = QHBoxLayout()
         sig_layout.addWidget(QLabel('Signal Input:'))
-        self.morphology_signal_layer = QComboBox()
-        self.morphology_signal_layer.addItem('Prediction features', 'pred_')
-        self.morphology_signal_layer.addItem('Custom prefix...', 'custom')
-        self.morphology_signal_layer.currentIndexChanged.connect(
-            self._on_signal_combo_changed
-        )
+        self.morphology_signal = QComboBox()
+        self.morphology_signal.addItem('Wall prediction', 'prediction')
+        self.morphology_signal.addItem('Raw image (gray)', 'image')
+        sig_layout.addWidget(self.morphology_signal)
+        morph_opts.addLayout(sig_layout)
 
-        self.txt_custom_signal_prefix = QLineEdit()
-        self.txt_custom_signal_prefix.setPlaceholderText('e.g. raw_')
-        self.txt_custom_signal_prefix.setEnabled(False)
-
-        sig_layout.addWidget(self.morphology_signal_layer)
-        sig_layout.addWidget(self.txt_custom_signal_prefix)
-        self.layout_morph_opts.addLayout(sig_layout)
-
-        # Step 5: Cell Classification
         self.chk_classification = QCheckBox(
-            '5. Run Random Forest Cell Classification'
+            '5. Run Cell Classification (classifier from tab 4)'
         )
         self.chk_classification.setChecked(False)
+        self.chk_export_table = QCheckBox('6. Export Morphology Table (.csv)')
+        self.chk_export_table.setChecked(True)
 
-        # Step 6: Export Table
-        self.chk_export_xlsx = QCheckBox(
-            '6. Export Morphology Table (.csv / .xlsx)'
-        )
-        self.chk_export_xlsx.setChecked(True)
-
-        # Assemble Stage Group
+        stage_layout.addWidget(self.chk_render_viewer)
         stage_layout.addWidget(self.chk_predict)
         stage_layout.addWidget(self.chk_superpixels)
         stage_layout.addWidget(self.chk_gasp)
         stage_layout.addWidget(self.chk_morphology)
-        stage_layout.addLayout(self.layout_morph_opts)
+        stage_layout.addLayout(morph_opts)
         stage_layout.addWidget(self.chk_classification)
-        stage_layout.addWidget(self.chk_export_xlsx)
+        stage_layout.addWidget(self.chk_export_table)
         group_stages.setLayout(stage_layout)
+        self.group_stages = group_stages
 
-        # ----------------------------------------------------------------------
-        # Section 4: Execution & Progress Controls
-        # ----------------------------------------------------------------------
+        # --- Section 4: run control -------------------------------------------
         group_exec = QGroupBox('Run Control')
         exec_layout = QVBoxLayout()
 
         btn_layout = QHBoxLayout()
         self.btn_start_batch = QPushButton('Start Batch Processing')
         self.btn_start_batch.setStyleSheet(
-            'font-weight: bold; padding: 8px; background-color: #2b5b84;'
+            'font-weight: bold; background-color: #2b5b84; color: white; padding: 8px;'
         )
         self.btn_start_batch.setEnabled(False)
         self.btn_start_batch.clicked.connect(self._on_start_batch)
@@ -260,6 +167,7 @@ class BatchTabWidget(QWidget):
         btn_layout.addWidget(self.btn_cancel, stretch=1)
 
         self.status_label = QLabel('Select a folder to begin.')
+        self.status_label.setWordWrap(True)
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
 
@@ -268,7 +176,6 @@ class BatchTabWidget(QWidget):
         exec_layout.addWidget(self.progress_bar)
         group_exec.setLayout(exec_layout)
 
-        # Add all groups to main layout
         main_layout.addWidget(group_io)
         main_layout.addWidget(group_summary)
         main_layout.addWidget(group_stages)
@@ -276,7 +183,7 @@ class BatchTabWidget(QWidget):
         main_layout.addStretch()
 
     # --------------------------------------------------------------------------
-    # UI Event Handlers & Dynamic Controls
+    # UI event handlers
     # --------------------------------------------------------------------------
     def _select_folder(self):
         dirpath = QFileDialog.getExistingDirectory(
@@ -285,57 +192,23 @@ class BatchTabWidget(QWidget):
             '',
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
-        if dirpath:
-            self.selected_dir = dirpath
-            self.lbl_selected_dir.setText(dirpath)
-            self.lbl_selected_dir.setStyleSheet(
-                'color: gray; font-style: normal;'
-            )
+        if not dirpath:
+            return
+        self.selected_dir = dirpath
+        self.lbl_selected_dir.setText(dirpath)
+        self.lbl_selected_dir.setStyleSheet('color: gray; font-style: normal;')
 
-            # Count valid files
-            valid_exts = (
-                '.tif',
-                '.tiff',
-                '.h5',
-                '.hdf5',
-                '.png',
-                '.jpg',
-                '.jpeg',
-            )
-            files = [
-                f
-                for f in os.listdir(dirpath)
-                if f.lower().endswith(valid_exts)
-                and not f.endswith('_session.h5')
-            ]
-            count = len(files)
-            self.lbl_file_count.setText(
-                f'Found: {count} compatible image file(s)'
-            )
-            self.btn_start_batch.setEnabled(count > 0)
-            self.status_label.setText('Ready to start batch process.')
+        self.files = list_input_files(dirpath)
+        self.lbl_file_count.setText(
+            f'Found: {len(self.files)} compatible image file(s)'
+        )
+        self.lbl_output.setText(f'Results go to: {output_dir(dirpath)}')
+        self.btn_start_batch.setEnabled(len(self.files) > 0)
+        self.status_label.setText('Ready to start batch process.')
 
     def _toggle_morphology_options(self, enabled):
-        self.morphology_labels_layer.setEnabled(enabled)
-        self.morphology_signal_layer.setEnabled(enabled)
-        if not enabled:
-            self.txt_custom_labels_prefix.setEnabled(False)
-            self.txt_custom_signal_prefix.setEnabled(False)
-        else:
-            self._on_labels_combo_changed()
-            self._on_signal_combo_changed()
-
-    def _on_labels_combo_changed(self):
-        is_custom = self.morphology_labels_layer.currentData() == 'custom'
-        self.txt_custom_labels_prefix.setEnabled(
-            is_custom and self.chk_morphology.isChecked()
-        )
-
-    def _on_signal_combo_changed(self):
-        is_custom = self.morphology_signal_layer.currentData() == 'custom'
-        self.txt_custom_signal_prefix.setEnabled(
-            is_custom and self.chk_morphology.isChecked()
-        )
+        self.morphology_labels.setEnabled(enabled)
+        self.morphology_signal.setEnabled(enabled)
 
     def update_model_summary(self):
         """Call this whenever tabs are switched or new models/settings are loaded."""
@@ -354,103 +227,115 @@ class BatchTabWidget(QWidget):
                 f'<b>Classifier:</b> {info.get("classifier_type", "None")}'
             )
 
-    # --------------------------------------------------------------------------
-    # Settings Assembly & Execution
-    # --------------------------------------------------------------------------
-    def _get_batch_pipeline_settings(self):
-        """Collect current checkbox toggles and custom text inputs."""
-        # Labels prefix logic
-        lbl_data = self.morphology_labels_layer.currentData()
-        labels_prefix = (
-            self.txt_custom_labels_prefix.text().strip()
-            if lbl_data == 'custom'
-            else lbl_data
-        )
+    def refresh_layer_choices(self):
+        """Nothing to refresh: the batch works on files, not on viewer layers."""
 
-        # Signal prefix logic
-        sig_data = self.morphology_signal_layer.currentData()
-        signal_prefix = (
-            self.txt_custom_signal_prefix.text().strip()
-            if sig_data == 'custom'
-            else sig_data
-        )
-
+    # --------------------------------------------------------------------------
+    # Running
+    # --------------------------------------------------------------------------
+    def _batch_ui_settings(self) -> dict:
         return {
-            'render_viewer': self.chk_render_viewer.isChecked(),
-            'predict': self.chk_predict.isChecked(),
-            'superpixels': self.chk_superpixels.isChecked(),
-            'gasp': self.chk_gasp.isChecked(),
-            'morphology': self.chk_morphology.isChecked(),
-            'morphology_labels_prefix': labels_prefix,
-            'morphology_signal_prefix': signal_prefix,
-            'classification': self.chk_classification.isChecked(),
-            'export_xlsx': self.chk_export_xlsx.isChecked(),
+            'stages': {
+                'predict': self.chk_predict.isChecked(),
+                'superpixels': self.chk_superpixels.isChecked(),
+                'gasp': self.chk_gasp.isChecked(),
+                'morphology': self.chk_morphology.isChecked(),
+                'classification': self.chk_classification.isChecked()
+                and self.chk_morphology.isChecked(),
+                'export': self.chk_export_table.isChecked()
+                and self.chk_morphology.isChecked(),
+            },
+            'render': self.chk_render_viewer.isChecked(),
+            'morph_labels': self.morphology_labels.currentData(),
+            'morph_signal': self.morphology_signal.currentData(),
         }
 
-    def _get_settings(self):
-        """Bundle both batch UI toggles and global model/segmentation parameters."""
-        batch_settings = self._get_batch_pipeline_settings()
-
-        # Pull algorithm parameters (model weights, thresholds, scale factors) from main widget
-        global_settings = {}
-        if hasattr(self.main_widget, '_get_all_active_parameters'):
-            global_settings = self.main_widget._get_all_active_parameters()
-
-        return {**batch_settings, 'global': global_settings}
+    def _set_running(self, running: bool):
+        """Locks everything except the cancel button while a batch runs."""
+        self.btn_select_dir.setEnabled(not running)
+        self.group_stages.setEnabled(not running)
+        self.btn_start_batch.setEnabled(not running and bool(self.files))
+        self.btn_cancel.setEnabled(running)
+        if hasattr(self.main_widget, 'set_batch_running'):
+            self.main_widget.set_batch_running(running)
 
     def _on_start_batch(self):
-        if not self.selected_dir:
+        if not self.selected_dir or not self.files or self.worker is not None:
             return
 
-        settings = self._get_settings()
+        try:
+            # Copies the settings of tabs 1 and 4 on the main thread
+            settings = self.main_widget.collect_batch_settings(
+                self._batch_ui_settings()
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, 'Cannot start batch', str(e))
+            return
 
-        # Lock controls during execution
-        self.btn_select_dir.setEnabled(False)
-        self.btn_start_batch.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
+        self.cancel_event.clear()
+        self.failed = []
+        self.progress_bar.setValue(0)
+        self._set_running(True)
 
-        # Setup worker thread
-        self.worker_thread = QThread()
-        self.worker = BatchWorker(
-            self.selected_dir,
-            settings,
-            self.main_widget._run_batch_pipeline,
-        )
-        self.worker.moveToThread(self.worker_thread)
+        files, dirpath = list(self.files), self.selected_dir
+        is_cancelled = self.cancel_event.is_set
 
-        # Connect signals
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.progress_changed.connect(self._on_progress_update)
-        self.worker.finished.connect(self._on_batch_finished)
-        self.worker.finished.connect(self.worker_thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        @thread_worker
+        def _work():
+            return (
+                yield from run_batch(files, dirpath, settings, is_cancelled)
+            )
 
-        self.worker_thread.start()
+        self.worker = _work()
+        self.worker.yielded.connect(self._on_event)
+        self.worker.returned.connect(self._on_returned)
+        self.worker.errored.connect(self._on_error)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.start()
 
-    @Slot(int, str)
-    def _on_progress_update(self, percent, msg):
-        self.progress_bar.setValue(percent)
-        self.status_label.setText(msg)
+    def _on_event(self, event):
+        kind = event[0]
+        if kind == 'progress':
+            _, percent, message = event
+            self.progress_bar.setValue(int(percent))
+            self.status_label.setText(message)
+        elif kind == 'render':
+            _, name, results = event
+            self.main_widget.render_batch_results(name, results)
+        elif kind == 'failed':
+            _, name, message = event
+            print(f'[w-seg] Batch: {name} failed: {message}')
 
     def _on_cancel_batch(self):
-        if self.worker:
-            self.worker.cancel()
-            self.status_label.setText(
-                'Cancelling after current file finishes...'
-            )
-
-    @Slot(int, list)
-    def _on_batch_finished(self, success_count, failed_files):
-        self.btn_select_dir.setEnabled(True)
-        self.btn_start_batch.setEnabled(True)
+        self.cancel_event.set()
         self.btn_cancel.setEnabled(False)
-        self.progress_bar.setValue(100)
+        self.status_label.setText(
+            'Cancelling... (the current step finishes first)'
+        )
 
-        msg = f'Batch processing finished.\nSuccessfully processed: {success_count} file(s).'
-        if failed_files:
-            msg += f'\n\nFailed on {len(failed_files)} file(s):\n' + '\n'.join(
-                f'- {f}: {err}' for f, err in failed_files[:5]
+    def _on_returned(self, result):
+        n_ok, failed = result if result else (0, [])
+        self.failed = failed
+        cancelled = self.cancel_event.is_set()
+        msg = f'{"Batch cancelled" if cancelled else "Batch finished"}.\nProcessed: {n_ok} of {len(self.files)} file(s).'
+        if failed:
+            msg += f'\n\nFailed on {len(failed)} file(s):\n' + '\n'.join(
+                f'- {f}: {err}' for f, err in failed[:5]
             )
-        QMessageBox.information(self, 'Batch Execution Complete', msg)
-        self.status_label.setText('Ready for next batch.')
+            if len(failed) > 5:
+                msg += f'\n... and {len(failed) - 5} more (see the console)'
+        QMessageBox.information(self, 'Batch Execution', msg)
+        self.status_label.setText(
+            f'Results are in {Path(self.selected_dir) / "wseg_batch"}'
+        )
+
+    def _on_error(self, exc):
+        print(f'[w-seg] Batch stopped by an error: {exc}')
+        QMessageBox.critical(
+            self, 'Batch stopped', f'{type(exc).__name__}: {exc}'
+        )
+        self.status_label.setText('Batch stopped by an error.')
+
+    def _on_worker_finished(self):
+        self.worker = None
+        self._set_running(False)

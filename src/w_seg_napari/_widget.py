@@ -1,7 +1,6 @@
 import os
 from typing import TYPE_CHECKING
 
-import h5py
 import napari
 import numpy as np
 from qtpy.QtWidgets import (
@@ -10,7 +9,6 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from tifffile import imread
 
 from w_seg_napari._widget_tabs import (
     Tab1Pipeline,
@@ -19,6 +17,7 @@ from w_seg_napari._widget_tabs import (
     Tab4Analysis,
     Tab5Batch,
 )
+from w_seg_napari._wsegutils import get_model_config
 
 if TYPE_CHECKING:
     import napari
@@ -51,8 +50,7 @@ class WSegMasterWidget(QWidget):
         self.tabs.addTab(self.tab2, '2. ROI Selection')
         self.tabs.addTab(self.tab3, '3. Curation')
         self.tabs.addTab(self.tab4, '4. Cell Morphology')
-        # Tab 5 or batch processing is under development
-        # self.tabs.addTab(self.tab5, '5. Batch Mode')
+        self.tabs.addTab(self.tab5, '5. Batch Mode')
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -156,25 +154,7 @@ class WSegMasterWidget(QWidget):
         )
 
     def _wire_tab_signals(self):
-        """Wires inter-tab signals and tab switching events."""
-        if hasattr(self.tab1, 'model_changed') and hasattr(
-            self.tab4, 'update_model_selection'
-        ):
-            self.tab1.model_changed.connect(self.tab4.update_model_selection)
-
-            # Get text directly if currentData() is empty
-            initial_weight = (
-                self.tab1.combo_weights.currentData()
-                or self.tab1.combo_weights.currentText()
-            )
-
-            if initial_weight and str(initial_weight).strip():
-                self.tab4.update_model_selection(str(initial_weight))
-            else:
-                # Debug log if initial selection was unexpectedly empty
-                print(
-                    '[DEBUG Sync Wire] Tab1 combo_weights was empty at wire time.'
-                )
+        """Wires tab switching events (tabs read the active model themselves)."""
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _on_tab_changed(self, index: int):
@@ -191,9 +171,7 @@ class WSegMasterWidget(QWidget):
             self.tab3.refresh_layer_choices()
         elif active_tab == self.tab4:
             self.tab4.refresh_layer_choices()
-            self.tab4.update_model_selection(
-                self.tab1.combo_weights.currentData()
-            )
+            self.tab4.refresh_paired_model()
         elif active_tab == self.tab5:
             self.tab5.update_active_models_summary()
             self.tab5.refresh_layer_choices()
@@ -271,9 +249,9 @@ class WSegMasterWidget(QWidget):
         ):
             gasp_link = self.tab1.gasp_widget.combo_linkage.currentText()
         classifier_str = 'Default'
-        if hasattr(self.tab3, 'cell_classifier'):
+        if hasattr(self.tab4, 'cell_classifier'):
             classifier_str = (
-                self.tab3.cell_classifier._refresh_active_classifier()
+                self.tab4.cell_classifier._refresh_active_classifier()
             )
         return {
             'model_name': model_str,
@@ -282,129 +260,93 @@ class WSegMasterWidget(QWidget):
             'classifier_type': classifier_str,
         }
 
-    def _get_all_active_parameters(self) -> dict:
-        """Aggregates active model configs and parameter dicts from sub-widgets."""
-        return {
-            'feature_extraction_config': self.morphology_widget.get_feature_extraction_config(),
-            'model_config': self.cell_classifier.get_model_config(),
-            'model_path': getattr(self, 'active_prediction_model_path', None),
-            # Add Gasp, Superpixel, or Affinities parameters here as needed
-        }
+    # =========================================================================
+    # BATCH HOOKS (used by the batch tab)
+    # =========================================================================
 
-    def get_active_models_info2(self) -> dict:
-        """Pulls user-readable summaries for the Batch Tab UI summary box."""
-        clf_config = self.cell_classifier.get_model_config()
-        return {
-            'model_name': os.path.basename(
-                getattr(self, 'active_prediction_model_path', 'None')
-            ),
-            'sp_algo': 'SLIC / Watershed',
-            'gasp_linkage': 'Average',
-            'classifier_type': clf_config.get('classifier_type', 'Not Loaded'),
-        }
+    def collect_batch_settings(self, batch_ui: dict) -> dict:
+        """Copies the settings of tabs 1 and 4 for a batch run (call on the main thread).
 
-    def _run_batch_pipeline(
-        self, image_path: str, out_h5_path: str, settings: dict
-    ):
-        """Headless execution of pipeline stages per image file.
-        Executed inside BatchWorker thread (DO NOT modify Qt UI elements directly here).
+        batch_ui holds what the batch tab itself decides: stages, render,
+        morph_labels, morph_signal. Raises ValueError when something the
+        chosen stages need is missing.
         """
-        global_settings = settings.get('global', {})
-        render_in_viewer = settings.get('render_viewer', False)
-
-        # ----------------------------------------------------------------------
-        # Stage 0: Load Raw Image
-        # ----------------------------------------------------------------------
-        if image_path.endswith(('.h5', '.hdf5')):
-            with h5py.File(image_path, 'r') as f:
-                # Adjust dataset key matching your HDF5 layout
-                raw_image = (
-                    f['raw'][:] if 'raw' in f else f[list(f.keys())[0]][:]
-                )
-        else:
-            raw_image = imread(image_path)
-
-        session_data = {'raw': raw_image}
-
-        # ----------------------------------------------------------------------
-        # Stage 1: Prediction / Feature Map Generation
-        # ----------------------------------------------------------------------
-        if settings.get('predict', True):
-            # Fetch active neural net model or feature extractor instance
-            predict_model = getattr(self, 'prediction_model', None)
-
-            if predict_model is not None:
-                # Perform headless inference (e.g., cell boundaries/affinity maps)
-                predictions = predict_model.predict(raw_image)
-            else:
-                # Fallback / Dummy placeholder if no prediction model is attached
-                predictions = raw_image.astype(np.float32) / 255.0
-
-            session_data['pred_features'] = predictions
-
-        # ----------------------------------------------------------------------
-        # Stage 2: Superpixel Segmentation
-        # ----------------------------------------------------------------------
-        if (
-            settings.get('superpixels', True)
-            and 'pred_features' in session_data
+        stages = batch_ui['stages']
+        model = self.tab1.model_state.get('generator')
+        if stages.get('predict') and model is None:
+            raise ValueError('Load a model in tab 1 first.')
+        if stages.get('classification') and not (
+            self.tab4.cell_classifier.clf_manager.is_trained
         ):
-            # Example using headless superpixel calculation
-            # superpixel_labels = run_superpixels_headless(session_data['pred_features'], global_settings)
-            # session_data['sp_labels'] = superpixel_labels
-            pass
-
-        # ----------------------------------------------------------------------
-        # Stage 3: GASP Graph Partitioning
-        # ----------------------------------------------------------------------
-        if settings.get('gasp', True) and 'sp_labels' in session_data:
-            # gasp_labels = run_gasp_headless(session_data['pred_features'], session_data['sp_labels'])
-            # session_data['gasp_labels'] = gasp_labels
-            pass
-
-        # ----------------------------------------------------------------------
-        # Stage 4 & 5: Save Results to HDF5 Session File
-        # ----------------------------------------------------------------------
-        with h5py.File(out_h5_path, 'w') as h5f:
-            for key, val in session_data.items():
-                if isinstance(val, np.ndarray):
-                    h5f.create_dataset(key, data=val, compression='gzip')
-
-            # Save execution metadata & configs
-            h5f.attrs['source_file'] = os.path.basename(image_path)
-            h5f.attrs['fe_config_json'] = str(
-                global_settings.get('feature_extraction_config', {})
-            )
-            h5f.attrs['model_config_json'] = str(
-                global_settings.get('model_config', {})
+            raise ValueError(
+                'Train or load a cell classifier in tab 4, or switch off '
+                'the classification stage.'
             )
 
-        # ----------------------------------------------------------------------
-        # Optional: Render back into Napari Viewer
-        # ----------------------------------------------------------------------
-        if render_in_viewer and self.viewer is not None:
-            # Schedule rendering on the main thread
-            from qtpy.QtCore import Q_ARG, QMetaObject, Qt
+        w_net = self.tab1.w_net_widget.get_settings()
+        return {
+            **batch_ui,
+            'model': model,
+            'model_cfg': get_model_config(model),
+            'device': self.tab1.device,
+            'patch_size': w_net['patch_size'],
+            'stride': w_net['stride'],
+            'sp_params': self.tab1.superpixel_widget.snapshot_params(),
+            'gasp_params': self.tab1.gasp_widget.snapshot_params(),
+            'morph_params': self.tab4.morphology_widget.snapshot_params(),
+            'classifier': self.tab4.cell_classifier.clf_manager,
+        }
 
-            QMetaObject.invokeMethod(
-                self,
-                '_render_batch_results_in_viewer',
-                Qt.QueuedConnection,
-                Q_ARG(str, os.path.basename(image_path)),
-                Q_ARG(dict, session_data),
-            )
+    def set_batch_running(self, running: bool):
+        """Locks every tab except the batch tab while a batch runs."""
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) is not self.tab5:
+                self.tabs.setTabEnabled(i, not running)
 
-    def _render_batch_results_in_viewer(self, fname: str, session_data: dict):
-        """Thread-safe update of the Napari canvas if 'Render results in Napari viewer' is checked."""
-        if 'raw' in session_data:
-            self.viewer.add_image(session_data['raw'], name=f'{fname}_raw')
-        if 'pred_features' in session_data:
-            self.viewer.add_image(
-                session_data['pred_features'], name=f'{fname}_pred'
+    def render_batch_results(self, image_name: str, results: dict):
+        """Adds the results of one batch image to the viewer (main thread only)."""
+        base = os.path.splitext(image_name)[0]
+        v = self.viewer
+
+        def put(layer_name, kind, data, **kwargs):
+            if layer_name in v.layers:
+                v.layers[layer_name].data = data
+            else:
+                getattr(v, f'add_{kind}')(data, name=layer_name, **kwargs)
+
+        put(base, 'image', results['raw'])
+        for payload in results.get('affinity_layers', []):
+            put(
+                payload['name'],
+                'image',
+                payload['data'],
+                metadata=payload['metadata'],
+                colormap='gray',
+                blending='additive',
             )
-        if 'gasp_labels' in session_data:
-            self.viewer.add_labels(
-                session_data['gasp_labels'], name=f'{fname}_gasp'
+        put(
+            f'pred_{base}',
+            'image',
+            results['pred_sem'],
+            colormap='red',
+            contrast_limits=[0.0, 1.0],
+            blending='additive',
+        )
+        if 'sp_labels' in results:
+            put(f'sp_{base}', 'labels', results['sp_labels'], opacity=0.7)
+        if 'gasp_labels' in results:
+            put(
+                f'gasp_cells_{base}',
+                'labels',
+                results['gasp_labels'],
+                opacity=0.8,
+            )
+        if 'class_labels' in results:
+            put(
+                f'[Predicted Classes] {base}',
+                'labels',
+                results['class_labels'],
+                opacity=0.7,
             )
 
 

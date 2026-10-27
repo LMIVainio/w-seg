@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 import napari
-from qtpy.QtCore import QSize, Qt, Signal
+from qtpy.QtCore import QSize, Qt
 from qtpy.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -29,15 +29,13 @@ from w_seg_napari._ROI_selection_widget import (
 )
 from w_seg_napari._superpixel_widget import SuperpixelWidget
 from w_seg_napari._w_net_widget import WNetWidget
-from w_seg_napari._wsegutils import YOLO_WEIGHT_URL_MAP, CurationWidget
+from w_seg_napari._wsegutils import CurationWidget
 
 # Import your widget instantiators / utilities
 # import w_seg_napari._wsegutils as w
 
 
 class Tab1Pipeline(QScrollArea):
-    model_changed = Signal(str)
-
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
@@ -101,19 +99,26 @@ class Tab1Pipeline(QScrollArea):
         )
         self.btn_browse.clicked.connect(self._on_browse_bundle)
 
+        self.btn_zip = QPushButton('📦 Install model zip...')
+        self.btn_zip.setToolTip(
+            'A model zip holds model.keras, config.json and, if the model has '
+            'one, its paired YOLO classifier. It is unpacked into ~/.wseg_models.'
+        )
+        self.btn_zip.clicked.connect(self._on_install_zip)
+
         self.btn_reload = QPushButton('🔄 Load / Reload Model')
         self.status_label = QLabel(
             f'Device: {self.device.type.upper()} | Model not loaded'
         )
 
         self.btn_reload.clicked.connect(self._on_reload_clicked)
-        self.combo_weights.currentTextChanged.connect(self._emit_model_change)
 
         layout.addWidget(QLabel('Generator Architecture:'))
         layout.addWidget(self.combo_generator)
         layout.addWidget(QLabel('Staining Weights:'))
         layout.addWidget(self.combo_weights)
         layout.addWidget(self.btn_browse)
+        layout.addWidget(self.btn_zip)
         layout.addWidget(self.btn_reload)
         layout.addWidget(self.status_label)
         model_group.setLayout(layout)
@@ -128,8 +133,14 @@ class Tab1Pipeline(QScrollArea):
         self.combo_weights.clear()
         for w_name in w.WEIGHT_URL_MAP:
             self.combo_weights.addItem(w_name, userData=w_name)
+        installed = {name for name, _ in w.list_local_bundles()}
         for name, folder in w.list_local_bundles():
             self.combo_weights.addItem(f'[bundle] {name}', userData=folder)
+        for name in w.MODEL_ZIP_URL_MAP:
+            if name not in installed:  # downloaded on first use
+                self.combo_weights.addItem(
+                    f'[download] {name}', userData=f'zip:{name}'
+                )
         self.combo_weights.blockSignals(False)
 
     def _on_browse_bundle(self):
@@ -148,28 +159,52 @@ class Tab1Pipeline(QScrollArea):
                 'This folder does not contain both model.keras and config.json.',
             )
             return
+        self._select_bundle(folder)
+
+    def _on_install_zip(self):
+        zip_file, _ = QFileDialog.getOpenFileName(
+            self,
+            'Select a model zip (model.keras + config.json)',
+            str(Path.home()),
+            'Model zip (*.zip)',
+        )
+        if not zip_file:
+            return
+        try:
+            folder = w.install_model_zip(zip_file, overwrite=True)
+        except (RuntimeError, OSError, ValueError) as e:
+            QMessageBox.warning(self, 'Could not install model', str(e))
+            return
+        self._select_bundle(folder)
+
+    def _select_bundle(self, folder):
+        """Selects a bundle folder in the dropdown (adding it if needed) and loads it."""
+        self._populate_weights()
         label = f'[bundle] {Path(folder).name}'
         index = self.combo_weights.findText(label)
         if index == -1:
-            self.combo_weights.addItem(label, userData=folder)
+            self.combo_weights.addItem(label, userData=str(folder))
             index = self.combo_weights.findText(label)
         self.combo_weights.setCurrentIndex(index)
         self._on_reload_clicked()
-
-    def _emit_model_change(self, text: str):
-        # currentData() can be None or an object/Path; fall back to text string
-        selected_weight = self.combo_weights.currentData()
-        if not selected_weight or not str(selected_weight).strip():
-            selected_weight = text or self.combo_weights.currentText()
-
-        if selected_weight:
-            self.model_changed.emit(str(selected_weight))
 
     def _on_reload_clicked(self):
         selected_weight_identifier = (
             self.combo_weights.currentData()
             or self.combo_weights.currentText()
         )
+        if str(selected_weight_identifier).startswith('zip:'):
+            # A released model that is not on this computer yet
+            self.status_label.setText('Downloading model...')
+            self.viewer.status = '[w-seg] Downloading model...'
+            try:
+                folder = w.install_model_zip(selected_weight_identifier[4:])
+            except (RuntimeError, OSError, ValueError) as e:
+                self.status_label.setText('❌ Download failed!')
+                self.viewer.status = f'[w-seg] Failed to get model: {e}'
+                return
+            self._select_bundle(folder)
+            return
         self.status_label.setText('Loading model weights...')
         self.viewer.status = (
             f'[w-seg] Loading {self.combo_weights.currentText()}...'
@@ -189,8 +224,6 @@ class Tab1Pipeline(QScrollArea):
             )
             self.viewer.status = f'[w-seg] Successfully loaded {self.combo_weights.currentText()}'
             self.loaded_weights = self.combo_weights.currentText()
-            # Send signal to morphology widget
-            self.model_changed.emit(selected_weight_identifier)
         except (RuntimeError, ValueError, TypeError, OSError) as e:
             self.status_label.setText('❌ Error loading model!')
             self.viewer.status = f'[w-seg] Failed to load model: {str(e)}'
@@ -352,23 +385,10 @@ class Tab4Analysis(QScrollArea):
             feature_extraction_config=self.morphology_widget.cached_feature_extraction_config,
         )
 
-        original_on_measure = self.morphology_widget._on_measure_clicked
-        # Connect YOLO settings
-        self.morphology_widget.use_YOLO_cb.toggled.connect(
-            self._on_use_YOLO_changed
+        # Measured data goes to the classifier (connected once, here)
+        self.morphology_widget.measurement_finished_signal.connect(
+            self.cell_classifier.bind_measured_data
         )
-        self._on_use_YOLO_changed(
-            self.morphology_widget.use_YOLO_cb.isChecked()
-        )
-
-        def _on_measure_and_forward():
-            # 1. Execute standard morphology calculation
-            original_on_measure()
-
-            # 2. Connect signal to forward results to classifier widget
-            self.morphology_widget.measurement_finished_signal.connect(
-                self.cell_classifier.bind_measured_data
-            )
 
         # Bridge the "Apply Config" action from ClassificationWidget back to MorphologyWidget
         def _apply_model_config_to_morphology(config: dict):
@@ -377,20 +397,6 @@ class Tab4Analysis(QScrollArea):
         self.cell_classifier.on_apply_config_callback = (
             _apply_model_config_to_morphology
         )
-
-        self.morphology_widget._on_measure_clicked = _on_measure_and_forward
-        # Re-bind click event to wrapper
-        # Safely disconnect any previously bound _on_measure_and_forward slot (if connected)
-        try:
-            self.morphology_widget.run_btn.clicked.disconnect(
-                _on_measure_and_forward
-            )
-        except (TypeError, RuntimeError):
-            # Safe catch in case the slot wasn't previously connected
-            pass
-
-        # Connect the new click handler
-        self.morphology_widget.run_btn.clicked.connect(_on_measure_and_forward)
 
         # Frame each widget cleanly in a titled group box
         morphology_box = QGroupBox('1. Cell Morphology & CW Thickness')
@@ -455,63 +461,13 @@ class Tab4Analysis(QScrollArea):
             if hasattr(self.cell_classifier, 'signal_layer'):
                 self.cell_classifier.signal_layer.choices = image_layers
 
-    def update_model_selection(self, model_weight_name: str):
-        """Called when Tab1 changes the active model weights"""
+    def refresh_paired_model(self):
+        """Shows the YOLO classifier paired with the model loaded in tab 1."""
+        self.morphology_widget.refresh_paired_model()
 
-        if not model_weight_name or not str(model_weight_name).strip():
-            print('[w-seg] Empty model_weight_name received. Aborting sync.')
-            return
-
-        name_lower = str(model_weight_name).lower()
-        is_arabidopsis = 'arabidopsis' in name_lower
-        is_populus = 'populus' in name_lower
-
-        # 1. Update Checkbox safely
-        if hasattr(self, 'morphology_widget') and hasattr(
-            self.morphology_widget, 'radial_symmetry_cb'
-        ):
-            self.morphology_widget.radial_symmetry_cb.setChecked(
-                is_arabidopsis
-            )
-
-        # 2. Update YOLO ComboBox
-        if hasattr(self, 'morphology_widget') and hasattr(
-            self.morphology_widget, 'YOLO_weights_combo'
-        ):
-            target_species = (
-                'arabidopsis'
-                if is_arabidopsis
-                else ('populus' if is_populus else None)
-            )
-
-            if target_species:
-                # Extract keys from  choices tuple/list format
-                available_choices = [
-                    c[0] if isinstance(c, tuple) else c
-                    for c in self.morphology_widget.YOLO_weights_combo.choices
-                ]
-                matching_key = next(
-                    (
-                        key
-                        for key in available_choices
-                        if target_species in str(key).lower()
-                    ),
-                    None,
-                )
-                if matching_key is not None:
-                    self.morphology_widget.YOLO_weights_combo.setCurrentText(
-                        matching_key
-                    )
-
-    def _on_use_YOLO_changed(self, enabled: bool):
-        self.morphology_widget.YOLO_weights_combo.enabled = enabled
-        self.morphology_widget.YOLO_layer_combo.enabled = enabled
-        if enabled:
-            self.morphology_widget.YOLO_weights_combo.choices = list(
-                YOLO_WEIGHT_URL_MAP.keys()
-            )
-        else:
-            self.morphology_widget.YOLO_weights_combo.choices = []
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh_paired_model()
 
     def get_settings(self):
         return self.cell_classifier.get_settings()
