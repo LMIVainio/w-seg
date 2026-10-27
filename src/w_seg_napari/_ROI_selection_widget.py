@@ -17,6 +17,30 @@ from qtpy.QtWidgets import (
 )
 from skimage.draw import line
 
+from w_seg_napari._geometry import world_to_data, yx
+
+
+def _world_shape_to_data(vertices, layer):
+    """ROI vertices (world coordinates, last two axes y, x) -> array coordinates of layer."""
+    v = np.asarray(vertices, dtype=float)
+    return np.stack(
+        [
+            world_to_data(v[:, -2], layer.scale, layer.translate, 0),
+            world_to_data(v[:, -1], layer.scale, layer.translate, 1),
+        ],
+        axis=1,
+    )
+
+
+def _shifted_translate(layer, y0, x0):
+    """Translate of a layer cropped at array position (y0, x0): the cropped
+    array starts y0 rows / x0 columns further along in world coordinates."""
+    sy, sx = yx(layer.scale, 1.0)
+    new = np.array(layer.translate, dtype=float)
+    new[-2] += y0 * sy
+    new[-1] += x0 * sx
+    return tuple(new)
+
 
 class ROISelectionWidget(QWidget):
     """Self-contained ROI selection panel.
@@ -425,16 +449,15 @@ class ROISelectionWidget(QWidget):
 
         try:
             keep_dims = self.chk_keep_dimensions.isChecked()
-            # 1. Determine active shape coordinates
+            # 1. Shapes are drawn in world coordinates. Every layer has its own
+            #    scale/translate (a cropped layer is translated), so the shapes are
+            #    converted to the array coordinates of each target layer.
             if self.chk_merge_shapes.isChecked():
-                shapes_to_use = self.roi_layer.data  # All shapes
+                shape_idx = list(range(len(self.roi_layer.data)))
             else:
-                shapes_to_use = [self.roi_layer.data[-1]]  # Latest shape only
-
-            # 2. Compute bounding box across selected target shape(s)
-            all_verts = np.vstack(shapes_to_use)
-            ymin, xmin = np.floor(all_verts.min(axis=0)).astype(int)
-            ymax, xmax = np.ceil(all_verts.max(axis=0)).astype(int)
+                shape_idx = [len(self.roi_layer.data) - 1]  # latest only
+            world_shapes = [self.roi_layer.data[i] for i in shape_idx]
+            shape_types = [self.roi_layer.shape_type[i] for i in shape_idx]
 
             for name in target_layers:
                 # STRICT GUARD: Ensure layer exists AND is explicitly in the checked target list
@@ -444,20 +467,24 @@ class ROISelectionWidget(QWidget):
                 layer = self.viewer.layers[name]
                 h, w = layer.data.shape[:2]
 
+                data_shapes = [
+                    _world_shape_to_data(sh, layer) for sh in world_shapes
+                ]
+                all_verts = np.vstack(data_shapes)
+                ymin, xmin = np.floor(all_verts.min(axis=0)).astype(int)
+                ymax, xmax = np.ceil(all_verts.max(axis=0)).astype(int)
+
                 y0, x0 = max(0, ymin), max(0, xmin)
                 y1, x1 = min(h, ymax), min(w, xmax)
 
                 if y1 <= y0 or x1 <= x0:
                     continue
 
-                # 3. Rasterize mask strictly matching target shape choice
-                masks = self.roi_layer.to_masks(mask_shape=(h, w))
-
-                if self.chk_merge_shapes.isChecked():
-                    mask_full = np.logical_or.reduce(masks)
-                else:
-                    # Explicitly use mask of the last shape
-                    mask_full = masks[-1]
+                # 2. Rasterize the shapes in the array coordinates of this layer
+                masks = Shapes(data_shapes, shape_type=shape_types).to_masks(
+                    mask_shape=(h, w)
+                )
+                mask_full = np.logical_or.reduce(masks)
 
                 if self.chk_invert.isChecked():
                     mask_full = ~mask_full
@@ -495,7 +522,7 @@ class ROISelectionWidget(QWidget):
         cropped_data[~local_mask] = 0
 
         new_name = f'{layer.name}_cropped' if keep_orig else layer.name
-        new_translate = (layer.translate[0] + y0, layer.translate[1] + x0)
+        new_translate = _shifted_translate(layer, y0, x0)
 
         if keep_orig:
             # 1. Store original opacity
@@ -503,7 +530,10 @@ class ROISelectionWidget(QWidget):
 
             # 2. Add new cropped layer with full original opacity
             new_layer = self.viewer.add_image(
-                cropped_data, name=new_name, translate=new_translate
+                cropped_data,
+                name=new_name,
+                scale=layer.scale,
+                translate=new_translate,
             )
             new_layer.opacity = orig_opacity
 
@@ -567,40 +597,25 @@ class ROISelectionWidget(QWidget):
             else:
                 valid_mask = np.zeros_like(layer.data, dtype=bool)
 
-            if self.chk_keep_original.isChecked():
-                new_data = np.where(valid_mask, layer.data, 0)
-                self.viewer.add_labels(
-                    new_data,
-                    name=f'[ROI] {layer.name}',
-                    scale=layer.scale,
-                    translate=layer.translate,
-                )
-            else:
-                layer.data[~valid_mask] = 0
-                layer.refresh()
-
+            result = np.where(valid_mask, layer.data, 0)[y0:y1, x0:x1]
         else:
             # Mode 2: Strictly clip label pixels to the selection boundary
-            cropped_data = np.zeros_like(sliced_data)
-            cropped_data[local_mask] = sliced_data[local_mask]
+            result = np.zeros_like(sliced_data)
+            result[local_mask] = sliced_data[local_mask]
 
-            if self.chk_keep_original.isChecked():
-                self.viewer.add_labels(
-                    cropped_data,
-                    name=f'[ROI] {layer.name}',
-                    scale=layer.scale,
-                    translate=(
-                        layer.translate[0] + y0 * layer.scale[0],
-                        layer.translate[1] + x0 * layer.scale[1],
-                    ),
-                )
-            else:
-                layer.data[y0:y1, x0:x1] = cropped_data
-                layer.data[:y0, :] = 0
-                layer.data[y1:, :] = 0
-                layer.data[:, :x0] = 0
-                layer.data[:, x1:] = 0
-                layer.refresh()
+        # The result has the size of the selection box, like the cropped
+        # images, so labels and images stay pairable in the morphology tab.
+        new_translate = _shifted_translate(layer, y0, x0)
+        if self.chk_keep_original.isChecked():
+            self.viewer.add_labels(
+                result,
+                name=f'[ROI] {layer.name}',
+                scale=layer.scale,
+                translate=new_translate,
+            )
+        else:
+            layer.data = result
+            layer.translate = new_translate
 
 
 class LineLabelSelectionWidget(QWidget):
@@ -855,8 +870,11 @@ class LineLabelSelectionWidget(QWidget):
                 layer = self.viewer.layers[name]
                 h, w = layer.data.shape[:2]
 
-                # Rasterize 1-pixel wide line path
-                line_mask = self._rasterize_line_shapes(shapes_to_use, (h, w))
+                # Rasterize 1-pixel wide line path (shapes are in world coordinates)
+                line_mask = self._rasterize_line_shapes(
+                    [_world_shape_to_data(sh, layer) for sh in shapes_to_use],
+                    (h, w),
+                )
 
                 # Identify all unique label IDs touched by the line path
                 intersecting_ids = np.unique(layer.data[line_mask])

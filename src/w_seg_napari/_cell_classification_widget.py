@@ -7,6 +7,7 @@ import joblib
 import napari
 import numpy as np
 import pandas as pd
+import sklearn
 import tifffile
 from qtpy.QtCore import QStandardPaths
 from qtpy.QtWidgets import (
@@ -40,6 +41,15 @@ try:
     from lightgbm import LGBMClassifier
 except ImportError:
     LGBMClassifier = None
+
+# Version of the classifier file written by CellClassifierManager.save_model
+CLASSIFIER_SCHEMA_VERSION = 2
+
+
+def _clean_extraction_config(config) -> dict:
+    """Copy of a feature extraction config without non-measurement entries."""
+    return {k: v for k, v in (config or {}).items() if k != 'classifier_type'}
+
 
 # Factory Registry for extensible estimator instantiation
 SUPPORTED_CLASSIFIERS = {
@@ -245,12 +255,7 @@ class CellClassifierManager:
         self.is_trained = True
 
         # Store standardized model config
-        self.model_config = {
-            'classifier_type': self.classifier_type,
-            'hyperparameters': self.hyperparameters,
-            'feature_names': list(self.feature_names),
-            'feature_config': feature_config or {},
-        }
+        self.model_config = self._make_model_config(feature_config)
 
         # Calculate feature importances if model supports it
         clf_step = self.pipeline.named_steps['clf']
@@ -312,28 +317,44 @@ class CellClassifierManager:
         # Single-pass 2D array re-indexing
         return lut[labels_layer]
 
+    def _make_model_config(self, feature_config: dict | None) -> dict:
+        """The one config layout used after training, saving and loading.
+
+        feature_extraction_config holds the morphology measurement settings
+        (pixel spacing, search radius, ...) the classifier was trained with.
+        """
+        return {
+            'schema_version': CLASSIFIER_SCHEMA_VERSION,
+            'classifier_type': self.classifier_type,
+            'hyperparameters': dict(self.hyperparameters),
+            'feature_names': list(self.feature_names),
+            'feature_extraction_config': _clean_extraction_config(
+                feature_config
+            ),
+        }
+
     def save_model(self, filepath: str, feature_config: dict | None = None):
         """Saves trained model pipeline and unified payload schema."""
         if not filepath.endswith('.joblib'):
             filepath += '.joblib'
 
+        if not feature_config:  # fall back to the config of the training run
+            feature_config = self.model_config.get(
+                'feature_extraction_config', {}
+            )
+        self.model_config = self._make_model_config(feature_config)
+
         payload = {
+            'schema_version': CLASSIFIER_SCHEMA_VERSION,
+            'sklearn_version': sklearn.__version__,
             'pipeline': self.pipeline,
             'classifier_type': self.classifier_type,
             'hyperparameters': self.hyperparameters,
-            'feature_names': self.feature_names,
+            'feature_names': list(self.feature_names),
             'is_trained': self.is_trained,
-            'feature_config': feature_config
-            or self.feature_extraction_config.get('feature_config', {}),
-        }
-
-        # Update cached model_config
-        self.model_config = {
-            'classifier_type': self.classifier_type,
-            'hyperparameters': self.hyperparameters,
-            'feature_names': self.feature_names,
-            'feature_extraction_config': feature_config
-            or self.feature_extraction_config.get('feature_config', {}),
+            'feature_extraction_config': self.model_config[
+                'feature_extraction_config'
+            ],
         }
 
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
@@ -342,10 +363,26 @@ class CellClassifierManager:
         print(f'[w-seg] Model payload saved successfully to: {filepath}')
 
     def load_model(self, filepath: str) -> dict[str, Any]:
-        """Loads trained model payload and updates active state."""
+        """Loads trained model payload and updates active state.
+
+        Only load classifier files from sources you trust: joblib files can
+        run code when opened.
+        """
         payload = joblib.load(filepath)
+        if not isinstance(payload, dict) or 'pipeline' not in payload:
+            raise ValueError(
+                'This file is not a w-seg classifier (no pipeline found).'
+            )
+
+        saved_with = payload.get('sklearn_version')
+        if saved_with and saved_with != sklearn.__version__:
+            print(
+                f'[w-seg] Warning: classifier was saved with scikit-learn {saved_with}, '
+                f'this is {sklearn.__version__}. Predictions may differ or fail.'
+            )
+
         self.pipeline = payload['pipeline']
-        self.feature_names = payload['feature_names', []]
+        self.feature_names = list(payload.get('feature_names', []))
         self.is_trained = payload.get('is_trained', True)
         self.hyperparameters = payload.get('hyperparameters', {})
         self.loaded_model_path = filepath
@@ -363,17 +400,14 @@ class CellClassifierManager:
         else:
             self.classifier_type = 'Loaded Classifier'
 
+        # Files from before schema 2 used 'feature_config' (and sometimes
+        # stored classifier_type inside it); both are handled here.
         fe_config = (
             payload.get('feature_extraction_config')
             or payload.get('feature_config')
             or {}
         )
-        self.model_config = {
-            'classifier_type': self.classifier_type,
-            'hyperparameters': self.hyperparameters,
-            'feature_names': self.feature_names,
-            'feature_config': fe_config,
-        }
+        self.model_config = self._make_model_config(fe_config)
         return self.model_config
 
 
@@ -683,12 +717,9 @@ class CellClassificationWidget(QWidget):
                 X, y, feature_config=self.feature_extraction_config
             )
 
-            # Store current active feature config as trained model config
-            if self.feature_extraction_config:
-                self.model_config = self.feature_extraction_config.copy()
-            # Store classifier type in config
-            self.model_config['classifier_type'] = (
-                self.clf_manager.classifier_type
+            # Measurement settings the model was trained with (flat dict)
+            self.model_config = dict(
+                self.clf_manager.model_config['feature_extraction_config']
             )
 
             top_feat_str = '\n'.join(
@@ -786,21 +817,13 @@ class CellClassificationWidget(QWidget):
         if path:
             try:
                 self.clf_manager.load_model(path)
-                self.model_config = getattr(
-                    self.clf_manager, 'model_config', {}
+                # Measurement settings the model was trained with (flat dict)
+                self.model_config = dict(
+                    self.clf_manager.model_config['feature_extraction_config']
                 )
-                if (
-                    isinstance(self.model_config, dict)
-                    and 'classifier_type' in self.model_config
-                ):
-                    self.clf_manager.classifier_type = self.model_config[
-                        'classifier_type'
-                    ]
-                else:
-                    print(
-                        f'[w-seg debug] Available keys in model_config: {list(self.model_config.keys()) if self.model_config else "None"}'
-                    )
-                    self.clf_manager.classifier_type = 'Uspecified Classifier'
+                n_est = self.clf_manager.hyperparameters.get('n_estimators')
+                if n_est:
+                    self.spin_estimators.setValue(int(n_est))
                 self.lbl_status.setText(
                     f'Status: {self.clf_manager.classifier_type} Loaded'
                 )
@@ -844,10 +867,7 @@ class CellClassificationWidget(QWidget):
             hasattr(self, 'on_apply_config_callback')
             and self.on_apply_config_callback
         ):
-            model_fe_config = self.clf_manager.model_config.get(
-                'feature_extraction_config', {}
-            )
-            self.on_apply_config_callback(model_fe_config)
+            self.on_apply_config_callback(dict(self.model_config))
             info_txt = (
                 '<b>Successfully copied model parameters to input fields!</b>'
                 '<b>Remember</b> to Remeasure Cell Wall Morphology to apply changes!'
@@ -855,9 +875,7 @@ class CellClassificationWidget(QWidget):
             QMessageBox.information(self, 'Parameters Restored', info_txt)
 
             self.combo_algo.blockSignals(True)
-            idx = self.combo_algo.findText(
-                self.model_config['classifier_type']
-            )
+            idx = self.combo_algo.findText(self.clf_manager.classifier_type)
             if idx >= 0:
                 self.combo_algo.setCurrentIndex(idx)
             self.combo_algo.blockSignals(False)
@@ -962,11 +980,13 @@ class CellClassificationWidget(QWidget):
             export_df[column_name] = custom_classes
 
         # Active extraction config metadata dictionary
-        meta_config = (
+        meta_config = dict(
             getattr(self, 'model_config', None)
             or getattr(self, 'feature_extraction_config', None)
             or {}
         )
+        if self.clf_manager.is_trained:
+            meta_config['classifier_type'] = self.clf_manager.classifier_type
 
         # Dispatch to specific writer depending on extension
         if filepath.lower().endswith('.xlsx'):
@@ -1474,8 +1494,10 @@ class CellClassificationWidget(QWidget):
                     }
                 )
 
-        meta_df = pd.DataFrame(meta_items)
-        meta_df.to_excel(writer, sheet_name='Extraction Config', index=False)
+            meta_df = pd.DataFrame(meta_items)
+            meta_df.to_excel(
+                writer, sheet_name='Extraction Config', index=False
+            )
 
     def _save_csv_with_meta_header(
         self, filepath: str, df: pd.DataFrame, config: dict

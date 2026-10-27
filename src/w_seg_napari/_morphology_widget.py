@@ -1,6 +1,7 @@
 import concurrent.futures
 import sys
 from concurrent.futures import as_completed
+from pathlib import Path
 
 import napari
 import numpy as np
@@ -16,6 +17,7 @@ from qtpy.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -37,12 +39,13 @@ from skimage.segmentation import (
     relabel_sequential,
 )
 
+from w_seg_napari._geometry import label_frame_to_image_pixels, spatial_shape
 from w_seg_napari._wsegutils import (
-    YOLO_WEIGHT_URL_MAP,
     apply_feature_colormap,
     build_cell_contact_graph,
     create_yolo_classification_labels_layer,
     extract_spatial_feature_matrix,
+    get_active_model_info,
     load_yolo_model,
     predict_yolo_tissue_on_image,
 )
@@ -924,6 +927,11 @@ def measure_cell_morphology(
     radial_sym: bool = False,
     use_YOLO: bool = False,
     YOLO_weights: str = '',
+    yolo_image: np.ndarray = None,
+    yolo_image_scale=None,
+    yolo_image_translate=None,
+    labels_scale=None,
+    labels_translate=None,
     worker=None,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -943,7 +951,7 @@ def measure_cell_morphology(
 
     if len(unique_ids) == 0:
         print('[w-seg] Warning: No labels found.')
-        return pd.DataFrame(), labels_layer
+        return pd.DataFrame(), labels_layer, {}
 
     # Preprocess Signal
     if cell_wall_signal is not None:
@@ -1137,12 +1145,27 @@ def measure_cell_morphology(
         yolo_model = load_yolo_model(YOLO_weights)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        # Load weights and insantiate YOLO model
-        weights_key = YOLO_weights
-        yolo_model = load_yolo_model(weights_key)
-        df_combined, class_map = predict_yolo_tissue_on_image(
-            df_new=df_combined,
-            image_np=raw_signal,
+        # The crops are cut from the YOLO image (the RGB image), not from the
+        # cell wall signal. Cell positions were measured on the labels array,
+        # so they are mapped through world coordinates into the pixel grid of
+        # that image (this also handles pixel spacing and ROI-cropped layers).
+        if yolo_image is None:
+            yolo_image = raw_signal
+            yolo_image_scale, yolo_image_translate = (
+                labels_scale,
+                labels_translate,
+            )
+        df_for_crops = label_frame_to_image_pixels(
+            df_combined,
+            pixel_spacing=pixel_spacing,
+            labels_scale=labels_scale,
+            labels_translate=labels_translate,
+            image_scale=yolo_image_scale,
+            image_translate=yolo_image_translate,
+        )
+        df_pred, class_map = predict_yolo_tissue_on_image(
+            df_new=df_for_crops,
+            image_np=yolo_image,
             img_translation=None,
             img_scale=None,
             yolo_model=yolo_model,
@@ -1150,6 +1173,9 @@ def measure_cell_morphology(
             context_factor=2.5,
             device=device,
         )
+        # Keep the measured values; add only the YOLO columns
+        for col in df_pred.columns.difference(df_combined.columns):
+            df_combined[col] = df_pred[col]
     if worker is not None and worker._abort_requested:
         return pd.DataFrame(), labels_layer, {}
     if worker is not None:
@@ -1190,9 +1216,14 @@ class MorphologyWidget(QWidget):
         self.center_layer_name = 'Center point'
         self.center_coords = None  # (y, x) coordinates of the center point
 
+        # Paired YOLO classifier of the model loaded in tab 1
+        self._paired_yolo = None
+        self._last_model_name = None
+
         # Build UI & Connect Signals
         self._init_ui()
         self._connect_signals()
+        self.refresh_paired_model()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -1297,12 +1328,14 @@ class MorphologyWidget(QWidget):
         self.use_YOLO_cb = QCheckBox('Use YOLO Classifier')
         self.use_YOLO_cb.setChecked(True)
         self.YOLO_layer_combo = QComboBox()
-        self.YOLO_weights_combo = QComboBox()
-        self.YOLO_weights_combo.addItems(list(YOLO_WEIGHT_URL_MAP.keys()))
+        # The classifier comes with the model loaded in tab 1 (see
+        # refresh_paired_model); there is nothing to choose here.
+        self.YOLO_paired_label = QLabel('No model loaded')
+        self.YOLO_paired_label.setWordWrap(True)
 
         YOLO_layout.addRow(self.use_YOLO_cb)
         YOLO_layout.addRow('RGB image for YOLO:', self.YOLO_layer_combo)
-        YOLO_layout.addRow('Select YOLO weights:', self.YOLO_weights_combo)
+        YOLO_layout.addRow('Paired YOLO weights:', self.YOLO_paired_label)
 
         YOLO_group.setLayout(YOLO_layout)
         layout.addWidget(YOLO_group)
@@ -1406,9 +1439,7 @@ class MorphologyWidget(QWidget):
 
         # --- Checkbox Dependent UI Toggles ---
         # YOLO Controls enable/disable
-        self.use_YOLO_cb.toggled.connect(self.YOLO_weights_combo.setEnabled)
         self.use_YOLO_cb.toggled.connect(self.YOLO_layer_combo.setEnabled)
-        self.YOLO_weights_combo.setEnabled(self.use_YOLO_cb.isChecked())
         self.YOLO_layer_combo.setEnabled(self.use_YOLO_cb.isChecked())
 
         # Radial Symmetry / Center Point Button toggle
@@ -1423,6 +1454,10 @@ class MorphologyWidget(QWidget):
         # Update spinbox bounds when selected label layer changes
         self.labels_combo.currentIndexChanged.connect(
             self._update_inspection_bounds
+        )
+        # Only images with the same size as the labels can be paired with them
+        self.labels_combo.currentIndexChanged.connect(
+            self._refresh_image_choices
         )
 
         # --- Napari Layer List Event Listeners ---
@@ -1461,8 +1496,17 @@ class MorphologyWidget(QWidget):
         fe_config = self.get_feature_extraction_config()
         num_workers = self.num_workers_spin.value()
         invert_signal = self.invert_signal_cb.isChecked()
-        use_yolo = self.use_YOLO_cb.isChecked()
-        yolo_weights = self.YOLO_weights_combo.currentText()
+        self.refresh_paired_model()
+        yolo_weights = self._paired_yolo
+        use_yolo = self.use_YOLO_cb.isChecked() and yolo_weights is not None
+        yolo_layer = self.YOLO_layer_combo.currentData() if use_yolo else None
+        yolo_data = yolo_layer.data if yolo_layer is not None else None
+        yolo_scale = yolo_layer.scale if yolo_layer is not None else None
+        yolo_translate = (
+            yolo_layer.translate if yolo_layer is not None else None
+        )
+        labels_scale = lbl_layer.scale
+        labels_translate = lbl_layer.translate
         clear_borders = self.clear_border_cb.isChecked()
         center_coords = self.center_coords
 
@@ -1480,6 +1524,11 @@ class MorphologyWidget(QWidget):
                     center_coords=center_coords,
                     use_YOLO=use_yolo,
                     YOLO_weights=yolo_weights,
+                    yolo_image=yolo_data,
+                    yolo_image_scale=yolo_scale,
+                    yolo_image_translate=yolo_translate,
+                    labels_scale=labels_scale,
+                    labels_translate=labels_translate,
                     clear_borders=clear_borders,
                     worker=worker_ref,
                     **fe_config,
@@ -1854,41 +1903,95 @@ class MorphologyWidget(QWidget):
 
         # Block signals during combobox updates to avoid cascading callbacks
         _b1 = QSignalBlocker(self.labels_combo)
-        _b2 = QSignalBlocker(self.signal_combo)
-        _b3 = QSignalBlocker(self.YOLO_layer_combo)
 
         # Cache previous layer names rather than raw layer instances
         cur_label_name = self.labels_combo.currentText()
-        cur_signal_name = self.signal_combo.currentText()
-        cur_yolo_name = self.YOLO_layer_combo.currentText()
-
         self.labels_combo.clear()
-        self.signal_combo.clear()
-        self.YOLO_layer_combo.clear()
-
-        # Re-populate choices with current viewer layers
         for lyr in self.viewer.layers:
             if isinstance(lyr, napari.layers.Labels):
                 self.labels_combo.addItem(lyr.name, lyr)
-            elif isinstance(lyr, napari.layers.Image):
-                self.signal_combo.addItem(lyr.name, lyr)
-                self.YOLO_layer_combo.addItem(lyr.name, lyr)
 
         # Restore previous selection by layer name if still present
         idx_label = self.labels_combo.findText(cur_label_name)
         if idx_label != -1:
             self.labels_combo.setCurrentIndex(idx_label)
 
+        self._refresh_image_choices()
+
+        # Update inspection bounds based on active label layer without locking UI
+        self._update_inspection_bounds()
+
+    def _refresh_image_choices(self, *_):
+        """
+        Lists the image layers that can be paired with the selected labels layer:
+        only images with the same size (rows x columns). After an ROI selection
+        the cropped layers have the new size, so the uncropped originals drop
+        out of the lists.
+        """
+        if self.viewer is None:
+            return
+        lbl_layer = self.labels_combo.currentData()
+        lbl_shape = (
+            spatial_shape(lbl_layer.data) if lbl_layer is not None else None
+        )
+
+        _b2 = QSignalBlocker(self.signal_combo)
+        _b3 = QSignalBlocker(self.YOLO_layer_combo)
+        cur_signal_name = self.signal_combo.currentText()
+        cur_yolo_name = self.YOLO_layer_combo.currentText()
+        self.signal_combo.clear()
+        self.YOLO_layer_combo.clear()
+
+        n_hidden = 0
+        for lyr in self.viewer.layers:
+            if not isinstance(lyr, napari.layers.Image):
+                continue
+            if lbl_shape is not None and spatial_shape(lyr.data) != lbl_shape:
+                n_hidden += 1
+                continue
+            self.signal_combo.addItem(lyr.name, lyr)
+            self.YOLO_layer_combo.addItem(lyr.name, lyr)
+
         idx_signal = self.signal_combo.findText(cur_signal_name)
         if idx_signal != -1:
             self.signal_combo.setCurrentIndex(idx_signal)
-
         idx_yolo = self.YOLO_layer_combo.findText(cur_yolo_name)
         if idx_yolo != -1:
             self.YOLO_layer_combo.setCurrentIndex(idx_yolo)
 
-        # Update inspection bounds based on active label layer without locking UI
-        self._update_inspection_bounds()
+        tip = (
+            f'{n_hidden} image layer(s) with a different size than the labels are not listed.'
+            if n_hidden
+            else ''
+        )
+        self.signal_combo.setToolTip(tip)
+        self.YOLO_layer_combo.setToolTip(tip)
+
+    def refresh_paired_model(self):
+        """
+        Reads the model loaded in tab 1 and shows the YOLO classifier that is
+        paired with it. When the model changes, the radial-symmetry option is
+        preset from the model; later manual changes are kept.
+        """
+        info = get_active_model_info()
+        self._paired_yolo = info['yolo']
+        if self._paired_yolo:
+            self.YOLO_paired_label.setText(Path(self._paired_yolo).name)
+        else:
+            self.YOLO_paired_label.setText(
+                'none (this model has no paired YOLO classifier)'
+            )
+        self.use_YOLO_cb.setEnabled(self._paired_yolo is not None)
+
+        if info['name'] != self._last_model_name:
+            self._last_model_name = info['name']
+            self.use_YOLO_cb.setChecked(self._paired_yolo is not None)
+            if info['radial_symmetry'] is not None:
+                self.radial_symmetry_cb.setChecked(
+                    bool(info['radial_symmetry'])
+                )
+        elif self._paired_yolo is None:
+            self.use_YOLO_cb.setChecked(False)
 
     def _update_inspection_bounds(self):
         """Updates min/max bounds for inspect_cell_id_spin based on selected Labels layer."""
@@ -1907,6 +2010,21 @@ class MorphologyWidget(QWidget):
                 self.inspect_cell_id_spin.setRange(1, 1)
         else:
             self.inspect_cell_id_spin.setRange(1, 999999)
+
+    def snapshot_params(self) -> dict:
+        """Everything measure_cell_morphology needs from the UI (except the
+        layer data), for the batch tab. Take it on the main thread."""
+        self.refresh_paired_model()
+        yolo = self._paired_yolo if self.use_YOLO_cb.isChecked() else None
+        return {
+            **self.get_feature_extraction_config(),
+            'num_workers': self.num_workers_spin.value(),
+            'invert_signal': self.invert_signal_cb.isChecked(),
+            'clear_borders': self.clear_border_cb.isChecked(),
+            'center_coords': self.center_coords,
+            'use_YOLO': yolo is not None,
+            'YOLO_weights': yolo or '',
+        }
 
     def get_feature_extraction_config(self) -> dict:
         """Extracts locked feature extraction parameters from UI widgets."""

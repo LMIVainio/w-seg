@@ -465,6 +465,65 @@ _MODEL_CONFIGS = weakref.WeakKeyDictionary()
 BUNDLE_DIR = Path.home() / '.wseg_models'
 
 
+# Downloadable model bundles: name -> URL of a zip (release asset) that holds
+# model.keras, config.json and optionally the paired YOLO file. Add one line
+# per released model, e.g.
+#   'aspen_tolblue_v1': 'https://github.com/LMIVainio/w-seg/releases/download/w-seg/aspen_tolblue_v1.zip',
+MODEL_ZIP_URL_MAP = {}
+
+# Old-style weights files do not carry a config, so what travels with them
+# (paired YOLO classifier, radial symmetry preset) is listed here.
+LEGACY_COMPANIONS = {
+    'w-seg_TolBlue_Populus.weights.h5': {
+        'yolo': 'yolov11_Populus_TolBlu.pt',
+        'radial_symmetry': False,
+    },
+    'w-seg_RuthRed-TolBlu_Arabidopsis.weights.h5': {
+        'yolo': 'yolov11_Arabidopsis_RuthRed_TolBlu.pt',
+        'radial_symmetry': True,
+    },
+}
+
+# What the other tabs need to know about the model loaded in tab 1. Read it
+# with get_active_model_info(); there is no signal between the tabs.
+_ACTIVE_MODEL_INFO = {
+    'name': None,
+    'yolo': None,
+    'radial_symmetry': None,
+}
+
+
+def get_active_model_info() -> dict:
+    """Name, paired YOLO weights (path or release name, None if there is none) and
+    radial-symmetry preset of the model loaded in tab 1."""
+    return dict(_ACTIVE_MODEL_INFO)
+
+
+def _set_active_model_info(name, yolo, radial_symmetry):
+    _ACTIVE_MODEL_INFO.update(
+        name=name, yolo=yolo, radial_symmetry=radial_symmetry
+    )
+
+
+def install_model_zip(source: str, overwrite: bool = False) -> Path:
+    """
+    Install a model zip (a URL, a key of MODEL_ZIP_URL_MAP or a local .zip
+    file) into ~/.wseg_models/<name>/ and return that folder. The zip must
+    contain model.keras and config.json, either at the top level or inside one
+    folder. An already installed model is kept unless overwrite is True.
+    """
+    from w_seg_napari._model_zip import install_zip
+
+    url = MODEL_ZIP_URL_MAP.get(source, source)
+    if source in MODEL_ZIP_URL_MAP:
+        name = source
+    else:
+        name = Path(str(url).split('?')[0]).stem
+    target = install_zip(url, name, BUNDLE_DIR, overwrite=overwrite)
+    print(f'[w-seg] Model available in {target}')
+    return target
+
+
 def get_model_config(model) -> dict:
     """Config of a model returned by load_my_generator (old models get the legacy config)."""
     from w_seg_napari._model_config import legacy_config
@@ -548,8 +607,20 @@ def load_my_generator(
 
     bundle = find_bundle(w_name)
     if bundle is not None:
+        from w_seg_napari._model_config import get_companions
+
         generator, cfg = load_model_bundle(bundle, device)
         _MODEL_CONFIGS[generator] = cfg
+        comp = get_companions(cfg)
+        yolo_file = bundle / comp['yolo'] if comp['yolo'] else None
+        if yolo_file is not None and not yolo_file.is_file():
+            print(f'[w-seg] Warning: paired YOLO file {yolo_file} not found')
+            yolo_file = None
+        _set_active_model_info(
+            bundle.name,
+            str(yolo_file) if yolo_file else None,
+            comp['radial_symmetry'],
+        )
         print(f'Model bundle loaded on device: {device}')
         print(f'Model loaded from folder: {bundle}')
         print(
@@ -564,6 +635,10 @@ def load_my_generator(
     generator.load_weights(weights_file)
     generator.eval()
     _MODEL_CONFIGS[generator] = legacy_config()
+    comp = LEGACY_COMPANIONS.get(Path(w_name).name, {})
+    _set_active_model_info(
+        Path(w_name).name, comp.get('yolo'), comp.get('radial_symmetry')
+    )
 
     print(f'Model loaded successfully on device: {device}')
     print(f'Model loaded from path: {weights_file}')
