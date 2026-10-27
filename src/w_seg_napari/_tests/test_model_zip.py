@@ -55,3 +55,21 @@ def test_zip_cannot_write_outside_the_folder(tmp_path):
         install_zip(str(z), 'm', tmp_path / 'models')
     assert not (tmp_path / 'models' / 'evil.txt').exists()
     assert not (tmp_path / 'evil.txt').exists()
+
+
+def test_get_companions_tolerates_hand_edited_json(tmp_path):
+    from w_seg_napari._model_config import get_companions
+
+    # companions written as a plain string = the YOLO file name
+    assert get_companions({'companions': 'a.pt'})['yolo'] == 'a.pt'
+    # dict form, missing key, and junk values
+    assert get_companions({'companions': {'yolo': 'b.pt'}})['yolo'] == 'b.pt'
+    assert get_companions({})['yolo'] is None
+    assert get_companions({'companions': 5})['yolo'] is None
+    # single .pt in the folder is picked up automatically
+    (tmp_path / 'model.keras').write_text('x')
+    (tmp_path / 'yolo_x.pt').write_text('x')
+    assert get_companions({}, tmp_path)['yolo'] == 'yolo_x.pt'
+    # two .pt files are ambiguous: nothing guessed
+    (tmp_path / 'other.pt').write_text('x')
+    assert get_companions({}, tmp_path)['yolo'] is None

@@ -21,6 +21,7 @@ BOTH axes, i.e. a distance of k * sqrt(2).
 
 import json
 import os
+from pathlib import Path
 
 FORMAT_VERSION = 1
 
@@ -113,9 +114,25 @@ def validate_config(cfg):
     return cfg
 
 
-def get_companions(cfg):
-    """The companions of a model (older configs without the key get the defaults)."""
-    return {**DEFAULT_COMPANIONS, **(cfg.get('companions') or {})}
+def get_companions(cfg, bundle_dir=None):
+    """The companions of a model, tolerant of hand-written config.json files.
+
+    ``companions`` may be a dict ({"yolo": "x.pt", "radial_symmetry": true}), a
+    plain string (taken as the YOLO file name) or missing. When no YOLO file is
+    named and ``bundle_dir`` is given, a single ``*.pt`` file in that folder is
+    used, so a zip of model.keras + config.json + the .pt needs no JSON editing.
+    """
+    raw = cfg.get('companions')
+    comp = dict(DEFAULT_COMPANIONS)
+    if isinstance(raw, str):
+        comp['yolo'] = raw.strip() or None
+    elif isinstance(raw, dict):
+        comp.update(raw)
+    if not comp.get('yolo') and bundle_dir is not None:
+        pts = sorted(Path(bundle_dir).glob('*.pt'))
+        if len(pts) == 1:
+            comp['yolo'] = pts[0].name
+    return comp
 
 
 def save_config(path, cfg):

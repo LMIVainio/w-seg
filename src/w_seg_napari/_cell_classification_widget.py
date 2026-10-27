@@ -626,6 +626,17 @@ class CellClassificationWidget(QWidget):
         else:
             return 'Not Trained/Loaded'
 
+    def _lookup_source_transform(self, layer_name):
+        """scale/translate of the measured labels layer (cropped layers are shifted)."""
+        try:
+            lyr = self.viewer.layers[layer_name]
+            return {
+                'scale': tuple(lyr.scale),
+                'translate': tuple(lyr.translate),
+            }
+        except (AttributeError, KeyError, ValueError):
+            return {}
+
     def bind_measured_data(
         self,
         df: pd.DataFrame,
@@ -636,6 +647,7 @@ class CellClassificationWidget(QWidget):
         self.cached_df = w.sanitize_feature_matrix(df)
         self.cached_labels_data = labels_data.copy()
         self.current_layer_name = layer_name
+        self._source_transform = self._lookup_source_transform(layer_name)
 
         # Cache active measurement extraction config
         if feature_extraction_config is not None:
@@ -672,9 +684,14 @@ class CellClassificationWidget(QWidget):
             if annot_layer_name in self.viewer.layers:
                 self.annotation_layer = self.viewer.layers[annot_layer_name]
                 self.annotation_layer.data = annot_data
+                for k, v in getattr(self, '_source_transform', {}).items():
+                    setattr(self.annotation_layer, k, v)
             else:
                 self.annotation_layer = self.viewer.add_labels(
-                    annot_data, name=annot_layer_name, opacity=0.6
+                    annot_data,
+                    name=annot_layer_name,
+                    opacity=0.6,
+                    **getattr(self, '_source_transform', {}),
                 )
 
             # Configure active painting mode
@@ -782,7 +799,10 @@ class CellClassificationWidget(QWidget):
                     self.viewer.layers[pred_layer_name].data = pred_2d_layer
                 else:
                     self.viewer.add_labels(
-                        pred_2d_layer, name=pred_layer_name, opacity=0.7
+                        pred_2d_layer,
+                        name=pred_layer_name,
+                        opacity=0.7,
+                        **getattr(self, '_source_transform', {}),
                     )
             # Enable export button
             if hasattr(self, 'btn_export_data'):

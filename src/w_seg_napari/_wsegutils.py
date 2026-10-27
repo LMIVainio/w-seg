@@ -611,7 +611,7 @@ def load_my_generator(
 
         generator, cfg = load_model_bundle(bundle, device)
         _MODEL_CONFIGS[generator] = cfg
-        comp = get_companions(cfg)
+        comp = get_companions(cfg, bundle)
         yolo_file = bundle / comp['yolo'] if comp['yolo'] else None
         if yolo_file is not None and not yolo_file.is_file():
             print(f'[w-seg] Warning: paired YOLO file {yolo_file} not found')

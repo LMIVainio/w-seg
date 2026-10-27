@@ -39,7 +39,11 @@ from skimage.segmentation import (
     relabel_sequential,
 )
 
-from w_seg_napari._geometry import label_frame_to_image_pixels, spatial_shape
+from w_seg_napari._geometry import (
+    label_frame_to_image_pixels,
+    spatial_shape,
+    world_to_data,
+)
 from w_seg_napari._wsegutils import (
     apply_feature_colormap,
     build_cell_contact_graph,
@@ -626,6 +630,16 @@ def sample_cell_wall(
     }
 
 
+def _transform_kwargs(scale, translate):
+    """add_* keyword arguments carrying a layer's transform (empty if none)."""
+    tf = {}
+    if scale is not None:
+        tf['scale'] = tuple(scale)
+    if translate is not None:
+        tf['translate'] = tuple(translate)
+    return tf
+
+
 def visualize_cell_rays(
     viewer: 'napari.Viewer',
     labels_layer: np.ndarray,
@@ -641,10 +655,15 @@ def visualize_cell_rays(
     offset: float = 0.5,
     invert_signal: bool = False,
     show_processed_signal: bool = True,
+    scale=None,
+    translate=None,
 ) -> None:
     """Renders rays, detected wall segments, and anchors for a single targeted cell label."""
     if labels_layer is None or target_label_id is None:
         return
+
+    # Same transform as the labels layer, so overlays line up on cropped layers
+    tf = _transform_kwargs(scale, translate)
 
     # Convert binary mask slice to (min_r, min_c, max_r, max_c)
     locs = find_objects((labels_layer == target_label_id).astype(int))
@@ -679,6 +698,10 @@ def visualize_cell_rays(
         sig_layer_name = 'debug_processed_signal'
         if sig_layer_name in viewer.layers:
             viewer.layers[sig_layer_name].data = cell_wall_signal
+            viewer.layers[sig_layer_name].scale = tf.get('scale', (1.0, 1.0))
+            viewer.layers[sig_layer_name].translate = tf.get(
+                'translate', (0.0, 0.0)
+            )
             viewer.layers[sig_layer_name].refresh()
         else:
             viewer.add_image(
@@ -687,6 +710,7 @@ def visualize_cell_rays(
                 colormap='gray',
                 contrast_limits=(0.0, 1.0),
                 opacity=0.7,
+                **tf,
             )
 
     # Expand labels
@@ -739,6 +763,7 @@ def visualize_cell_rays(
         edge_width=1.0,
         name=f'bbox_{target_label_id}',
         opacity=0.8,
+        **tf,
     )
 
     # Add shapes/points to Napari
@@ -750,6 +775,7 @@ def visualize_cell_rays(
             edge_width=0.4,
             name=f'rays_full_{target_label_id}',
             opacity=0.5,
+            **tf,
         )
 
     if result['thresholded_wall_lines']:
@@ -760,6 +786,7 @@ def visualize_cell_rays(
             edge_width=1.5,
             name=f'rays_wall_{target_label_id}',
             opacity=0.9,
+            **tf,
         )
 
     if result['anchor_points']:
@@ -770,6 +797,7 @@ def visualize_cell_rays(
             border_color='transparent',
             name=f'anchors_{target_label_id}',
             opacity=0.8,
+            **tf,
         )
     print(
         f'[w-seg] Cell {target_label_id}: Plotted {len(result["full_ray_lines"])} rays | '
@@ -791,6 +819,8 @@ def visualize_cell_neighborhood(
     search_radius: int = 8,
     use_delaunay_fallback: bool = True,
     max_delaunay_dist_px: float = 120.0,
+    scale=None,
+    translate=None,
 ):
     """Visualizes a target cell, its physical/Delaunay neighbors, and connectivity
 
@@ -799,6 +829,7 @@ def visualize_cell_neighborhood(
     """
     if cell_id not in labels_layer:
         raise ValueError(f'Cell ID {cell_id} was not found in labels_layer.')
+    tf = _transform_kwargs(scale, translate)
 
     # 1. Compute Centroids Directly from Labels Layer
     props = regionprops_table(labels_layer, properties=('label', 'centroid'))
@@ -879,6 +910,7 @@ def visualize_cell_neighborhood(
         name=f'Cell {cell_id} Neighborhood',
         colormap=cmap,
         opacity=0.8,
+        **tf,
     )
 
     # 6. Draw Neighbor Connection Lines
@@ -901,6 +933,7 @@ def visualize_cell_neighborhood(
             edge_color=line_colors,
             edge_width=2.5,
             name=f'Cell {cell_id} Connections',
+            **tf,
         )
 
     print(
@@ -1119,17 +1152,22 @@ def measure_cell_morphology(
             0.0,  # Fallback value when perimeter is 0 or invalid
         )
 
-    # Check if center point is defined
+    # Centroids in df_combined are in physical units (um). A user-picked
+    # center arrives in array pixels, so convert it to the same units.
     if center_coords is None and radial_sym:
         print('[w-seg] calculating center point')
         center_coords = resolve_center_coords(df_combined)
+    elif center_coords is not None:
+        center_coords = tuple(
+            float(c) * pixel_spacing for c in center_coords[-2:]
+        )
 
     # Calculate distance from center point
     df_combined = add_radial_features(
         df_combined,
         center_coords=center_coords,
         enabled=radial_sym,
-        pixel_scale=pixel_spacing,
+        pixel_scale=1.0,  # centroids and center are already in um
         angle_unit='degrees',
     )
 
@@ -1509,6 +1547,12 @@ class MorphologyWidget(QWidget):
         labels_translate = lbl_layer.translate
         clear_borders = self.clear_border_cb.isChecked()
         center_coords = self.center_coords
+        if center_coords is not None:
+            # The picked point is in world coordinates; use array pixels
+            center_coords = tuple(
+                float(world_to_data(c, labels_scale, labels_translate, axis=a))
+                for a, c in enumerate(center_coords[-2:])
+            )
 
         # Snapshot worker reference on main thread
         worker_ref = None
@@ -1749,6 +1793,8 @@ class MorphologyWidget(QWidget):
             offset=self.offset_spin.value(),
             invert_signal=self.invert_signal_cb.isChecked(),
             show_processed_signal=self.show_processed_signal_cb.isChecked(),
+            scale=lbl_layer.scale,
+            translate=lbl_layer.translate,
         )
 
     def _on_draw_neighbours_clicked(self):
@@ -1778,6 +1824,8 @@ class MorphologyWidget(QWidget):
             search_radius=float(self.max_search_spin.value()),
             use_delaunay_fallback=True,
             max_delaunay_dist_px=120.0,
+            scale=lbl_layer.scale,
+            translate=lbl_layer.translate,
         )
 
     def _init_center_point_signals(self):
