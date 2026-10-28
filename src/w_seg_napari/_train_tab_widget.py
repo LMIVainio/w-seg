@@ -12,7 +12,6 @@ import tempfile
 from pathlib import Path
 
 from qtpy.QtCore import QProcess, QProcessEnvironment
-from qtpy.QtGui import QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -43,6 +42,7 @@ from w_seg_napari._wsegutils import BUNDLE_DIR
 
 MARKER = '@@'
 MAX_LOG_LINES = 400
+PROGRESS_LAYER = 'Training progress'
 
 
 class FolderRow(QWidget):
@@ -69,8 +69,9 @@ class FolderRow(QWidget):
 
 
 class TrainWidget(QGroupBox):
-    def __init__(self, main_widget=None, parent=None):
+    def __init__(self, viewer=None, main_widget=None, parent=None):
         super().__init__('Train a new model', parent)
+        self.viewer = viewer
         self.main_widget = main_widget
         self.process = None
         self.stop_file = None
@@ -189,11 +190,6 @@ class TrainWidget(QGroupBox):
         layout.addWidget(self.bar)
         layout.addWidget(self.status)
 
-        self.image_label = QLabel()
-        self.image_label.setMinimumHeight(10)
-        self.image_label.setScaledContents(False)
-        layout.addWidget(self.image_label)
-
         self.show_log = QCheckBox('Show training log')
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -276,7 +272,6 @@ class TrainWidget(QGroupBox):
             return
         self.log.clear()
         self.bar.setValue(0)
-        self.image_label.clear()
         self.status.setText('Starting...')
         self._buffer = ''
         self._bundle_dir = None
@@ -353,12 +348,25 @@ class TrainWidget(QGroupBox):
             self.status.setText(ev.get('message', 'Training failed.'))
 
     def _show_progress(self, path):
-        if not path or not Path(path).is_file():
+        """Show the progress picture as an image layer in the napari viewer."""
+        if self.viewer is None or not path or not Path(path).is_file():
             return
-        pix = QPixmap(path)
-        if not pix.isNull():
-            width = max(300, self.width() - 40)
-            self.image_label.setPixmap(pix.scaledToWidth(width))
+        from skimage.io import imread
+
+        img = imread(path)
+        if img.ndim == 3 and img.shape[-1] == 4:
+            img = img[..., :3]
+        if PROGRESS_LAYER in self.viewer.layers:
+            self.viewer.layers[PROGRESS_LAYER].data = img
+            return
+        # First picture: place it to the right of the existing layers
+        offset = 0.0
+        if len(self.viewer.layers):
+            offset = float(self.viewer.layers.extent.world[1][-1]) + 50.0
+        self.viewer.add_image(
+            img, name=PROGRESS_LAYER, rgb=True, translate=(0.0, offset)
+        )
+        self.viewer.reset_view()
 
     def _on_finished(self, exit_code, _status):
         self.process = None
@@ -393,7 +401,7 @@ class Tab6Train(QScrollArea):
         self.setWidgetResizable(True)
         container = QWidget()
         layout = QVBoxLayout(container)
-        self.train_widget = TrainWidget(main_widget=main_widget)
+        self.train_widget = TrainWidget(viewer=viewer, main_widget=main_widget)
         layout.addWidget(self.train_widget)
         layout.addStretch()
         self.setWidget(container)
