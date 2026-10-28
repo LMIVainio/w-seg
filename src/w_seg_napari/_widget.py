@@ -10,6 +10,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from w_seg_napari._train_tab_widget import Tab6Train
 from w_seg_napari._widget_tabs import (
     Tab1Pipeline,
     Tab2ROI_selection,
@@ -43,6 +44,7 @@ class WSegMasterWidget(QWidget):
         self.tab4 = Tab4Analysis(self.viewer)
         # Pass self as main_widget to Tab5Batch
         self.tab5 = Tab5Batch(self.viewer, main_widget=self)
+        self.tab6 = Tab6Train(self.viewer, main_widget=self)
 
         # 2. Tab Container Assembly
         self.tabs = QTabWidget(self)
@@ -51,6 +53,7 @@ class WSegMasterWidget(QWidget):
         self.tabs.addTab(self.tab3, '3. Curation')
         self.tabs.addTab(self.tab4, '4. Cell Morphology')
         self.tabs.addTab(self.tab5, '5. Batch Mode')
+        self.tabs.addTab(self.tab6, '6. Train Model')
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)

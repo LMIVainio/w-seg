@@ -41,3 +41,16 @@ def test_size_mismatch_and_roundtrip(tmp_path):
 
     back = tifffile.imread(tmp_path / 'a.tif')
     assert back.shape == (5, 4, 4) and np.array_equal(back, st)
+
+
+def test_mask_labels_cuts_walls_out():
+    img = np.zeros((4, 4, 3), np.uint8)
+    wall = np.zeros((4, 4), np.float32)
+    wall[1] = 1.0
+    lab = np.full((4, 4), 5, np.int32)
+    lab[0] = 1  # background label stays
+    st = build_training_stack(img, wall, lab, mask_labels=True)
+    assert (st[4, 1] == 0).all() and (st[4, 0] == 1).all()
+    assert (st[4, 2:] == 5).all()
+    plain = build_training_stack(img, wall, lab)
+    assert (plain[4, 1] == 5).all()

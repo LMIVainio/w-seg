@@ -1,5 +1,6 @@
 import napari
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -41,6 +42,13 @@ class TrainingDataWidget(QGroupBox):
             'Prediction values above this become wall (1). Integer masks '
             'and label layers use "greater than 0".'
         )
+        self.mask_cb = QCheckBox(
+            'Cut walls out of the labels (wall pixels = 0)'
+        )
+        self.mask_cb.setToolTip(
+            'Uses the semantic layer as a mask on the labels: wall pixels '
+            'become 0, cells and background keep their label.'
+        )
         self.btn_save = QPushButton('Save 5-channel training tif...')
         self.btn_save.clicked.connect(self._on_save)
         self.info = QLabel(
@@ -52,6 +60,7 @@ class TrainingDataWidget(QGroupBox):
         form.addRow('Semantic (wall):', self.semantic_combo)
         form.addRow('Labels:', self.labels_combo)
         form.addRow('Wall threshold:', self.threshold_spin)
+        form.addRow(self.mask_cb)
         form.addRow(self.info)
         form.addRow(self.btn_save)
 
@@ -120,7 +129,11 @@ class TrainingDataWidget(QGroupBox):
             return
         try:
             stack = build_training_stack(
-                sig.data, sem.data, lab.data, self.threshold_spin.value()
+                sig.data,
+                sem.data,
+                lab.data,
+                self.threshold_spin.value(),
+                mask_labels=self.mask_cb.isChecked(),
             )
         except (ValueError, TypeError) as e:
             QMessageBox.warning(self, 'Training data', str(e))

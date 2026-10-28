@@ -35,8 +35,14 @@ def wall_mask(semantic, threshold=0.5):
     return (sem > 0).astype(np.uint8)
 
 
-def build_training_stack(image, semantic, labels, threshold=0.5):
-    """Stack image (3 ch), wall mask and labels into a (5, H, W) array."""
+def build_training_stack(
+    image, semantic, labels, threshold=0.5, mask_labels=False
+):
+    """Stack image (3 ch), wall mask and labels into a (5, H, W) array.
+
+    mask_labels: use the wall mask to cut the walls out of the labels, so wall
+    pixels become 0 (cells keep their ids, background keeps its label).
+    """
     rgb = as_rgb_hwc(image)
     wall = wall_mask(semantic, threshold)
     lab = np.squeeze(np.asarray(labels))
@@ -50,6 +56,8 @@ def build_training_stack(image, semantic, labels, threshold=0.5):
             'Image, semantic and labels must have the same size, got '
             f'{rgb.shape[:2]}, {wall.shape} and {lab.shape}. Crop them together.'
         )
+    if mask_labels:
+        lab = np.where(wall > 0, 0, lab)
     top = int(lab.max())
     if rgb.dtype.kind == 'f':
         if top >= MAX_EXACT_FLOAT_LABEL:
