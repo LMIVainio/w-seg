@@ -28,7 +28,6 @@ from w_seg_napari._ROI_selection_widget import (
     ROISelectionWidget,
 )
 from w_seg_napari._superpixel_widget import SuperpixelWidget
-from w_seg_napari._training_data_widget import TrainingDataWidget
 from w_seg_napari._w_net_widget import WNetWidget
 from w_seg_napari._wsegutils import CurationWidget
 
@@ -66,13 +65,11 @@ class Tab1Pipeline(QScrollArea):
         )
         self.superpixel_widget = SuperpixelWidget(viewer=self.viewer)
         self.gasp_widget = GaspWidget(viewer=self.viewer)
-        self.training_data_widget = TrainingDataWidget(viewer=self.viewer)
 
         layout.addWidget(self._build_model_group())
         layout.addWidget(self.w_net_widget)
         layout.addWidget(self.superpixel_widget)
         layout.addWidget(self.gasp_widget)
-        layout.addWidget(self.training_data_widget)
         layout.addStretch()
 
         container.setLayout(layout)

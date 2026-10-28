@@ -38,6 +38,7 @@ from w_seg_napari._train_args import (
     parse_ranges,
     safe_name,
 )
+from w_seg_napari._training_data_widget import TrainingDataWidget
 from w_seg_napari._wsegutils import BUNDLE_DIR
 
 MARKER = '@@'
@@ -402,6 +403,8 @@ class Tab6Train(QScrollArea):
         container = QWidget()
         layout = QVBoxLayout(container)
         self.train_widget = TrainWidget(viewer=viewer, main_widget=main_widget)
+        self.training_data_widget = TrainingDataWidget(viewer=viewer)
+        layout.addWidget(self.training_data_widget)
         layout.addWidget(self.train_widget)
         layout.addStretch()
         self.setWidget(container)

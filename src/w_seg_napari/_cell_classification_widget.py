@@ -637,6 +637,30 @@ class CellClassificationWidget(QWidget):
         except (AttributeError, KeyError, ValueError):
             return {}
 
+    def _refresh_source_transform(self):
+        """Re-read the labels layer's position now (it may have been cropped since measuring).
+
+        Returns False, after warning, when the layer no longer has the shape that was measured.
+        """
+        try:
+            lyr = self.viewer.layers[self.current_layer_name]
+        except (AttributeError, KeyError, ValueError):
+            return True  # layer gone or renamed: keep what we have
+        shape = getattr(lyr.data, 'shape', None)
+        if shape is not None and shape != self.cached_labels_data.shape:
+            QMessageBox.warning(
+                self,
+                'Warning',
+                f"Layer '{self.current_layer_name}' has changed since it was "
+                'measured (for example it was cropped). Run the measurement '
+                'again first.',
+            )
+            return False
+        self._source_transform = self._lookup_source_transform(
+            self.current_layer_name
+        )
+        return True
+
     def bind_measured_data(
         self,
         df: pd.DataFrame,
@@ -671,6 +695,9 @@ class CellClassificationWidget(QWidget):
             QMessageBox.warning(
                 self, 'Warning', 'No measured labels layer bound.'
             )
+            return
+
+        if not self._refresh_source_transform():
             return
 
         # Build eroded 0/1 background class template
@@ -778,6 +805,9 @@ class CellClassificationWidget(QWidget):
             )
             return
 
+        if not self._refresh_source_transform():
+            return
+
         # --- Parameter Mismatch Guard ---
         if not self.check_config_compatibility():
             return  # User clicked 'No' on warning dialog
@@ -796,7 +826,10 @@ class CellClassificationWidget(QWidget):
 
             if self.viewer is not None:
                 if pred_layer_name in self.viewer.layers:
-                    self.viewer.layers[pred_layer_name].data = pred_2d_layer
+                    pred_layer = self.viewer.layers[pred_layer_name]
+                    pred_layer.data = pred_2d_layer
+                    for k, v in getattr(self, '_source_transform', {}).items():
+                        setattr(pred_layer, k, v)
                 else:
                     self.viewer.add_labels(
                         pred_2d_layer,

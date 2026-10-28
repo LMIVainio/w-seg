@@ -75,4 +75,10 @@ def build_training_stack(
 def save_training_stack(path, stack):
     import tifffile
 
-    tifffile.imwrite(path, stack, photometric='minisblack', compression='zlib')
+    try:
+        tifffile.imwrite(
+            path, stack, photometric='minisblack', compression='zlib'
+        )
+    except TypeError:
+        # Older tifffile versions have no 'compression' argument
+        tifffile.imwrite(path, stack, photometric='minisblack')
