@@ -72,7 +72,6 @@ from qtpy.QtWidgets import (
 from scipy.ndimage import (
     binary_dilation,
     binary_erosion,
-    binary_fill_holes,
     distance_transform_edt,
 )
 from scipy.ndimage import label as label_connected_components
@@ -83,6 +82,12 @@ from skimage.segmentation import expand_labels, watershed
 from skimage.util import map_array
 from torch import nn
 from ultralytics import YOLO
+
+from w_seg_napari._curation_ops import (
+    cut_cell_with_line,
+    merge_label_groups,
+    touching_groups,
+)
 
 
 def get_device() -> torch.device:
@@ -1411,6 +1416,7 @@ class CurationWidget(QWidget):
         self.mode = 'navigate'  # "navigate", "merge", or "erode_split"
         self.staging_layer = None
         self.selected_label_ids = []  # Kept as a list to preserve selection order
+        self.cut_preview_layer = None
 
         self._init_ui()
 
@@ -1447,6 +1453,28 @@ class CurationWidget(QWidget):
         self.fill_holes_chk = QCheckBox('Fill internal gaps / holes')
         self.fill_holes_chk.setChecked(True)
         merge_layout.addWidget(self.fill_holes_chk)
+
+        # Multi-select: merge only cells that touch each other
+        self.touch_only_chk = QCheckBox(
+            'Only merge cells that touch each other'
+        )
+        self.touch_only_chk.setToolTip(
+            'Select many cells, then merge only those that are neighbours. '
+            'Each group of touching cells becomes one cell; selected cells '
+            'with no touching partner are left alone.'
+        )
+        merge_layout.addWidget(self.touch_only_chk)
+        gap_layout = QHBoxLayout()
+        gap_layout.addWidget(QLabel('Touch tolerance (px):'))
+        self.touch_gap_spin = QSpinBox()
+        self.touch_gap_spin.setRange(1, 20)
+        self.touch_gap_spin.setValue(2)
+        self.touch_gap_spin.setToolTip(
+            '1 = cells must be directly adjacent; 2 also accepts a '
+            'one-pixel wall between them.'
+        )
+        gap_layout.addWidget(self.touch_gap_spin)
+        merge_layout.addLayout(gap_layout)
 
         self.apply_merge_btn = QPushButton('Apply Merge Execution ✅')
         self.apply_merge_btn.setEnabled(False)
@@ -1493,12 +1521,34 @@ class CurationWidget(QWidget):
         erode_group.setLayout(erode_layout)
         main_layout.addWidget(erode_group)
 
+        # -------------------------------------------------------------
+        # 3. INTERACTIVE CUT GROUP
+        # -------------------------------------------------------------
+        cut_group = QGroupBox('Cut Cell With a Line (Interactive)')
+        cut_layout = QVBoxLayout()
+        self.cut_btn = QPushButton('Cut Cell Mode (drag a line) ✂️')
+        self.cut_btn.setCheckable(True)
+        self.cut_btn.setToolTip(
+            'Press, drag across a cell and release: the cell is cut along '
+            'the line. The cut parts share the former line pixels, so no gap '
+            'is left. Uses "Min Cell Size" above as the smallest part.'
+        )
+        self.cut_btn.clicked.connect(self._toggle_cut_mode)
+        cut_layout.addWidget(self.cut_btn)
+        cut_group.setLayout(cut_layout)
+        main_layout.addWidget(cut_group)
+
         main_layout.addStretch()
         self.setLayout(main_layout)
 
         self.viewer.layers.selection.events.changed.connect(
             self._on_layer_selection_changed
         )
+        self._on_layer_selection_changed(None)
+
+    def showEvent(self, event):
+        """Pick up the layer that is already selected when the tab is opened."""
+        super().showEvent(event)
         self._on_layer_selection_changed(None)
 
     def _sync_staging_transforms(self):
@@ -1530,12 +1580,14 @@ class CurationWidget(QWidget):
             self.status_lbl.setText(f'Active: {self.labels_layer.name}')
             self.merge_btn.setEnabled(True)
             self.erode_split_btn.setEnabled(True)
+            self.cut_btn.setEnabled(True)
             self._sync_staging_transforms()
         elif active_layer is None:
             self.labels_layer = None
             self.status_lbl.setText('Status: Select a Labels layer...')
             self.merge_btn.setEnabled(False)
             self.erode_split_btn.setEnabled(False)
+            self.cut_btn.setEnabled(False)
             self._reset_modes()
 
     def _reset_modes(self):
@@ -1543,7 +1595,9 @@ class CurationWidget(QWidget):
         self.selected_label_ids.clear()
         self.merge_btn.setChecked(False)
         self.erode_split_btn.setChecked(False)
+        self.cut_btn.setChecked(False)
         self.apply_merge_btn.setEnabled(False)
+        self._remove_cut_preview()
 
         self.viewer.cursor.style = 'standard'
 
@@ -1602,8 +1656,51 @@ class CurationWidget(QWidget):
             self._reset_modes()
             self.status_lbl.setText('Status: Idle')
 
+    def _toggle_cut_mode(self, checked):
+        if checked:
+            self._reset_modes()
+            self.mode = 'cut'
+            self.cut_btn.setChecked(True)
+            self.labels_layer.mode = 'pan_zoom'
+            self.viewer.cursor.style = 'cross'
+            self.status_lbl.setText(
+                'Cut Mode: press, drag a line across a cell and release.'
+            )
+        else:
+            self._reset_modes()
+            self.status_lbl.setText('Status: Idle')
+
+    def _remove_cut_preview(self):
+        lyr = getattr(self, 'cut_preview_layer', None)
+        if lyr is not None and lyr in self.viewer.layers:
+            self.viewer.layers.remove(lyr)
+        self.cut_preview_layer = None
+
+    def _show_cut_preview(self, p0, p1):
+        data = [np.array([p0, p1])]
+        if self.cut_preview_layer is None or (
+            self.cut_preview_layer not in self.viewer.layers
+        ):
+            self.cut_preview_layer = self.viewer.add_shapes(
+                data,
+                shape_type='line',
+                edge_color='yellow',
+                edge_width=2,
+                name='[Staging] Cut line',
+                scale=self.labels_layer.scale,
+                translate=self.labels_layer.translate,
+            )
+            self.viewer.layers.selection.active = self.labels_layer
+        else:
+            self.cut_preview_layer.data = data
+
     def _mouse_callback(self, layer, event):
+        # A generator, so that the cut mode can follow the drag until release
         if self.mode == 'navigate' or event.type != 'mouse_press':
+            return
+        if self.mode == 'cut':
+            if event.button == 1:
+                yield from self._cut_drag(layer, event)
             return
 
         # Correctly map world position coordinates into local integer array index
@@ -1639,43 +1736,69 @@ class CurationWidget(QWidget):
         elif self.mode == 'erode_split' and event.button == 1:
             self._execute_erosion_split(val)
 
+    def _cut_drag(self, layer, event):
+        start = np.asarray(layer.world_to_data(event.position), dtype=float)
+        end = start
+        yield
+        while event.type == 'mouse_move':
+            end = np.asarray(layer.world_to_data(event.position), dtype=float)
+            self._show_cut_preview(start, end)
+            yield
+        end = np.asarray(layer.world_to_data(event.position), dtype=float)
+        self._remove_cut_preview()
+        ok, message, _new = cut_cell_with_line(
+            layer.data,
+            start[-2:],
+            end[-2:],
+            min_size=self.min_size_spin.value(),
+        )
+        self.status_lbl.setText(message)
+        if ok:
+            layer.refresh()
+
     def _apply_merge(self):
         if not self.selected_label_ids or not self.labels_layer:
             self.status_lbl.setText('Merge aborted: No cells were selected.')
             self._reset_modes()
             return
 
-        # 1. Determine target master ID based on dropdown choice
-        choice = self.target_label_combo.currentText()
-        if choice == 'Lowest ID':
-            target_master_id = min(self.selected_label_ids)
-        elif choice == 'Highest ID':
-            target_master_id = max(self.selected_label_ids)
-        else:  # "First Selected ID"
-            target_master_id = self.selected_label_ids[0]
+        ids = list(self.selected_label_ids)
+        if self.touch_only_chk.isChecked():
+            groups = touching_groups(
+                self.labels_layer.data, ids, gap=self.touch_gap_spin.value()
+            )
+        else:
+            groups = [ids]
 
-        # 2. Build joint binary mask of all selected cells
-        combined_mask = np.isin(
-            self.labels_layer.data, self.selected_label_ids
+        targets = merge_label_groups(
+            self.labels_layer.data,
+            groups,
+            rule=self.target_label_combo.currentText(),
+            fill_holes=self.fill_holes_chk.isChecked(),
         )
-
-        # 3. Fill internal holes if checkbox is checked
-        if self.fill_holes_chk.isChecked():
-            combined_mask = binary_fill_holes(combined_mask)
-
-        # 4. Clear out all merged labels and assign the chosen master ID
-        for label_id in self.selected_label_ids:
-            self.labels_layer.data[self.labels_layer.data == label_id] = 0
-
-        self.labels_layer.data[combined_mask] = target_master_id
         self.labels_layer.refresh()
+        if not targets:
+            self.status_lbl.setText(
+                'Nothing merged: none of the selected cells touch each other.'
+            )
+            from qtpy.QtCore import QTimer
 
-        # 5. Update active layer's selected label in layer controls
-        self.labels_layer.selected_label = int(target_master_id)
+            QTimer.singleShot(1500, self._reset_modes)
+            return
 
-        self.viewer.status = f'Merged {len(self.selected_label_ids)} items into label ID: {target_master_id}'
+        # Update active layer's selected label in layer controls
+        self.labels_layer.selected_label = int(targets[-1])
+        left_alone = sum(len(g) for g in groups if len(g) < 2)
+        self.viewer.status = (
+            f'Merged {len(ids) - left_alone} cells into {len(targets)} cell(s)'
+        )
+        note = (
+            f' {left_alone} selected cell(s) had no touching partner.'
+            if left_alone
+            else ''
+        )
         self.status_lbl.setText(
-            f'Merged successfully! Active paint label set to {target_master_id}.'
+            f'Merged into label(s) {", ".join(map(str, targets))}.{note}'
         )
 
         from qtpy.QtCore import QTimer
