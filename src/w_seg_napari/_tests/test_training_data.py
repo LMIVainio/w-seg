@@ -54,3 +54,30 @@ def test_mask_labels_cuts_walls_out():
     assert (st[4, 2:] == 5).all()
     plain = build_training_stack(img, wall, lab)
     assert (plain[4, 1] == 5).all()
+
+
+def test_split_shared_label_gives_each_cell_its_own_id(tmp_path):
+    img = np.zeros((6, 9, 3), np.uint8)
+    lab = np.zeros((6, 9), np.int32)
+    lab[:, 0:3] = 1  # three separate regions share label 1
+    lab[:, 4:6] = 1
+    lab[:, 7:9] = 1
+    lab[0:2, 3] = 9
+    st = build_training_stack(img, np.zeros((6, 9)), lab, split_label=1)
+    ids = set(np.unique(st[4])) - {0, 9}
+    assert len(ids) == 3 and 1 not in ids
+    assert (st[4][lab == 9] == 9).all()
+    # off by default
+    assert set(
+        np.unique(build_training_stack(img, np.zeros((6, 9)), lab)[4])
+    ) == {0, 1, 9}
+
+
+def test_saved_stack_is_memory_mappable(tmp_path):
+    import tifffile
+
+    st = build_training_stack(
+        np.zeros((4, 4, 3), np.uint8), np.ones((4, 4)), np.ones((4, 4), int)
+    )
+    save_training_stack(tmp_path / 'm.tif', st)
+    assert tifffile.memmap(tmp_path / 'm.tif').shape == (5, 4, 4)

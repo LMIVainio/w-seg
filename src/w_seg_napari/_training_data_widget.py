@@ -10,6 +10,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QWidget,
 )
 
@@ -49,6 +50,12 @@ class TrainingDataWidget(QGroupBox):
             'Uses the semantic layer as a mask on the labels: wall pixels '
             'become 0, cells and background keep their label.'
         )
+        self.split_spin = QSpinBox()
+        self.split_spin.setRange(0, 1_000_000)
+        self.split_spin.setToolTip(
+            'If many cells share one label (for example 1 = not curated yet), '
+            'give each separate region of that label its own id. 0 = off.'
+        )
         self.btn_save = QPushButton('Save 5-channel training tif...')
         self.btn_save.clicked.connect(self._on_save)
         self.info = QLabel(
@@ -61,6 +68,7 @@ class TrainingDataWidget(QGroupBox):
         form.addRow('Labels:', self.labels_combo)
         form.addRow('Wall threshold:', self.threshold_spin)
         form.addRow(self.mask_cb)
+        form.addRow('Split shared label (0 = off):', self.split_spin)
         form.addRow(self.info)
         form.addRow(self.btn_save)
 
@@ -134,6 +142,7 @@ class TrainingDataWidget(QGroupBox):
                 lab.data,
                 self.threshold_spin.value(),
                 mask_labels=self.mask_cb.isChecked(),
+                split_label=self.split_spin.value(),
             )
         except (ValueError, TypeError) as e:
             QMessageBox.warning(self, 'Training data', str(e))

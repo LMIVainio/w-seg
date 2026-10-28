@@ -35,11 +35,31 @@ def wall_mask(semantic, threshold=0.5):
     return (sem > 0).astype(np.uint8)
 
 
+def split_shared_label(labels, value):
+    """Give each connected region of `labels == value` its own new id."""
+    from skimage.measure import label as cc_label
+
+    regions, n = cc_label(labels == value, connectivity=1, return_num=True)
+    if n == 0:
+        return labels
+    out = labels.astype(np.int64)
+    out[labels == value] = regions[labels == value] + int(labels.max())
+    return out
+
+
 def build_training_stack(
-    image, semantic, labels, threshold=0.5, mask_labels=False
+    image,
+    semantic,
+    labels,
+    threshold=0.5,
+    mask_labels=False,
+    split_label=0,
 ):
     """Stack image (3 ch), wall mask and labels into a (5, H, W) array.
 
+    split_label: a label value shared by many cells (for example 1 for
+    'not curated yet'); every separate region of it gets its own id, so the
+    training targets do not call distant cells the same cell. 0 = off.
     mask_labels: use the wall mask to cut the walls out of the labels, so wall
     pixels become 0 (cells keep their ids, background keeps its label).
     """
@@ -58,6 +78,8 @@ def build_training_stack(
         )
     if mask_labels:
         lab = np.where(wall > 0, 0, lab)
+    if split_label:
+        lab = split_shared_label(lab, split_label)
     top = int(lab.max())
     if rgb.dtype.kind == 'f':
         if top >= MAX_EXACT_FLOAT_LABEL:
@@ -73,12 +95,7 @@ def build_training_stack(
 
 
 def save_training_stack(path, stack):
+    """Write the stack uncompressed, so training can memory-map it."""
     import tifffile
 
-    try:
-        tifffile.imwrite(
-            path, stack, photometric='minisblack', compression='zlib'
-        )
-    except TypeError:
-        # Older tifffile versions have no 'compression' argument
-        tifffile.imwrite(path, stack, photometric='minisblack')
+    tifffile.imwrite(path, stack, photometric='minisblack')

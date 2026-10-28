@@ -47,6 +47,18 @@ N_CHANNELS = 6
 # =====================================================================
 # Whole-slide preprocessing
 # =====================================================================
+def open_stack(path):
+    """The (planes, H, W) stack of a tif: memory-mapped when the file allows it.
+
+    Compressed tifs cannot be memory-mapped; those are read into memory instead
+    (fine for training slides of a few hundred MB).
+    """
+    try:
+        return tifffile.memmap(path)
+    except ValueError:
+        return tifffile.imread(path)
+
+
 def detect_rgb_scale(rgb_planes, step=50):
     """
     255.0 if the RGB planes hold values 0..255 (uint8 or float32 alike),
@@ -170,7 +182,7 @@ def ensure_slide_cache(
         return out_path
 
     os.makedirs(cache_dir, exist_ok=True)
-    stack = tifffile.memmap(tif_path)
+    stack = open_stack(tif_path)
     _, H, W = stack.shape
     print(f'Building preprocessed cache for {stem} ({H}x{W}) ...')
 
@@ -233,7 +245,7 @@ def ensure_wall_map(tif_path, cache_dir):
     ) >= os.path.getmtime(tif_path):
         return out_path
     os.makedirs(cache_dir, exist_ok=True)
-    np.save(out_path, coarse_wall_map(tifffile.memmap(tif_path)[3]))
+    np.save(out_path, coarse_wall_map(open_stack(tif_path)[3]))
     return out_path
 
 
@@ -369,7 +381,7 @@ class LargeTiffCellDataset(Dataset):
 
     def _slide(self, i):
         if i not in self._open:
-            stack = tifffile.memmap(self.slides[i]['tif'])
+            stack = open_stack(self.slides[i]['tif'])
             x6 = np.load(self.slides[i]['cache'], mmap_mode='r')
             self._open[i] = (x6, stack[3], stack[4])
         return self._open[i]
