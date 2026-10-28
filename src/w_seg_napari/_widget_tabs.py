@@ -20,7 +20,11 @@ from qtpy.QtWidgets import (
 import w_seg_napari._wsegutils as w
 from w_seg_napari._batch_widget import BatchTabWidget
 from w_seg_napari._cell_classification_widget import CellClassificationWidget
-from w_seg_napari._combine_layers_widget import create_layer_combination_widget
+from w_seg_napari._combine_layers_widget import (
+    create_blend_widget,
+    create_cleanup_widget,
+    create_label_combine_widget,
+)
 from w_seg_napari._gasp_widget import GaspWidget
 from w_seg_napari._morphology_widget import MorphologyWidget
 from w_seg_napari._ROI_selection_widget import (
@@ -339,28 +343,41 @@ class Tab3Curation(QScrollArea):
 
         self.curation_panel = CurationWidget(self.viewer)
 
-        # Instantiate widget instance using the factory
-        self.layer_blender_widget = create_layer_combination_widget(
-            self.viewer
-        )
+        # Separate tools, each in its own box
+        self.blend_widget = create_blend_widget(self.viewer)
+        self.cleanup_widget = create_cleanup_widget(self.viewer)
+        self.label_combine_widget = create_label_combine_widget(self.viewer)
 
         layout.addWidget(self.curation_panel)
-        layout.addWidget(self.layer_blender_widget.native)
-        # layout.addStretch()
+        for title, tool in (
+            ('Combine / threshold images', self.blend_widget),
+            ('Remove unconnected noise', self.cleanup_widget),
+            ('Combine labels layers', self.label_combine_widget),
+        ):
+            box = QGroupBox(title)
+            box_layout = QVBoxLayout(box)
+            box_layout.addWidget(tool.native)
+            layout.addWidget(box)
 
         container.setLayout(layout)
         self.setWidget(container)
 
     def refresh_layer_choices(self):
-        """Refreshes dynamic layer choice dropdowns."""
-        if hasattr(self.layer_blender_widget, 'layer_a'):
-            self.layer_blender_widget.layer_a.reset_choices()
-        if hasattr(self.layer_blender_widget, 'layer_b'):
-            self.layer_blender_widget.layer_b.reset_choices()
-        if hasattr(self.layer_blender_widget, 'output_layer'):
-            self.layer_blender_widget.output_layer.reset_choices()
-        if hasattr(self.layer_blender_widget, 'clean_target_layer'):
-            self.layer_blender_widget.clean_target_layer.reset_choices()
+        """Refreshes the layer dropdowns of all tools in this tab."""
+        for tool in (
+            self.blend_widget,
+            self.cleanup_widget,
+            self.label_combine_widget,
+        ):
+            for name in (
+                'layer_a',
+                'layer_b',
+                'clean_target_layer',
+                'child_layer',
+                'parent_layer',
+            ):
+                if hasattr(tool, name):
+                    getattr(tool, name).reset_choices()
 
 
 class Tab4Analysis(QScrollArea):

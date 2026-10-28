@@ -276,6 +276,9 @@ def process_image(image_path, settings: dict, is_cancelled):
         yield sub('Writing table')
         df.to_csv(table_path(out_dir, name), index=False)
         done += 1
+    # Keep the original image in the session so manual corrections can be made
+    # later against the exact input the labels were computed from.
+    store['raw'] = rgb
     save_session(
         sess_path,
         store,

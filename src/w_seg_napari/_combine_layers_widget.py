@@ -1,8 +1,13 @@
 import napari
 import numpy as np
 from magicgui import magicgui
+from napari.utils.notifications import show_warning
 from scipy import ndimage
 from skimage.measure import regionprops
+
+from w_seg_napari._curation_ops import inherit_parent_labels
+
+ONLY_A = 'Layer A only (threshold one layer)'
 
 
 def combine_label_layers(
@@ -110,6 +115,8 @@ def apply_boolean_logic(
         combined_mask = np.logical_not(np.logical_and(mask1, mask2))
     elif logic_mode == 'Layer 1 NOT Layer 2':
         combined_mask = np.logical_and(mask1, np.logical_not(mask2))
+    elif logic_mode == ONLY_A:
+        combined_mask = mask1
     else:
         combined_mask = mask1
 
@@ -123,11 +130,17 @@ def apply_boolean_logic(
     return out
 
 
-def create_layer_combination_widget(viewer: napari.Viewer):
-    """Factory function creating a combined Napari layer blender, noise cleaner, and label merger widget."""
+def _normalise(data, invert=False):
+    data = np.asarray(data, dtype=np.float32)
+    lo, hi = float(data.min()), float(data.max())
+    out = (data - lo) / (hi - lo) if hi - lo > 1e-7 else np.zeros_like(data)
+    return 1.0 - out if invert else out
+
+
+def create_blend_widget(viewer: napari.Viewer):
+    """Blend two images, or threshold one or two images with Boolean logic."""
 
     @magicgui(
-        # --- LAYER BLENDING / LOGIC CONTROLS ---
         call_button='Combine & Render Layers',
         layer_a={'label': 'Layer A (Base)'},
         invert_a={'label': 'Invert Layer A'},
@@ -153,7 +166,14 @@ def create_layer_combination_widget(viewer: napari.Viewer):
         },
         logic_mode={
             'label': 'Boolean Operator',
-            'choices': ['AND', 'OR', 'XOR', 'NAND', 'Layer 1 NOT Layer 2'],
+            'choices': [
+                ONLY_A,
+                'AND',
+                'OR',
+                'XOR',
+                'NAND',
+                'Layer 1 NOT Layer 2',
+            ],
         },
         thresh_a={
             'label': 'Threshold A',
@@ -188,54 +208,6 @@ def create_layer_combination_widget(viewer: napari.Viewer):
             'label': 'Live Preview on Parameter Change',
             'value': True,
         },
-        # --- UNCONNECTED NOISE REMOVAL PARAMETERS ---
-        clean_target_layer={'label': '1) Target Layer for Cleanup'},
-        min_area={
-            'label': '2a) Min Area (Pixels)',
-            'widget_type': 'SpinBox',
-            'min': 1,
-            'max': 100000,
-            'value': 50,
-        },
-        min_distance={
-            'label': '2b) Isolation Distance (px)',
-            'widget_type': 'FloatSlider',
-            'min': 0.0,
-            'max': 100.0,
-            'step': 0.5,
-            'value': 5.0,
-        },
-        dist_mode={
-            'label': '3) Distance Calculation Metric',
-            'choices': [
-                'Euclidean Distance Map (EDT)',
-                'Closest Neighbor Contour Distance',
-            ],
-            'value': 'Euclidean Distance Map (EDT)',
-        },
-        cleanup_thresh={
-            'label': '4) Binarization Threshold',
-            'widget_type': 'FloatSlider',
-            'min': 0.0,
-            'max': 1.0,
-            'step': 0.01,
-            'value': 0.5,
-        },
-        clean_button={
-            'widget_type': 'PushButton',
-            'text': 'Remove Unconnected Noise',
-        },
-        # --- LABEL COMBINATION PARAMETERS ---
-        label_a={'label': 'Label Layer A (Sub-regions / Small)'},
-        label_b={'label': 'Label Layer B (Main / Large)'},
-        label_output_name={
-            'label': 'Merged Labels Name',
-            'value': 'merged_labels_layer',
-        },
-        combine_labels_button={
-            'widget_type': 'PushButton',
-            'text': 'Combine Labels Layers',
-        },
     )
     def widget(
         layer_a: napari.layers.Image = None,
@@ -245,56 +217,24 @@ def create_layer_combination_widget(viewer: napari.Viewer):
         operation: str = 'Smooth Blending',
         blend_mode: str = 'Linear Alpha',
         alpha: float = 0.5,
-        logic_mode: str = 'AND',
+        logic_mode: str = ONLY_A,
         thresh_a: float = 0.3,
         thresh_b: float = 0.3,
         smooth_mask: bool = False,
         edge_sigma: float = 1.0,
         output_layer_name: str = 'combined_curated_layer',
         auto_update: bool = True,
-        # Cleanup parameters:
-        clean_target_layer: napari.layers.Image = None,
-        min_area: int = 50,
-        min_distance: float = 5.0,
-        dist_mode: str = 'Euclidean Distance Map (EDT)',
-        cleanup_thresh: float = 0.5,
-        clean_button: bool = False,
-        # Labels parameters:
-        label_a: napari.layers.Labels = None,
-        label_b: napari.layers.Labels = None,
-        label_output_name: str = 'merged_labels_layer',
-        combine_labels_button: bool = False,
     ):
-        if layer_a is None or layer_b is None:
+        blending = operation == 'Smooth Blending'
+        only_a = (not blending) and logic_mode == ONLY_A
+        if layer_a is None or (layer_b is None and not only_a):
             return
 
-        # 1. Copy raw data to prevent in-place mutation
-        data_a = np.copy(layer_a.data).astype(np.float32)
-        data_b = np.copy(layer_b.data).astype(np.float32)
-
-        # 2. Safe normalization [0.0, 1.0]
-        max_a, min_a = np.max(data_a), np.min(data_a)
-        max_b, min_b = np.max(data_b), np.min(data_b)
-        range_a, range_b = max_a - min_a, max_b - min_b
-
-        norm_a = (
-            (data_a - min_a) / range_a
-            if range_a > 1e-7
-            else np.zeros_like(data_a)
-        )
+        norm_a = _normalise(layer_a.data, invert_a)
         norm_b = (
-            (data_b - min_b) / range_b
-            if range_b > 1e-7
-            else np.zeros_like(data_b)
+            norm_a if layer_b is None else _normalise(layer_b.data, invert_b)
         )
-
-        if invert_a:
-            norm_a = 1.0 - norm_a
-        if invert_b:
-            norm_b = 1.0 - norm_b
-
-        # 3. Operations execution
-        if operation == 'Smooth Blending':
+        if blending:
             result = apply_smooth_blend(
                 norm_a, norm_b, alpha=alpha, blend_mode=blend_mode
             )
@@ -308,10 +248,8 @@ def create_layer_combination_widget(viewer: napari.Viewer):
                 smooth_edge=smooth_mask,
                 sigma=edge_sigma,
             )
-
         result = np.clip(result, 0.0, 1.0).astype(np.float32)
 
-        # 4. Canvas Push
         if output_layer_name in viewer.layers:
             out_layer = viewer.layers[output_layer_name]
             out_layer.data = result
@@ -321,36 +259,105 @@ def create_layer_combination_widget(viewer: napari.Viewer):
             viewer.add_image(
                 result,
                 name=output_layer_name,
-                colormap='magma' if operation == 'Smooth Blending' else 'gray',
+                colormap='magma' if blending else 'gray',
                 contrast_limits=(0.0, 1.0),
+                scale=layer_a.scale,
+                translate=layer_a.translate,
             )
 
-    # --- UNCONNECTED NOISE REMOVAL CALLBACK ---
-    def _on_remove_unconnected_clicked():
-        target_layer = widget.clean_target_layer.value
+    def _update_visibility(value=None):
+        blending = widget.operation.value == 'Smooth Blending'
+        only_a = (not blending) and widget.logic_mode.value == ONLY_A
+        widget.blend_mode.visible = blending
+        widget.alpha.visible = blending
+        widget.logic_mode.visible = not blending
+        widget.thresh_a.visible = not blending
+        widget.thresh_b.visible = (not blending) and not only_a
+        widget.smooth_mask.visible = not blending
+        widget.edge_sigma.visible = not blending
+        widget.layer_b.visible = not only_a
+        widget.invert_b.visible = not only_a
+
+    def _on_parameter_change(value=None):
+        _update_visibility()
+        if widget.auto_update.value:
+            widget()
+
+    for name in (
+        'invert_a',
+        'invert_b',
+        'alpha',
+        'thresh_a',
+        'thresh_b',
+        'logic_mode',
+        'blend_mode',
+        'operation',
+    ):
+        getattr(widget, name).changed.connect(_on_parameter_change)
+    _update_visibility()
+    return widget
+
+
+def create_cleanup_widget(viewer: napari.Viewer):
+    """Remove small unconnected blobs from an image."""
+
+    @magicgui(
+        call_button='Remove Unconnected Noise',
+        clean_target_layer={'label': '1) Target Layer'},
+        cleanup_thresh={
+            'label': '2) Binarization Threshold',
+            'widget_type': 'FloatSlider',
+            'min': 0.0,
+            'max': 1.0,
+            'step': 0.01,
+            'value': 0.5,
+        },
+        min_area={
+            'label': '3a) Min Area (Pixels)',
+            'widget_type': 'SpinBox',
+            'min': 1,
+            'max': 100000,
+            'value': 50,
+        },
+        min_distance={
+            'label': '3b) Isolation Distance (px)',
+            'widget_type': 'FloatSlider',
+            'min': 0.0,
+            'max': 100.0,
+            'step': 0.5,
+            'value': 5.0,
+        },
+        dist_mode={
+            'label': '4) Distance Metric',
+            'choices': [
+                'Euclidean Distance Map (EDT)',
+                'Closest Neighbor Contour Distance',
+            ],
+            'value': 'Euclidean Distance Map (EDT)',
+        },
+    )
+    def widget(
+        clean_target_layer: napari.layers.Image = None,
+        cleanup_thresh: float = 0.5,
+        min_area: int = 50,
+        min_distance: float = 5.0,
+        dist_mode: str = 'Euclidean Distance Map (EDT)',
+    ):
+        target_layer = clean_target_layer
         if target_layer is None:
             return
-
         raw_data = np.copy(target_layer.data).astype(np.float32)
-
         d_min, d_max = np.min(raw_data), np.max(raw_data)
         d_range = d_max - d_min
         norm_data = (
             (raw_data - d_min) / d_range if d_range > 1e-7 else raw_data
         )
-
-        thresh_val = widget.cleanup_thresh.value
-        binary_mask = norm_data >= thresh_val
-
+        binary_mask = norm_data >= cleanup_thresh
         labeled_mask, num_features = ndimage.label(binary_mask)
         if num_features == 0:
             return
 
-        min_area_val = widget.min_area.value
-        min_dist_val = widget.min_distance.value
-        use_edt = widget.dist_mode.value == 'Euclidean Distance Map (EDT)'
-
-        clean_count = 0
+        use_edt = dist_mode == 'Euclidean Distance Map (EDT)'
         if use_edt:
             dist_map = ndimage.distance_transform_edt(binary_mask)
         else:
@@ -358,33 +365,24 @@ def create_layer_combination_widget(viewer: napari.Viewer):
 
         regions = regionprops(labeled_mask)
         cleaned_mask = np.copy(binary_mask)
-
         centroids = np.array([r.centroid for r in regions])
         for idx, region in enumerate(regions):
-            label_id = region.label
-            area = region.area
-
-            if area < min_area_val:
-                clean_count += 1
-                if use_edt:
-                    region_dist = np.max(dist_map[labeled_mask == label_id])
-                else:
-                    if len(centroids) > 1:
-                        dists = np.linalg.norm(
-                            centroids - centroids[idx], axis=1
-                        )
-                        dists[idx] = np.inf
-                        region_dist = np.min(dists)
-                    else:
-                        region_dist = 0.0
-
-                if region_dist < min_dist_val or not use_edt:
-                    cleaned_mask[labeled_mask == label_id] = False
+            if region.area >= min_area:
+                continue
+            if use_edt:
+                region_dist = np.max(dist_map[labeled_mask == region.label])
+            elif len(centroids) > 1:
+                dists = np.linalg.norm(centroids - centroids[idx], axis=1)
+                dists[idx] = np.inf
+                region_dist = np.min(dists)
+            else:
+                region_dist = 0.0
+            if region_dist < min_distance or not use_edt:
+                cleaned_mask[labeled_mask == region.label] = False
 
         cleaned_result = np.where(cleaned_mask, norm_data, 0.0).astype(
             np.float32
         )
-
         output_name = f'{target_layer.name}_cleaned'
         if output_name in viewer.layers:
             viewer.layers[output_name].data = cleaned_result
@@ -395,45 +393,84 @@ def create_layer_combination_widget(viewer: napari.Viewer):
                 name=output_name,
                 colormap=target_layer.colormap,
                 contrast_limits=(0.0, 1.0),
+                scale=target_layer.scale,
+                translate=target_layer.translate,
             )
 
-    # --- LABEL COMBINATION CALLBACK ---
-    def _on_combine_labels_clicked():
-        lbl_layer_a = widget.label_a.value
-        lbl_layer_b = widget.label_b.value
+    return widget
 
-        if lbl_layer_a is None and lbl_layer_b is None:
+
+INHERIT = 'Inherit parent labels (majority vote)'
+SUBREGIONS = 'Small regions into large labels'
+
+
+def create_label_combine_widget(viewer: napari.Viewer):
+    """Combine two labels layers: sub-regions into large labels, or inherit a parent's labels."""
+
+    @magicgui(
+        call_button='Combine Labels',
+        mode={
+            'label': 'Mode',
+            'widget_type': 'RadioButtons',
+            'choices': [INHERIT, SUBREGIONS],
+            'value': INHERIT,
+        },
+        child_layer={'label': 'Child labels (gets the new labels)'},
+        parent_layer={'label': 'Parent labels (e.g. YOLO classes)'},
+        unmatched={
+            'label': 'Child without parent',
+            'choices': ['Keep own label', 'Set to 0'],
+        },
+        output_name={'label': 'Output Name', 'value': 'inherited_labels'},
+    )
+    def widget(
+        mode: str = INHERIT,
+        child_layer: napari.layers.Labels = None,
+        parent_layer: napari.layers.Labels = None,
+        unmatched: str = 'Keep own label',
+        output_name: str = 'inherited_labels',
+    ):
+        if child_layer is None or parent_layer is None:
             return
-
-        data_a = lbl_layer_a.data if lbl_layer_a is not None else None
-        data_b = lbl_layer_b.data if lbl_layer_b is not None else None
-
-        merged_data = combine_label_layers(data_a, data_b)
-        if merged_data is None:
+        try:
+            if mode == INHERIT:
+                result = inherit_parent_labels(
+                    child_layer.data,
+                    parent_layer.data,
+                    unmatched='zero' if unmatched == 'Set to 0' else 'keep',
+                )
+            else:
+                result = combine_label_layers(
+                    child_layer.data, parent_layer.data
+                )
+        except ValueError as e:
+            show_warning(str(e))
             return
-
-        out_name = widget.label_output_name.value
-        if out_name in viewer.layers:
-            viewer.layers[out_name].data = merged_data
-            viewer.layers[out_name].refresh()
+        if output_name in viewer.layers:
+            viewer.layers[output_name].data = result
+            viewer.layers[output_name].refresh()
         else:
-            viewer.add_labels(merged_data, name=out_name)
+            viewer.add_labels(
+                result,
+                name=output_name,
+                scale=child_layer.scale,
+                translate=child_layer.translate,
+            )
 
-    # Wire button signals
-    widget.clean_button.changed.connect(_on_remove_unconnected_clicked)
-    widget.combine_labels_button.changed.connect(_on_combine_labels_clicked)
+    def _update(value=None):
+        inherit = widget.mode.value == INHERIT
+        widget.unmatched.visible = inherit
+        if inherit:
+            widget.child_layer.label = 'Child labels (gets the new labels)'
+            widget.parent_layer.label = 'Parent labels (e.g. YOLO classes)'
+            if widget.output_name.value == 'merged_labels_layer':
+                widget.output_name.value = 'inherited_labels'
+        else:
+            widget.child_layer.label = 'Small regions (Layer A)'
+            widget.parent_layer.label = 'Large labels (Layer B)'
+            if widget.output_name.value == 'inherited_labels':
+                widget.output_name.value = 'merged_labels_layer'
 
-    def _on_parameter_change(value=None):
-        if widget.auto_update.value:
-            widget()
-
-    widget.invert_a.changed.connect(_on_parameter_change)
-    widget.invert_b.changed.connect(_on_parameter_change)
-    widget.alpha.changed.connect(_on_parameter_change)
-    widget.thresh_a.changed.connect(_on_parameter_change)
-    widget.thresh_b.changed.connect(_on_parameter_change)
-    widget.logic_mode.changed.connect(_on_parameter_change)
-    widget.blend_mode.changed.connect(_on_parameter_change)
-    widget.operation.changed.connect(_on_parameter_change)
-
+    widget.mode.changed.connect(_update)
+    _update()
     return widget

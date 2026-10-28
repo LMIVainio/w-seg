@@ -626,6 +626,41 @@ class CellClassificationWidget(QWidget):
         else:
             return 'Not Trained/Loaded'
 
+    def _lookup_source_transform(self, layer_name):
+        """scale/translate of the measured labels layer (cropped layers are shifted)."""
+        try:
+            lyr = self.viewer.layers[layer_name]
+            return {
+                'scale': tuple(lyr.scale),
+                'translate': tuple(lyr.translate),
+            }
+        except (AttributeError, KeyError, ValueError):
+            return {}
+
+    def _refresh_source_transform(self):
+        """Re-read the labels layer's position now (it may have been cropped since measuring).
+
+        Returns False, after warning, when the layer no longer has the shape that was measured.
+        """
+        try:
+            lyr = self.viewer.layers[self.current_layer_name]
+        except (AttributeError, KeyError, ValueError):
+            return True  # layer gone or renamed: keep what we have
+        shape = getattr(lyr.data, 'shape', None)
+        if shape is not None and shape != self.cached_labels_data.shape:
+            QMessageBox.warning(
+                self,
+                'Warning',
+                f"Layer '{self.current_layer_name}' has changed since it was "
+                'measured (for example it was cropped). Run the measurement '
+                'again first.',
+            )
+            return False
+        self._source_transform = self._lookup_source_transform(
+            self.current_layer_name
+        )
+        return True
+
     def bind_measured_data(
         self,
         df: pd.DataFrame,
@@ -636,6 +671,7 @@ class CellClassificationWidget(QWidget):
         self.cached_df = w.sanitize_feature_matrix(df)
         self.cached_labels_data = labels_data.copy()
         self.current_layer_name = layer_name
+        self._source_transform = self._lookup_source_transform(layer_name)
 
         # Cache active measurement extraction config
         if feature_extraction_config is not None:
@@ -661,6 +697,9 @@ class CellClassificationWidget(QWidget):
             )
             return
 
+        if not self._refresh_source_transform():
+            return
+
         # Build eroded 0/1 background class template
         annot_data = self.clf_manager.create_annotation_layer_data(
             self.cached_labels_data, erosion_steps=1
@@ -672,9 +711,14 @@ class CellClassificationWidget(QWidget):
             if annot_layer_name in self.viewer.layers:
                 self.annotation_layer = self.viewer.layers[annot_layer_name]
                 self.annotation_layer.data = annot_data
+                for k, v in getattr(self, '_source_transform', {}).items():
+                    setattr(self.annotation_layer, k, v)
             else:
                 self.annotation_layer = self.viewer.add_labels(
-                    annot_data, name=annot_layer_name, opacity=0.6
+                    annot_data,
+                    name=annot_layer_name,
+                    opacity=0.6,
+                    **getattr(self, '_source_transform', {}),
                 )
 
             # Configure active painting mode
@@ -761,6 +805,9 @@ class CellClassificationWidget(QWidget):
             )
             return
 
+        if not self._refresh_source_transform():
+            return
+
         # --- Parameter Mismatch Guard ---
         if not self.check_config_compatibility():
             return  # User clicked 'No' on warning dialog
@@ -779,10 +826,16 @@ class CellClassificationWidget(QWidget):
 
             if self.viewer is not None:
                 if pred_layer_name in self.viewer.layers:
-                    self.viewer.layers[pred_layer_name].data = pred_2d_layer
+                    pred_layer = self.viewer.layers[pred_layer_name]
+                    pred_layer.data = pred_2d_layer
+                    for k, v in getattr(self, '_source_transform', {}).items():
+                        setattr(pred_layer, k, v)
                 else:
                     self.viewer.add_labels(
-                        pred_2d_layer, name=pred_layer_name, opacity=0.7
+                        pred_2d_layer,
+                        name=pred_layer_name,
+                        opacity=0.7,
+                        **getattr(self, '_source_transform', {}),
                     )
             # Enable export button
             if hasattr(self, 'btn_export_data'):

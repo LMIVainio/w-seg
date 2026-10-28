@@ -51,6 +51,8 @@ dependencies = [
     "ultralytics>=8.1.0",
     "kornia>=0.7.0",
     "opencv-python-headless>=4.8.0",
+    "matplotlib>=3.7.0",
+    "scipy>=1.10.0",
 
     # Specialized Segmentation (GASP/RAGs)
     "python-elf>=0.4.0",
