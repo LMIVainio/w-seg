@@ -34,3 +34,15 @@ def test_count_tifs_and_args(tmp_path):
     assert a[a.index('--ranges') + 1 : a.index('--ranges') + 3] == ['6', '32']
     assert a[a.index('--zoom') + 1 : a.index('--zoom') + 3] == ['0.5', '1.5']
     assert all(isinstance(x, str) for x in a)
+
+
+def test_init_from_is_passed_on():
+    base = {
+        'train_dir': 'T', 'val_dir': 'V', 'out_root': 'O', 'name': 'n',
+        'stop_file': 'S', 'steps': 10, 'batch_size': 2, 'eval_every': 5,
+        'lr': 0.001, 'warmup': 1, 'val_samples': 8, 'ranges': [6, 32],
+        'zoom': (0.5, 1.5), 'tissue_bias': 0.7, 'workers': 0, 'seed': 0,
+    }  # fmt: skip
+    assert '--init-from' not in build_args(base)
+    a = build_args({**base, 'init_from': '/m/x'})
+    assert a[a.index('--init-from') + 1] == '/m/x'

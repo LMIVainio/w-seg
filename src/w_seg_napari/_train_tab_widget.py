@@ -14,6 +14,7 @@ from pathlib import Path
 from qtpy.QtCore import QProcess, QProcessEnvironment
 from qtpy.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -39,7 +40,7 @@ from w_seg_napari._train_args import (
     safe_name,
 )
 from w_seg_napari._training_data_widget import TrainingDataWidget
-from w_seg_napari._wsegutils import BUNDLE_DIR
+from w_seg_napari._wsegutils import BUNDLE_DIR, list_local_bundles
 
 MARKER = '@@'
 MAX_LOG_LINES = 400
@@ -96,12 +97,20 @@ class TrainWidget(QGroupBox):
         self.train_row.edit.textChanged.connect(self._update_counts)
         self.val_row.edit.textChanged.connect(self._update_counts)
         self.count_label = QLabel('')
+        self.base_combo = QComboBox()
+        self.base_combo.setToolTip(
+            'Continue training a model you already have. Its affinity ranges '
+            'and preprocessing are kept. Tip: use a lower learning rate and '
+            'put old and new data together in the training folder.'
+        )
+        self.base_combo.currentIndexChanged.connect(self._on_base_changed)
         self.name_edit = QLineEdit('my_model')
         self.out_row = FolderRow('Output folder')
         self.out_row.edit.setText(str(BUNDLE_DIR))
         form.addRow('Training data:', self.train_row)
         form.addRow('Validation data:', self.val_row)
         form.addRow('', self.count_label)
+        form.addRow('Start from:', self.base_combo)
         form.addRow('Model name:', self.name_edit)
         form.addRow('Output folder:', self.out_row)
 
@@ -200,9 +209,42 @@ class TrainWidget(QGroupBox):
         layout.addWidget(self.show_log)
         layout.addWidget(self.log)
 
+        self.refresh_base_models()
         self._update_counts()
 
     # ------------------------------------------------------------------
+    def refresh_base_models(self):
+        """List the bundles in ~/.wseg_models as starting points."""
+        current = self.base_combo.currentText()
+        self.base_combo.blockSignals(True)
+        self.base_combo.clear()
+        self.base_combo.addItem('New model (from scratch)', None)
+        for name, folder in list_local_bundles():
+            self.base_combo.addItem(name, folder)
+        idx = self.base_combo.findText(current)
+        self.base_combo.setCurrentIndex(max(idx, 0))
+        self.base_combo.blockSignals(False)
+
+    def _on_base_changed(self, _index=None):
+        folder = self.base_combo.currentData()
+        if folder is None:
+            self.lr_spin.setValue(2e-4)
+            self.warmup_spin.setValue(200)
+            self.ranges_edit.setEnabled(True)
+            return
+        # Continuing: gentler learning rate, short warm-up, ranges from the model
+        self.lr_spin.setValue(5e-5)
+        self.warmup_spin.setValue(50)
+        self.ranges_edit.setEnabled(False)
+        if self.name_edit.text() in ('', 'my_model'):
+            self.name_edit.setText(
+                f'{self.base_combo.currentText()}_continued'
+            )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh_base_models()
+
     def _update_counts(self):
         n_t = count_tifs(self.train_row.text())
         n_v = count_tifs(self.val_row.text())
@@ -236,6 +278,7 @@ class TrainWidget(QGroupBox):
             'out_root': out_root,
             'name': safe_name(self.name_edit.text()),
             'stop_file': self.stop_file or '',
+            'init_from': self.base_combo.currentData(),
             'steps': self.steps_spin.value(),
             'batch_size': self.batch_spin.value(),
             'eval_every': self.eval_spin.value(),
@@ -253,7 +296,7 @@ class TrainWidget(QGroupBox):
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         for w in (
-            self.train_row, self.val_row, self.out_row, self.name_edit,
+            self.train_row, self.val_row, self.out_row, self.name_edit, self.base_combo,
             self.steps_spin, self.batch_spin, self.eval_spin, self.adv_box,
         ):  # fmt: skip
             w.setEnabled(not running)

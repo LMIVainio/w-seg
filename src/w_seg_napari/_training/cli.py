@@ -25,14 +25,21 @@ import csv
 import json
 import math
 import random
+import shutil
 import sys
 import time
+from pathlib import Path
 
 import keras
 import numpy as np
 import torch
 
-from w_seg_napari._model_config import make_config, save_bundle
+from w_seg_napari._model_config import (
+    check_bundle,
+    load_bundle,
+    make_config,
+    save_bundle,
+)
 from w_seg_napari._training.data import LargeTiffCellDataset
 from w_seg_napari._training.losses import WeightedFocalTverskyLoss
 from w_seg_napari._training.model import Generator
@@ -73,6 +80,11 @@ def parse_args(argv=None):
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--keep-history', action='store_true')
+    p.add_argument(
+        '--init-from',
+        default=None,
+        help='model bundle folder to continue training from',
+    )
     return p.parse_args(argv)
 
 
@@ -143,13 +155,26 @@ def main(argv=None):
     os.makedirs(os.path.join(run_dir, 'history'), exist_ok=True)
     emit('start', bundle_dir=bundle_dir, run_dir=run_dir, device=device)
 
-    cfg = make_config(ranges=tuple(args.ranges))
+    base_model = None
+    if args.init_from:
+        # Continue from an existing bundle: its config (ranges, preprocessing)
+        # wins over the command-line values, because the weights depend on it.
+        base_model, cfg = load_bundle(args.init_from)
+        check_bundle(base_model, cfg)
+        args.ranges = list(cfg['affinity']['ranges'])
+        for pt in Path(args.init_from).glob('*.pt'):  # keep the paired YOLO
+            shutil.copy2(pt, bundle_dir)
+    else:
+        cfg = make_config(ranges=tuple(args.ranges))
     offsets = cfg['affinity']['offsets']
+    pre = cfg['preprocessing']
 
     common = {
         'offsets': offsets,
         'denoise_fn': denoise,
         'tissue_bias': args.tissue_bias,
+        'enable_lab': pre['enable_lab'],
+        'hue_encoding': pre['hue_encoding'],
     }
     emit(
         'status',
@@ -183,7 +208,11 @@ def main(argv=None):
     )
     batches = infinite(train_loader)
 
-    model = Generator(n_affinity=len(offsets), widths=tuple(args.widths))
+    model = (
+        base_model
+        if base_model is not None
+        else Generator(n_affinity=len(offsets), widths=tuple(args.widths))
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-4
     )
@@ -196,6 +225,17 @@ def main(argv=None):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     ftl = WeightedFocalTverskyLoss()
+
+    if base_model is not None:
+        base = validate(
+            model, val_loader, ftl, device, max_batches=len(val_loader)
+        )
+        emit(
+            'status',
+            message=f'Starting from {os.path.basename(args.init_from)}: '
+            f'validation Dice before training {base["dice"]:.3f}',
+        )
+        print(f'Base model validation Dice: {base["dice"]:.4f}', flush=True)
 
     settings = dict(
         vars(args),
