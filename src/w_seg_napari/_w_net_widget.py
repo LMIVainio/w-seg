@@ -17,6 +17,7 @@ from qtpy.QtWidgets import (
 )
 
 from w_seg_napari._affinity import layer_payloads
+from w_seg_napari._batch_io import to_rgb
 from w_seg_napari._wsegutils import get_model_config, process_large_image
 
 
@@ -193,7 +194,14 @@ class WNetWidget(QGroupBox):
                 f'[w-seg] Running prediction on {self.device}...'
             )
 
-        raw_data = image_layer.data
+        # Greyscale (H, W), single-channel or RGBA images become (H, W, 3)
+        try:
+            raw_data = to_rgb(image_layer.data)
+        except ValueError as e:
+            print(f'[w-seg] Error: {e}')
+            if self.viewer:
+                self.viewer.status = f'[w-seg] Error: {e}'
+            return
         H, W = raw_data.shape[0], raw_data.shape[1]
 
         if raw_data.dtype == np.uint8:
