@@ -100,7 +100,8 @@ class TrainWidget(QGroupBox):
         self.base_combo = QComboBox()
         self.base_combo.setToolTip(
             'Continue training a model you already have. Its affinity ranges '
-            'and preprocessing are kept. Tip: use a lower learning rate and '
+            'and preprocessing are kept. "(last checkpoint)" is the model at the end '
+            'of that run, "name" alone is its best one. Tip: use a lower learning rate and '
             'put old and new data together in the training folder.'
         )
         self.base_combo.currentIndexChanged.connect(self._on_base_changed)
@@ -221,6 +222,11 @@ class TrainWidget(QGroupBox):
         self.base_combo.addItem('New model (from scratch)', None)
         for name, folder in list_local_bundles():
             self.base_combo.addItem(name, folder)
+            last = Path(folder) / 'run' / 'last'
+            if (last / 'model.keras').is_file() and (
+                last / 'config.json'
+            ).is_file():
+                self.base_combo.addItem(f'{name} (last checkpoint)', str(last))
         idx = self.base_combo.findText(current)
         self.base_combo.setCurrentIndex(max(idx, 0))
         self.base_combo.blockSignals(False)

@@ -21,6 +21,7 @@ BOTH axes, i.e. a distance of k * sqrt(2).
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 FORMAT_VERSION = 1
@@ -57,8 +58,19 @@ def make_config(
     input_channels=6,
     denoise=None,
     companions=None,
+    name=None,
+    description=None,
+    image_channels=3,
 ):
-    """The config dict that is saved next to the model weights."""
+    """The config dict that is saved next to the model weights.
+
+    name / description / created: free information about the model.
+    input.shape is the shape of one preprocessed patch the network receives
+    (H, W, channels); preprocessing.input_image_channels is what the preprocessing
+    takes in (RGB = 3; mono images are repeated into 3) and
+    preprocessing.output_channels is what it hands the network, so both ends of
+    the preprocessing are written down and checked against each other.
+    """
     if len(directions) != len(direction_names):
         raise ValueError(
             'directions and direction_names must have equal length'
@@ -66,8 +78,17 @@ def make_config(
     offsets = make_offsets(ranges, directions)
     return {
         'format_version': FORMAT_VERSION,
-        'input': {'channels': input_channels, 'patch_size': patch_size},
+        'name': name,
+        'description': description,
+        'created': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+        'input': {
+            'channels': input_channels,
+            'patch_size': patch_size,
+            'shape': [patch_size, patch_size, input_channels],
+        },
         'preprocessing': {
+            'input_image_channels': image_channels,
+            'output_channels': input_channels,
             'enable_lab': enable_lab,
             'hue_encoding': hue_encoding,
             'stretch_percentiles': [1, 99],
@@ -111,6 +132,23 @@ def validate_config(cfg):
         )
     if len(aff['direction_names']) != len(aff['directions']):
         raise ValueError('direction_names and directions differ in length')
+    inp = cfg.get('input', {})
+    pre = cfg.get('preprocessing', {})
+    shape = inp.get('shape')
+    if shape is not None and list(shape) != [
+        inp.get('patch_size'),
+        inp.get('patch_size'),
+        inp.get('channels'),
+    ]:
+        raise ValueError(
+            f'input.shape {shape} does not match patch_size and channels'
+        )
+    out_ch = pre.get('output_channels')
+    if out_ch is not None and out_ch != inp.get('channels'):
+        raise ValueError(
+            f'The preprocessing produces {out_ch} channels but the model '
+            f'input has {inp.get("channels")}'
+        )
     return cfg
 
 

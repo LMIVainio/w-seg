@@ -627,6 +627,17 @@ def load_my_generator(
             comp['radial_symmetry'],
         )
         print(f'Model bundle loaded on device: {device}')
+        info = ', '.join(
+            f'{k}: {v}'
+            for k, v in (
+                ('name', cfg.get('name')),
+                ('input shape', cfg.get('input', {}).get('shape')),
+                ('created', cfg.get('created')),
+            )
+            if v
+        )
+        if info:
+            print(f'Model info -> {info}')
         print(f'Model loaded from folder: {bundle}')
         print(
             f'Affinity layout: {cfg["affinity"]["ranges"]} px x {cfg["affinity"]["direction_names"]}'

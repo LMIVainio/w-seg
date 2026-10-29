@@ -28,6 +28,7 @@ import random
 import shutil
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import keras
@@ -161,11 +162,16 @@ def main(argv=None):
         # wins over the command-line values, because the weights depend on it.
         base_model, cfg = load_bundle(args.init_from)
         check_bundle(base_model, cfg)
+        cfg['base_model'] = cfg.get('name') or os.path.basename(args.init_from)
+        cfg['name'] = args.name
+        cfg['created'] = datetime.now(timezone.utc).strftime(
+            '%Y-%m-%d %H:%M UTC'
+        )
         args.ranges = list(cfg['affinity']['ranges'])
         for pt in Path(args.init_from).glob('*.pt'):  # keep the paired YOLO
             shutil.copy2(pt, bundle_dir)
     else:
-        cfg = make_config(ranges=tuple(args.ranges))
+        cfg = make_config(ranges=tuple(args.ranges), name=args.name)
     offsets = cfg['affinity']['offsets']
     pre = cfg['preprocessing']
 
@@ -236,6 +242,14 @@ def main(argv=None):
             f'validation Dice before training {base["dice"]:.3f}',
         )
         print(f'Base model validation Dice: {base["dice"]:.4f}', flush=True)
+        if base['dice'] < 0.05:
+            msg = (
+                'The base model scores a Dice of about 0 on this validation '
+                'set. It may be untrained (for example the saved model of a '
+                'very short test run) or from different data.'
+            )
+            print(msg, flush=True)
+            emit('status', message=msg)
 
     settings = dict(
         vars(args),
@@ -276,11 +290,11 @@ def main(argv=None):
         )
 
     rng = random.Random(args.seed)
-    best_dice, t0, step = -1.0, time.time(), 0
+    best_dice, best_loss, t0, step = -1.0, float('inf'), time.time(), 0
     fig = None
 
     def evaluate_and_draw():
-        nonlocal best_dice, fig
+        nonlocal best_dice, best_loss, fig
         import matplotlib.pyplot as plt
 
         val = validate(
@@ -291,8 +305,22 @@ def main(argv=None):
         history['eval_step'].append(step)
 
         recent = float(np.mean(history['train_total'][-args.eval_every :]))
-        if val['dice'] > best_dice:
-            best_dice = val['dice']
+        # Best = highest Dice; at equal Dice (for example 0 early on) the lower
+        # validation loss wins, so the saved model is never just the step-1 one.
+        if val['dice'] > best_dice or (
+            val['dice'] == best_dice and val['total'] < best_loss
+        ):
+            best_dice, best_loss = val['dice'], val['total']
+            cfg['training'] = {
+                'steps_done': step,
+                'steps_planned': args.steps,
+                'val_dice': round(float(val['dice']), 4),
+                'batch_size': args.batch_size,
+                'learning_rate': args.lr,
+                'train_files': sorted(
+                    p.name for p in Path(args.train_dir).glob('*.tif*')
+                ),
+            }
             save_bundle(model, bundle_dir, cfg)  # the best model IS the bundle
         save_bundle(model, os.path.join(run_dir, 'last'), cfg)
 

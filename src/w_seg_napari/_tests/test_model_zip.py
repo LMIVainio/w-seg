@@ -73,3 +73,32 @@ def test_get_companions_tolerates_hand_edited_json(tmp_path):
     # two .pt files are ambiguous: nothing guessed
     (tmp_path / 'other.pt').write_text('x')
     assert get_companions({}, tmp_path)['yolo'] is None
+
+
+def test_config_records_name_and_input_shape():
+    import pytest
+
+    from w_seg_napari._model_config import make_config, validate_config
+
+    cfg = make_config(name='stomata_v1', patch_size=128)
+    assert cfg['name'] == 'stomata_v1' and cfg['created']
+    assert cfg['input']['shape'] == [128, 128, 6]
+    assert cfg['preprocessing']['input_image_channels'] == 3
+    assert cfg['preprocessing']['output_channels'] == 6
+    validate_config(cfg)
+    cfg['preprocessing']['output_channels'] = (
+        5  # preprocessing and model disagree
+    )
+    with pytest.raises(ValueError):
+        validate_config(cfg)
+    cfg = make_config()
+    cfg['input']['shape'] = [64, 64, 6]
+    with pytest.raises(ValueError):
+        validate_config(cfg)
+    # configs from before these fields existed still validate
+    old = make_config()
+    for key in ('name', 'created', 'description'):
+        old.pop(key)
+    old['input'].pop('shape')
+    old['preprocessing'].pop('output_channels')
+    validate_config(old)
