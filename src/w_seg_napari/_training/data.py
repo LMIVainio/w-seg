@@ -17,7 +17,8 @@ undone by it. Here it simulates the residual variation that remains.
 
 Returned sample (all channels-last), with n = len(offsets):
     x : [T, T, 6]      float32, about [-1, 1]
-    y : [T, T, 1 + n]  channel 0 = wall mask, channels 1..n = affinities
+    y : [T, T, 1 + n (+ 4)]  channel 0 = wall mask, channels 1..n = affinities,
+        and with a geometry head 4 more: edge distance, dir_y, dir_x, skeleton
     w : [T, T, 1]      EDT wall weight map
 
 Source TIFF layout: planar stack of any numeric dtype; planes 0-2 = RGB with
@@ -38,7 +39,11 @@ from skimage.transform import resize
 from torch.utils.data import Dataset
 
 from w_seg_napari._model_config import DEFAULT_RANGES, make_offsets
-from w_seg_napari._training.targets import compute_affinities, edt_weights
+from w_seg_napari._training.targets import (
+    compute_affinities,
+    compute_geometry,
+    edt_weights,
+)
 
 COARSE = 8  # block size of the coarse tissue map
 N_CHANNELS = 6
@@ -288,6 +293,7 @@ class LargeTiffCellDataset(Dataset):
         sigma=5.0,
         tissue_bias=0.0,
         min_tissue=0.05,
+        geometry=None,
     ):
         if photometric and not enable_lab:
             raise ValueError(
@@ -314,6 +320,9 @@ class LargeTiffCellDataset(Dataset):
         self.seed = seed
         self.w0, self.sigma = w0, sigma
         self.tissue_bias = tissue_bias
+        # None = no geometry targets; or a dict of compute_geometry options
+        # (the 'geometry' block of the model config).
+        self.geometry = geometry
         self.min_tissue = min_tissue
 
         paths = sorted(
@@ -468,9 +477,20 @@ class LargeTiffCellDataset(Dataset):
         if self.augment and self.photometric:
             x6 = self._photometric(x6, rng)
 
-        target = np.concatenate(
-            [wall[..., None].astype(np.float32), aff], axis=-1
-        )
+        parts = [wall[..., None].astype(np.float32), aff]
+        if self.geometry is not None:
+            g = self.geometry
+            parts.append(
+                compute_geometry(
+                    inst,
+                    T,
+                    pad,
+                    skeleton_width=g.get('skeleton_width', 2),
+                    skeleton_min_rel=g.get('skeleton_min_rel', 0.2),
+                    min_edge_distance=g.get('min_edge_distance', 2.0),
+                )
+            )
+        target = np.concatenate(parts, axis=-1)
         weights = edt_weights(wall, self.w0, self.sigma)[
             ..., None
         ]  # [T, T, 1]

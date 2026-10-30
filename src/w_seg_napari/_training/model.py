@@ -171,6 +171,7 @@ def Generator(
     spatial_dropout=0.1,
     use_resize_conv=False,
     n_affinity=8,
+    geometry=False,
 ):
     """
     widths: channels at 256, 128, 64, 32, 16 px. widths[-1] is the bottleneck.
@@ -179,6 +180,8 @@ def Generator(
     Returns a model whose outputs are a dict:
         semantic_head (1 channel), affinity_head (n_affinity channels)
         (+ aux_semantic_32 / _64 / _128 when deep_supervision=True)
+        (+ geometry_head, 4 channels, when geometry=True: edge distance,
+         dir_y, dir_x, skeleton; see _model_config.GEOMETRY_CHANNELS)
     """
     inputs = layers.Input(shape=input_shape)
     n_levels = len(widths)
@@ -275,9 +278,31 @@ def Generator(
     )(x_aff)
 
     outputs = {'semantic_head': semantic, 'affinity_head': affinity}
+    if geometry:
+        x_geo = layers.Conv2D(
+            32, 3, padding='same', activation='relu', kernel_initializer=INIT
+        )(x)
+        g_dist = layers.Conv2D(
+            1, 1, activation='sigmoid', dtype='float32',
+            kernel_initializer=INIT,
+        )(x_geo)  # fmt: skip
+        g_dir = layers.Conv2D(
+            2, 1, activation='tanh', dtype='float32', kernel_initializer=INIT
+        )(x_geo)
+        g_skel = layers.Conv2D(
+            1, 1, activation='sigmoid', dtype='float32',
+            kernel_initializer=INIT,
+        )(x_geo)  # fmt: skip
+        outputs['geometry_head'] = layers.Concatenate(
+            axis=-1, dtype='float32', name='geometry_head'
+        )([g_dist, g_dir, g_skel])
     outputs.update(aux_outputs)
 
-    return keras.Model(inputs, outputs, name='WASP-Generator-V3')
+    return keras.Model(
+        inputs,
+        outputs,
+        name='WASP-Generator-V4' if geometry else 'WASP-Generator-V3',
+    )
 
 
 def compile_model(model, lr=2e-4):

@@ -37,6 +37,7 @@ import torch
 
 from w_seg_napari._model_config import (
     check_bundle,
+    has_geometry,
     load_bundle,
     make_config,
     save_bundle,
@@ -81,6 +82,11 @@ def parse_args(argv=None):
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--keep-history', action='store_true')
+    p.add_argument(
+        '--geometry',
+        action='store_true',
+        help='add the geometry head (architecture wasp_v4)',
+    )
     p.add_argument(
         '--init-from',
         default=None,
@@ -171,9 +177,13 @@ def main(argv=None):
         for pt in Path(args.init_from).glob('*.pt'):  # keep the paired YOLO
             shutil.copy2(pt, bundle_dir)
     else:
-        cfg = make_config(ranges=tuple(args.ranges), name=args.name)
+        cfg = make_config(
+            ranges=tuple(args.ranges), name=args.name, geometry=args.geometry
+        )
     offsets = cfg['affinity']['offsets']
     pre = cfg['preprocessing']
+    geometry = cfg['geometry'] if has_geometry(cfg) else None
+    args.geometry = geometry is not None
 
     common = {
         'offsets': offsets,
@@ -181,6 +191,7 @@ def main(argv=None):
         'tissue_bias': args.tissue_bias,
         'enable_lab': pre['enable_lab'],
         'hue_encoding': pre['hue_encoding'],
+        'geometry': geometry,
     }
     emit(
         'status',
@@ -217,7 +228,11 @@ def main(argv=None):
     model = (
         base_model
         if base_model is not None
-        else Generator(n_affinity=len(offsets), widths=tuple(args.widths))
+        else Generator(
+            n_affinity=len(offsets),
+            widths=tuple(args.widths),
+            geometry=geometry is not None,
+        )
     )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-4

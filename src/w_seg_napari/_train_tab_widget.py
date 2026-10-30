@@ -112,6 +112,15 @@ class TrainWidget(QGroupBox):
         form.addRow('Validation data:', self.val_row)
         form.addRow('', self.count_label)
         form.addRow('Start from:', self.base_combo)
+        self.geometry_cb = QCheckBox('Add geometry head (new architecture)')
+        self.geometry_cb.setToolTip(
+            'Adds a head that predicts distance to the nearest edge, the '
+            'direction away from it and a skeleton line for every cell. The '
+            'training tifs need no changes; the targets are computed from '
+            'the labels. Only for new models (a model you continue keeps its '
+            'own architecture).'
+        )
+        form.addRow('', self.geometry_cb)
         form.addRow('Model name:', self.name_edit)
         form.addRow('Output folder:', self.out_row)
 
@@ -233,6 +242,7 @@ class TrainWidget(QGroupBox):
 
     def _on_base_changed(self, _index=None):
         folder = self.base_combo.currentData()
+        self.geometry_cb.setEnabled(folder is None)
         if folder is None:
             self.lr_spin.setValue(2e-4)
             self.warmup_spin.setValue(200)
@@ -285,6 +295,7 @@ class TrainWidget(QGroupBox):
             'name': safe_name(self.name_edit.text()),
             'stop_file': self.stop_file or '',
             'init_from': self.base_combo.currentData(),
+            'geometry': self.geometry_cb.isChecked(),
             'steps': self.steps_spin.value(),
             'batch_size': self.batch_spin.value(),
             'eval_every': self.eval_spin.value(),
@@ -306,6 +317,9 @@ class TrainWidget(QGroupBox):
             self.steps_spin, self.batch_spin, self.eval_spin, self.adv_box,
         ):  # fmt: skip
             w.setEnabled(not running)
+        self.geometry_cb.setEnabled(
+            not running and self.base_combo.currentData() is None
+        )
 
     # ------------------------------------------------------------------
     def _on_start(self):

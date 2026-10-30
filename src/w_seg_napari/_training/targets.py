@@ -4,6 +4,7 @@ tested on its own and reused by the plugin.
 """
 
 import numpy as np
+from scipy import ndimage
 from scipy.ndimage import distance_transform_edt
 
 
@@ -84,3 +85,81 @@ def describe_offsets(inst, offsets):
             }
         )
     return rows
+
+
+def edge_mask(inst):
+    """True on wall pixels (label 0) and on pixels whose 4-neighbour has another label."""
+    edge = inst == 0
+    for axis in (0, 1):
+        diff = np.diff(inst, axis=axis) != 0
+        lead = [slice(None)] * 2
+        trail = [slice(None)] * 2
+        lead[axis], trail[axis] = slice(0, -1), slice(1, None)
+        edge[tuple(lead)] |= diff
+        edge[tuple(trail)] |= diff
+    return edge
+
+
+def compute_geometry(
+    inst,
+    crop,
+    pad,
+    skeleton_width=2,
+    skeleton_min_rel=0.2,
+    min_edge_distance=2.0,
+):
+    """
+    Geometry targets for the geometry head, from the same padded label crop as
+    compute_affinities. Returns [crop, crop, 4] float32:
+      0  edge distance, divided by the largest edge distance inside the same cell
+         (0 on edges and background, 1 on the cell's deepest point)
+      1  dir_y   unit vector pointing away from the nearest edge point
+      2  dir_x   (zero closer than `min_edge_distance` px to an edge)
+      3  skeleton: medial axis of every cell, dilated to `skeleton_width` px;
+         skeleton pixels shallower than `skeleton_min_rel` of the cell's
+         largest distance are dropped (they are mostly spurs)
+    One distance transform covers all cells at once: the nearest edge pixel of
+    a pixel inside cell A always lies on A's own outline.
+    """
+    from skimage.morphology import medial_axis
+
+    size = crop + 2 * pad
+    if inst.shape != (size, size):
+        raise ValueError(f'inst must be {(size, size)}, got {inst.shape}')
+
+    edge = edge_mask(inst)
+    interior = ~edge
+    out = np.zeros((size, size, 4), dtype=np.float32)
+    if not interior.any():
+        return out[pad : pad + crop, pad : pad + crop]
+
+    dist, idx = distance_transform_edt(interior, return_indices=True)
+    dist = dist.astype(np.float32)
+
+    # largest distance inside every cell, looked up per pixel
+    ids, inv = np.unique(inst, return_inverse=True)
+    inv = inv.reshape(inst.shape)
+    cell_max = np.zeros(len(ids), dtype=np.float32)
+    np.maximum.at(cell_max, inv.ravel(), dist.ravel())
+    norm = np.where(interior, dist / np.maximum(cell_max[inv], 1e-6), 0.0)
+    out[..., 0] = np.clip(norm, 0.0, 1.0)
+
+    # direction: from the nearest edge point to the pixel, as a unit vector
+    yy, xx = np.indices(inst.shape)
+    vy = yy - idx[0]
+    vx = xx - idx[1]
+    valid = interior & (dist > min_edge_distance)
+    length = np.maximum(np.hypot(vy, vx), 1e-6)
+    out[..., 1] = np.where(valid, vy / length, 0.0)
+    out[..., 2] = np.where(valid, vx / length, 0.0)
+
+    # skeleton
+    skel = medial_axis(interior)
+    skel &= out[..., 0] >= skeleton_min_rel
+    skel &= dist >= 1.5
+    if skeleton_width > 1:
+        skel = ndimage.binary_dilation(skel, iterations=skeleton_width // 2)
+        skel &= interior
+    out[..., 3] = skel
+
+    return out[pad : pad + crop, pad : pad + crop]

@@ -37,6 +37,8 @@ def build_args(p):
         '--workers', str(p['workers']),
         '--seed', str(p['seed']),
     ]  # fmt: skip
+    if p.get('geometry') and not p.get('init_from'):
+        args.append('--geometry')
     if p.get('init_from'):
         args += ['--init-from', p['init_from']]
     return args

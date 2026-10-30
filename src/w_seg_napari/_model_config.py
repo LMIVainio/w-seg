@@ -35,6 +35,20 @@ DEFAULT_RANGES = (6, 32)
 #   radial_symmetry True/False = preset the 'radial symmetry' option, None = leave as is
 DEFAULT_COMPANIONS = {'yolo': None, 'radial_symmetry': None}
 
+# The geometry head (architecture 'wasp_v4'). Channel order of 'geometry_head':
+#   edge_distance  distance to the nearest edge / the cell's largest such distance (0 at edges, 1 on the skeleton)
+#   dir_y, dir_x   unit vector pointing away from the nearest edge (zero where undefined)
+#   skeleton       thin medial-axis line of every cell
+GEOMETRY_CHANNELS = ('edge_distance', 'dir_y', 'dir_x', 'skeleton')
+DEFAULT_GEOMETRY = {
+    'channels': list(GEOMETRY_CHANNELS),
+    'distance': 'cell_normalised',
+    'direction': 'unit_vector_away_from_nearest_edge',
+    'skeleton_width': 2,  # px
+    'skeleton_min_rel': 0.2,  # skeleton pixels below this share of the cell's maximum distance are dropped (spurs)
+    'min_edge_distance': 2,  # px; the direction is only defined further than this from an edge
+}
+
 DEFAULT_DENOISE = {
     'kind': 'bilateral',
     'kernel_size': [5, 5],
@@ -61,6 +75,7 @@ def make_config(
     name=None,
     description=None,
     image_channels=3,
+    geometry=False,
 ):
     """The config dict that is saved next to the model weights.
 
@@ -76,8 +91,12 @@ def make_config(
             'directions and direction_names must have equal length'
         )
     offsets = make_offsets(ranges, directions)
-    return {
+    cfg = {
         'format_version': FORMAT_VERSION,
+        'architecture': {
+            'name': 'wasp_v4' if geometry else 'wasp_v3',
+            'geometry_head': bool(geometry),
+        },
         'name': name,
         'description': description,
         'created': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
@@ -104,6 +123,15 @@ def make_config(
             'convention': '1 = same cell, 0 = different cell or wall',
         },
     }
+    if geometry:
+        cfg['outputs']['geometry'] = 'geometry_head'
+        cfg['geometry'] = dict(DEFAULT_GEOMETRY)
+    return cfg
+
+
+def has_geometry(cfg):
+    """True when the model has a geometry head."""
+    return 'geometry' in cfg.get('outputs', {})
 
 
 def legacy_config():
@@ -132,6 +160,12 @@ def validate_config(cfg):
         )
     if len(aff['direction_names']) != len(aff['directions']):
         raise ValueError('direction_names and directions differ in length')
+    if has_geometry(cfg):
+        geo = cfg.get('geometry', {})
+        if list(geo.get('channels', [])) != list(GEOMETRY_CHANNELS):
+            raise ValueError(
+                f'geometry.channels must be {list(GEOMETRY_CHANNELS)}, got {geo.get("channels")}'
+            )
     inp = cfg.get('input', {})
     pre = cfg.get('preprocessing', {})
     shape = inp.get('shape')

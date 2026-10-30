@@ -46,3 +46,17 @@ def test_init_from_is_passed_on():
     assert '--init-from' not in build_args(base)
     a = build_args({**base, 'init_from': '/m/x'})
     assert a[a.index('--init-from') + 1] == '/m/x'
+
+
+def test_geometry_flag_only_for_new_models():
+    base = {
+        'train_dir': 'T', 'val_dir': 'V', 'out_root': 'O', 'name': 'n',
+        'stop_file': 'S', 'steps': 10, 'batch_size': 2, 'eval_every': 5,
+        'lr': 0.001, 'warmup': 1, 'val_samples': 8, 'ranges': [6, 32],
+        'zoom': (0.5, 1.5), 'tissue_bias': 0.7, 'workers': 0, 'seed': 0,
+    }  # fmt: skip
+    assert '--geometry' in build_args({**base, 'geometry': True})
+    assert '--geometry' not in build_args(base)
+    # a continued model keeps its own architecture
+    both = build_args({**base, 'geometry': True, 'init_from': '/m'})
+    assert '--geometry' not in both and '--init-from' in both
