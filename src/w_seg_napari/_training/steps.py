@@ -43,10 +43,49 @@ def geometry_loss(pred, target, ftl):
     return total, {'geo_dist': dist, 'geo_dir': direction, 'geo_skel': skel}
 
 
-def compute_loss(outputs, y, w, ftl, w_aff=1.0, w_aux=0.25, w_geo=0.5):
+def interior_errors(outputs, y, n_aff, margin=3):
+    """
+    Errors deep inside cells, where the boundary-weighted losses barely look.
+    A pixel is "interior" when no wall pixel lies within `margin` px of it.
+      int_wall : mean predicted wall probability on interior pixels
+                 (true value 0, so this is the false-wall rate)
+      int_aff  : mean (1 - predicted affinity) over the affinities whose target
+                 is 1 and whose pixel is interior ("holes" inside a cell)
+    Both are 0 for a perfect model. Returns (int_wall, int_aff).
+    """
+    ops = keras.ops
+    y_sem = y[..., :1]
+    k = 2 * int(margin) + 1
+    near_wall = ops.max_pool(y_sem, k, strides=1, padding='same')
+    interior = 1.0 - near_wall  # 1 where no wall within `margin` px
+    n_int = ops.maximum(ops.sum(interior), 1.0)
+
+    int_wall = ops.sum(interior * outputs['semantic_head']) / n_int
+
+    y_aff = y[..., 1 : 1 + n_aff]
+    pos = interior * y_aff  # target 1 and interior
+    int_aff = ops.sum(pos * (1.0 - outputs['affinity_head'])) / ops.maximum(
+        ops.sum(pos), 1.0
+    )
+    return int_wall, int_aff
+
+
+def compute_loss(
+    outputs,
+    y,
+    w,
+    ftl,
+    w_aff=1.0,
+    w_aux=0.25,
+    w_geo=0.5,
+    aff_floor=1.0,
+    w_interior=0.5,
+    interior_margin=3,
+):
     """
     Total loss = semantic FTL
                + w_aff * weighted-L1 on affinities
+               + w_interior * (interior false-wall + interior affinity holes)
                + w_aux * sum of FTL on the auxiliary (deep supervision) heads
                + w_geo * geometry loss (only when the model has a geometry head).
 
@@ -59,15 +98,30 @@ def compute_loss(outputs, y, w, ftl, w_aff=1.0, w_aux=0.25, w_geo=0.5):
     y_aff = y[..., 1 : 1 + n_aff]
 
     sem = ftl(y_sem, outputs['semantic_head'], w)
-    aff = keras.ops.mean(w * keras.ops.abs(y_aff - outputs['affinity_head']))
+    # Flatter weights for the affinities: the EDT map is ~10 next to a wall and
+    # ~0.1 inside a cell, so an error deep in a cell was almost free. Raising
+    # the floor to `aff_floor` (a few times the interior value) keeps the
+    # emphasis on walls but makes interior holes cost something. The mean weight
+    # stays about the same, so the overall scale of the term is unchanged.
+    w_a = keras.ops.maximum(w, aff_floor)
+    aff = keras.ops.mean(w_a * keras.ops.abs(y_aff - outputs['affinity_head']))
 
     aux = 0.0
     for name, pred in outputs.items():
         if name.startswith('aux_semantic_'):
             aux = aux + ftl(y_sem, pred, w)  # same mask, same weights
 
-    total = sem + w_aff * aff + w_aux * aux
-    parts = {'sem': sem, 'aff': aff, 'aux': aux}
+    int_wall, int_aff = interior_errors(outputs, y, n_aff, interior_margin)
+    interior = int_wall + int_aff
+
+    total = sem + w_aff * aff + w_aux * aux + w_interior * interior
+    parts = {
+        'sem': sem,
+        'aff': aff,
+        'aux': aux,
+        'int_wall': int_wall,
+        'int_aff': int_aff,
+    }
 
     geo = 0.0
     if 'geometry_head' in outputs:
@@ -85,13 +139,13 @@ def compute_loss(outputs, y, w, ftl, w_aff=1.0, w_aux=0.25, w_geo=0.5):
     return total, parts
 
 
-def train_step(generator, optimizer, batch, ftl, device):
+def train_step(generator, optimizer, batch, ftl, device, **loss_kw):
     """One optimisation step. `optimizer` is a torch optimizer, as in your loop."""
     x, y, w = (t.float().to(device) for t in batch)
 
     optimizer.zero_grad()
     outputs = generator(x, training=True)
-    total, parts = compute_loss(outputs, y, w, ftl)
+    total, parts = compute_loss(outputs, y, w, ftl, **loss_kw)
     total.backward()
     optimizer.step()
 
@@ -102,7 +156,7 @@ def train_step(generator, optimizer, batch, ftl, device):
 
 
 @torch.no_grad()
-def validate(generator, val_loader, ftl, device, max_batches=20):
+def validate(generator, val_loader, ftl, device, max_batches=20, **loss_kw):
     """
     Average loss and Dice (semantic head, threshold 0.5) on a FIXED validation
     set. Call this every N steps and keep the checkpoint with the best Dice.
@@ -113,6 +167,8 @@ def validate(generator, val_loader, ftl, device, max_batches=20):
         'aff': 0.0,
         'aux': 0.0,
         'geo': 0.0,
+        'int_wall': 0.0,
+        'int_aff': 0.0,
         'dice': 0.0,
     }
     n = 0
@@ -121,7 +177,7 @@ def validate(generator, val_loader, ftl, device, max_batches=20):
             break
         x, y, w = (t.float().to(device) for t in batch)
         outputs = generator(x, training=False)  # training=False: no dropout
-        _, parts = compute_loss(outputs, y, w, ftl)
+        _, parts = compute_loss(outputs, y, w, ftl, **loss_kw)
 
         pred = (outputs['semantic_head'] > 0.5).float()
         true = y[..., :1]

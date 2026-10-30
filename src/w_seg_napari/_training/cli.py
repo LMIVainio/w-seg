@@ -88,6 +88,26 @@ def parse_args(argv=None):
         help='add the geometry head (architecture wasp_v4)',
     )
     p.add_argument(
+        '--aff-floor',
+        type=float,
+        default=1.0,
+        help='minimum weight of the affinity loss (the EDT map is ~0.1 inside '
+        'cells; 0 restores the old behaviour)',
+    )
+    p.add_argument(
+        '--w-interior',
+        type=float,
+        default=0.5,
+        help='weight of the interior term (false wall + affinity holes deep '
+        'inside cells); 0 switches it off',
+    )
+    p.add_argument(
+        '--interior-margin',
+        type=int,
+        default=3,
+        help='pixels from any wall that count as "deep inside a cell"',
+    )
+    p.add_argument(
         '--init-from',
         default=None,
         help='model bundle folder to continue training from',
@@ -246,10 +266,20 @@ def main(argv=None):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     ftl = WeightedFocalTverskyLoss()
+    loss_kw = {
+        'aff_floor': args.aff_floor,
+        'w_interior': args.w_interior,
+        'interior_margin': args.interior_margin,
+    }
 
     if base_model is not None:
         base = validate(
-            model, val_loader, ftl, device, max_batches=len(val_loader)
+            model,
+            val_loader,
+            ftl,
+            device,
+            max_batches=len(val_loader),
+            **loss_kw,
         )
         emit(
             'status',
@@ -287,6 +317,7 @@ def main(argv=None):
         for k in (
             'step', 'train_total', 'train_sem', 'train_aff',
             'eval_step', 'val_total', 'val_sem', 'val_aff', 'val_dice',
+            'val_int_wall', 'val_int_aff',
         )
     }  # fmt: skip
     log_path = os.path.join(run_dir, 'log.csv')
@@ -299,6 +330,8 @@ def main(argv=None):
                 'val_sem',
                 'val_aff',
                 'val_dice',
+                'val_int_wall',
+                'val_int_aff',
                 'lr',
                 'minutes',
             ]
@@ -313,9 +346,14 @@ def main(argv=None):
         import matplotlib.pyplot as plt
 
         val = validate(
-            model, val_loader, ftl, device, max_batches=len(val_loader)
+            model,
+            val_loader,
+            ftl,
+            device,
+            max_batches=len(val_loader),
+            **loss_kw,
         )
-        for k in ('total', 'sem', 'aff', 'dice'):
+        for k in ('total', 'sem', 'aff', 'dice', 'int_wall', 'int_aff'):
             history[f'val_{k}'].append(val[k])
         history['eval_step'].append(step)
 
@@ -332,6 +370,7 @@ def main(argv=None):
                 'val_dice': round(float(val['dice']), 4),
                 'batch_size': args.batch_size,
                 'learning_rate': args.lr,
+                'loss': dict(loss_kw),
                 'train_files': sorted(
                     p.name for p in Path(args.train_dir).glob('*.tif*')
                 ),
@@ -344,11 +383,13 @@ def main(argv=None):
         with open(log_path, 'a', newline='') as f:
             csv.writer(f).writerow(
                 [step, f'{recent:.4f}', f'{val["total"]:.4f}', f'{val["sem"]:.4f}',
-                 f'{val["aff"]:.4f}', f'{val["dice"]:.4f}', f'{lr:.2e}', f'{minutes:.1f}']
+                 f'{val["aff"]:.4f}', f'{val["dice"]:.4f}',
+                 f'{val["int_wall"]:.4f}', f'{val["int_aff"]:.4f}', f'{lr:.2e}', f'{minutes:.1f}']
             )  # fmt: skip
         print(
             f'step {step:6d} | train {recent:.3f} | val {val["total"]:.3f} '
             f'(wall {val["sem"]:.3f}, aff {val["aff"]:.3f}) | val Dice {val["dice"]:.3f} '
+            f'| interior: wall {val["int_wall"]:.4f}, aff-holes {val["int_aff"]:.3f} '
             f'| best {best_dice:.3f} | {minutes:.1f} min',
             flush=True,
         )
@@ -387,7 +428,9 @@ def main(argv=None):
             if stop_requested():
                 stopped = True
                 break
-            parts = train_step(model, optimizer, next(batches), ftl, device)
+            parts = train_step(
+                model, optimizer, next(batches), ftl, device, **loss_kw
+            )
             scheduler.step()
             step += 1
             history['step'].append(step)
