@@ -46,7 +46,7 @@ def _show(ax, img, title, cmap=None):
         vmax=1 if cmap else None,
         interpolation='nearest',
     )
-    ax.set_title(title, fontsize=8)
+    ax.set_title(title, fontsize=10)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -74,6 +74,68 @@ def sample_row(axes, sample, aff_channels, aff_labels, row_name):
         )
 
 
+def direction_to_rgb(vec, valid=None):
+    """
+    [H, W, 2] (dir_y, dir_x) in -1..1 -> RGB. Grey = no direction.
+    Horizontal component x: red (+, pointing right) / cyan (-, left).
+    Vertical component y:   blue (+, pointing down) / yellow (-, up).
+    `valid` (bool [H, W]) greys out pixels without a meaningful direction.
+    """
+    vec = np.clip(np.asarray(vec, dtype=np.float64), -1, 1)
+    rgb = np.empty(vec.shape[:2] + (3,))
+    rgb[..., 0] = 0.5 + 0.5 * vec[..., 1]
+    rgb[..., 1] = 0.5
+    rgb[..., 2] = 0.5 + 0.5 * vec[..., 0]
+    if valid is not None:
+        rgb[~np.asarray(valid, dtype=bool)] = 0.5
+    return rgb
+
+
+def overlay_skeleton(rgb, skeleton, threshold=0.5):
+    """Paint skeleton pixels (> threshold) bright red on an RGB image."""
+    out = np.array(rgb, dtype=np.float64, copy=True)
+    out[np.asarray(skeleton) > threshold] = (1.0, 0.1, 0.1)
+    return out
+
+
+def geometry_row(axes, sample, n_aff):
+    """
+    Geometry panels (needs sample['pred_geo'] [H,W,4] and the 4 geometry
+    channels after the affinities in sample['y']): edge distance, direction
+    vector field, skeleton, each truth and prediction, then the input with the
+    predicted skeleton on top.
+    """
+    truth = sample['y'][..., 1 + n_aff : 5 + n_aff]
+    pred = sample['pred_geo']
+    t_valid = np.abs(truth[..., 1:3]).sum(-1) > 0.5
+    # Predictions exist everywhere; only show a direction where the network
+    # itself thinks it is inside a cell.
+    p_valid = pred[..., 0] > 0.05
+    _show(axes[0], truth[..., 0], 'edge distance: truth', 'magma')
+    _show(
+        axes[1],
+        np.clip(pred[..., 0], 0, 1),
+        'edge distance: prediction',
+        'magma',
+    )
+    _show(
+        axes[2], direction_to_rgb(truth[..., 1:3], t_valid), 'direction: truth'
+    )
+    _show(
+        axes[3],
+        direction_to_rgb(pred[..., 1:3], p_valid),
+        'direction: prediction',
+    )
+    _show(axes[4], truth[..., 3], 'skeleton: truth', 'gray')
+    _show(axes[5], np.clip(pred[..., 3], 0, 1), 'skeleton: prediction', 'gray')
+    if len(axes) > 6:
+        _show(
+            axes[6],
+            overlay_skeleton(input_to_rgb(sample['x']), pred[..., 3]),
+            'input + predicted skeleton',
+        )
+
+
 def make_progress_figure(
     history, train_sample, val_sample, offsets, ranges, title=''
 ):
@@ -86,27 +148,39 @@ def make_progress_figure(
     per_range = len(offsets) // n_ranges
     aff_channels = [r * per_range for r in range(n_ranges)]
     aff_labels = [f'affinity E, k={ranges[r]}' for r in range(n_ranges)]
-    ncols = 3 + 2 * n_ranges
+    has_geo = 'pred_geo' in train_sample and 'pred_geo' in val_sample
+    ncols = max(3 + 2 * n_ranges, 7 if has_geo else 0)
+    rows_per_sample = 2 if has_geo else 1
+    n_img_rows = 2 * rows_per_sample
 
     fig = plt.figure(
-        figsize=(2.1 * ncols, 2.4 * 2 + 3.6), layout='constrained'
+        figsize=(2.3 * ncols, 2.5 * n_img_rows + 3.8), layout='constrained'
     )
     # Separate sub-figures: the curve axes' tick labels must not distort the image grid
     top, bottom = fig.subfigures(
-        2, 1, height_ratios=[2 * 2.4, 3.6], hspace=0.02
+        2, 1, height_ratios=[n_img_rows * 2.5, 3.8], hspace=0.02
     )
-    gs = top.add_gridspec(2, ncols)
+    gs = top.add_gridspec(n_img_rows, ncols)
+    n_aff = len(offsets)
     for r, (sample, name) in enumerate(
         [(train_sample, 'train'), (val_sample, 'val')]
     ):
-        axes = [top.add_subplot(gs[r, c]) for c in range(ncols)]
+        row = r * rows_per_sample
+        axes = [top.add_subplot(gs[row, c]) for c in range(ncols)]
+        for ax in axes[3 + 2 * n_ranges :]:
+            ax.axis('off')  # unused cells in the first row
         sample_row(
-            axes,
+            axes[: 3 + 2 * n_ranges],
             sample,
             aff_channels,
             aff_labels,
             f'{name} #{sample.get("index", "?")}',
         )
+        if has_geo:
+            geo_axes = [top.add_subplot(gs[row + 1, c]) for c in range(ncols)]
+            geometry_row(geo_axes, sample, n_aff)
+            for ax in geo_axes[7:]:
+                ax.axis('off')
 
     ax_loss, ax_parts, ax_dice = bottom.subplots(
         1, 3, gridspec_kw={'width_ratios': [1.3, 1.3, 1]}
@@ -129,7 +203,7 @@ def make_progress_figure(
         label='validation',
     )
     ax_loss.set_yscale('log')
-    ax_loss.set_title('total loss (log scale)', fontsize=9)
+    ax_loss.set_title('total loss (log scale)', fontsize=11)
 
     for key, color, label in (
         ('train_sem', 'tab:blue', 'wall, train'),
@@ -146,7 +220,7 @@ def make_progress_figure(
             history['eval_step'], history[key], 'o--', color=color, label=label
         )
     ax_parts.set_yscale('log')
-    ax_parts.set_title('loss parts', fontsize=9)
+    ax_parts.set_title('loss parts', fontsize=11)
 
     ax_dice.plot(
         history['eval_step'], history['val_dice'], 'o-', color='tab:purple'
@@ -156,16 +230,21 @@ def make_progress_figure(
         ax_dice.axvline(history['eval_step'][best], color='gray', ls=':')
         ax_dice.set_title(
             f'validation Dice (best {history["val_dice"][best]:.3f})',
-            fontsize=9,
+            fontsize=11,
         )
     ax_dice.set_ylim(0, 1)
 
     for ax in (ax_loss, ax_parts, ax_dice):
-        ax.set_xlabel('step', fontsize=8)
+        ax.set_xlabel('step', fontsize=10)
         ax.grid(alpha=0.3)
-        ax.tick_params(labelsize=8)
+        ax.tick_params(labelsize=10)
     for ax in (ax_loss, ax_parts):
-        ax.legend(fontsize=7)
+        ax.legend(fontsize=9)
+    if has_geo:
+        title = (
+            (f'{title}\n' if title else '')
+            + 'direction key: x = red (right) / cyan (left), y = blue (down) / yellow (up), grey = none'
+        )
     if title:
-        fig.suptitle(title, fontsize=10)
+        fig.suptitle(title, fontsize=13)
     return fig

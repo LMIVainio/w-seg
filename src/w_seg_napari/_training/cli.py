@@ -147,7 +147,11 @@ def predict_sample(model, index, crop, device):
     def to_np(t):
         return keras.ops.convert_to_numpy(t)[0]
 
+    extra = {}
+    if 'geometry_head' in out:
+        extra['pred_geo'] = to_np(out['geometry_head'])
     return {
+        **extra,
         'index': index,
         'x': x.numpy(),
         'y': y.numpy(),
@@ -407,11 +411,11 @@ def main(argv=None):
             title=f'{args.name} | step {step} | lr {lr:.1e}',
         )  # fmt: skip
         progress_png = os.path.join(run_dir, 'progress.png')
-        fig.savefig(progress_png, dpi=80)
+        fig.savefig(progress_png, dpi=150)
         if args.keep_history:
             fig.savefig(
                 os.path.join(run_dir, 'history', f'step_{step:06d}.png'),
-                dpi=60,
+                dpi=100,
             )
         emit(
             'eval', step=step, steps=args.steps, val_dice=val['dice'],
