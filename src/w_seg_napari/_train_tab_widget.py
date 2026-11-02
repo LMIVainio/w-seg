@@ -129,8 +129,14 @@ class TrainWidget(QGroupBox):
         self.steps_spin.setSingleStep(500)
         self.steps_spin.setValue(5000)
         self.batch_spin = QSpinBox()
-        self.batch_spin.setRange(1, 128)
-        self.batch_spin.setValue(8)
+        self.batch_spin.setRange(0, 128)
+        self.batch_spin.setSpecialValueText('Auto (fill GPU memory)')
+        self.batch_spin.setToolTip(
+            'Auto tries real training steps with growing batch sizes and '
+            'uses the largest one that fits in free GPU memory (with some '
+            'headroom). Pick a number to fix the batch size yourself.'
+        )
+        self.batch_spin.setValue(0)
         self.eval_spin = QSpinBox()
         self.eval_spin.setRange(1, 100_000)
         self.eval_spin.setValue(200)
@@ -320,6 +326,11 @@ class TrainWidget(QGroupBox):
         self.geometry_cb.setEnabled(
             not running and self.base_combo.currentData() is None
         )
+        # While a run is going, the other tabs are locked (the GPU belongs to
+        # the training process).
+        lock = getattr(self.main_widget, 'set_training_running', None)
+        if lock is not None:
+            lock(running)
 
     # ------------------------------------------------------------------
     def _on_start(self):
@@ -340,10 +351,19 @@ class TrainWidget(QGroupBox):
         self._buffer = ''
         self._bundle_dir = None
 
+        # Give the GPU to the training process: unload the model in tab 1 and
+        # release cached GPU memory in this process.
+        prepare = getattr(self.main_widget, 'prepare_for_training', None)
+        if prepare is not None:
+            prepare()
+
         proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert('KERAS_BACKEND', 'torch')
         env.insert('PYTHONUNBUFFERED', '1')
+        if sys.platform.startswith('linux'):
+            # fewer allocator fragments, so more of the memory is usable
+            env.insert('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
         proc.setProcessEnvironment(env)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_output)
@@ -368,6 +388,8 @@ class TrainWidget(QGroupBox):
             and self.process.state() == QProcess.NotRunning
         ):
             self.status.setText(f'Could not run training ({error}).')
+            self.process = None
+            self._set_running(False)  # unlock the tabs again
 
     def _on_output(self):
         data = bytes(self.process.readAllStandardOutput()).decode(

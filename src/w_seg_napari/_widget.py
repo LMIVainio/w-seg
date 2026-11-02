@@ -20,6 +20,26 @@ from w_seg_napari._widget_tabs import (
 )
 from w_seg_napari._wsegutils import get_model_config
 
+
+def free_gpu_memory():
+    """Garbage-collect and return cached GPU memory to the driver.
+
+    (The CUDA context of this process, a few hundred MB, stays until napari
+    is closed; everything else the plugin held is released.)
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except (ImportError, RuntimeError):
+        pass
+
+
 if TYPE_CHECKING:
     import napari
 
@@ -299,6 +319,17 @@ class WSegMasterWidget(QWidget):
             'morph_params': self.tab4.morphology_widget.snapshot_params(),
             'classifier': self.tab4.cell_classifier.clf_manager,
         }
+
+    def set_training_running(self, running: bool):
+        """Locks every tab except the training tab while a training runs."""
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i) is not self.tab6:
+                self.tabs.setTabEnabled(i, not running)
+
+    def prepare_for_training(self):
+        """Unloads the model and gives its GPU memory back before training."""
+        self.tab1.unload_model()
+        free_gpu_memory()
 
     def set_batch_running(self, running: bool):
         """Locks every tab except the batch tab while a batch runs."""

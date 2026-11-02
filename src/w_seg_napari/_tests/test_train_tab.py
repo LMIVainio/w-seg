@@ -60,3 +60,34 @@ def test_geometry_flag_only_for_new_models():
     # a continued model keeps its own architecture
     both = build_args({**base, 'geometry': True, 'init_from': '/m'})
     assert '--geometry' not in both and '--init-from' in both
+
+
+def test_auto_batch_size_is_passed_on():
+    p = {
+        'train_dir': 'T', 'val_dir': 'V', 'out_root': 'O', 'name': 'n',
+        'stop_file': 'S', 'steps': 10, 'batch_size': 0, 'eval_every': 5,
+        'lr': 0.001, 'warmup': 1, 'val_samples': 8, 'ranges': [6, 32],
+        'zoom': (0.5, 1.5), 'tissue_bias': 0.7, 'workers': 0, 'seed': 0,
+    }  # fmt: skip
+    a = build_args(p)
+    assert a[a.index('--batch-size') + 1] == '0'  # 0 = automatic
+
+
+def test_find_max_batch_and_safe_batch():
+    from w_seg_napari._training.autobatch import find_max_batch, safe_batch
+
+    for limit_fit in (1, 2, 3, 7, 8, 13, 40, 127, 128, 500):
+        calls = []
+
+        def fits(b, n=limit_fit):
+            calls.append(b)
+            return b <= n
+
+        got = find_max_batch(fits, start=2, limit=128)
+        assert got == min(limit_fit, 128), (limit_fit, got)
+        assert len(calls) <= 16  # a handful of probes, not a scan
+    assert find_max_batch(lambda b: False) == 0  # not even one fits
+    # the margin leaves headroom and keeps even sizes from 4 up
+    assert safe_batch(0) == 0 and safe_batch(1) == 1 and safe_batch(2) == 1
+    assert safe_batch(10) == 8 and safe_batch(40) == 34
+    assert safe_batch(128) % 2 == 0 and safe_batch(128) <= 128 * 0.85

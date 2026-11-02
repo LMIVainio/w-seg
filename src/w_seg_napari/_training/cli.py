@@ -22,6 +22,7 @@ os.environ.setdefault('KERAS_BACKEND', 'torch')  # before importing keras
 
 import argparse
 import csv
+import gc
 import json
 import math
 import random
@@ -42,10 +43,11 @@ from w_seg_napari._model_config import (
     make_config,
     save_bundle,
 )
+from w_seg_napari._training.autobatch import find_max_batch, safe_batch
 from w_seg_napari._training.data import LargeTiffCellDataset
 from w_seg_napari._training.losses import WeightedFocalTverskyLoss
 from w_seg_napari._training.model import Generator
-from w_seg_napari._training.steps import train_step, validate
+from w_seg_napari._training.steps import compute_loss, train_step, validate
 
 
 def emit(event, **kw):
@@ -68,7 +70,12 @@ def parse_args(argv=None):
     p.add_argument('--name', default='run')
     p.add_argument('--stop-file', default=None)
     p.add_argument('--steps', type=int, default=5000)
-    p.add_argument('--batch-size', type=int, default=8)
+    p.add_argument(
+        '--batch-size',
+        type=int,
+        default=8,
+        help='0 = automatic: the largest batch that fits in GPU memory',
+    )
     p.add_argument('--lr', type=float, default=2e-4)
     p.add_argument('--warmup', type=int, default=200)
     p.add_argument('--eval-every', type=int, default=200)
@@ -122,6 +129,63 @@ def denoise(t):
     return K.bilateral_blur(
         t, kernel_size=(5, 5), sigma_color=0.1, sigma_space=(1.5, 1.5)
     )
+
+
+def auto_batch_size(model, ftl, loss_kw, device, patch, in_ch, n_targets):
+    """
+    Largest comfortable batch size for this GPU, found by running real
+    forward + backward passes on random data (no weight update).
+    """
+    if device != 'cuda':
+        emit('status', message='No GPU: using batch size 4.')
+        return 4
+    free, total = torch.cuda.mem_get_info()
+    gb = 1024**3
+    emit(
+        'status',
+        message=f'GPU memory: {free / gb:.1f} GB free of {total / gb:.1f} GB. '
+        'Finding the largest batch size...',
+    )
+
+    def fits(b):
+        ok = True
+        try:
+            x = torch.rand(b, patch, patch, in_ch, device=device)
+            y = torch.rand(b, patch, patch, n_targets, device=device)
+            w = torch.ones(b, patch, patch, 1, device=device)
+            total_loss, _ = compute_loss(
+                model(x, training=True), y, w, ftl, **loss_kw
+            )
+            total_loss.backward()
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if 'out of memory' not in str(e).lower():
+                raise
+            ok = False
+        finally:
+            for p in model.parameters():
+                p.grad = None
+            x = y = w = total_loss = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        return ok
+
+    best = find_max_batch(fits)
+    if best == 0:
+        raise RuntimeError(
+            'Not even a batch of 1 fits in GPU memory. Close other programs '
+            'that use the GPU, or train with smaller --widths.'
+        )
+    chosen = safe_batch(best)
+    emit(
+        'status',
+        message=f'Largest batch that fits: {best}; training with {chosen}.',
+    )
+    print(
+        f'Auto batch size: largest {best}, using {chosen} '
+        f'({free / gb:.1f} GB free of {total / gb:.1f} GB)',
+        flush=True,
+    )
+    return chosen
 
 
 def infinite(loader):
@@ -217,6 +281,34 @@ def main(argv=None):
         'hue_encoding': pre['hue_encoding'],
         'geometry': geometry,
     }
+    model = (
+        base_model
+        if base_model is not None
+        else Generator(
+            n_affinity=len(offsets),
+            widths=tuple(args.widths),
+            geometry=geometry is not None,
+        )
+    )
+    ftl = WeightedFocalTverskyLoss()
+    loss_kw = {
+        'aff_floor': args.aff_floor,
+        'w_interior': args.w_interior,
+        'interior_margin': args.interior_margin,
+    }
+    if (
+        args.batch_size <= 0
+    ):  # automatic: as large as the free GPU memory allows
+        n_targets = 1 + len(offsets) + (4 if geometry is not None else 0)
+        args.batch_size = auto_batch_size(
+            model,
+            ftl,
+            loss_kw,
+            device,
+            cfg['input']['patch_size'],
+            cfg['input']['channels'],
+            n_targets,
+        )
     emit(
         'status',
         message='Preparing training data (first run builds a cache)...',
@@ -249,15 +341,6 @@ def main(argv=None):
     )
     batches = infinite(train_loader)
 
-    model = (
-        base_model
-        if base_model is not None
-        else Generator(
-            n_affinity=len(offsets),
-            widths=tuple(args.widths),
-            geometry=geometry is not None,
-        )
-    )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-4
     )
@@ -269,13 +352,6 @@ def main(argv=None):
         return 0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(t, 1.0)))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
-    ftl = WeightedFocalTverskyLoss()
-    loss_kw = {
-        'aff_floor': args.aff_floor,
-        'w_interior': args.w_interior,
-        'interior_margin': args.interior_margin,
-    }
-
     if base_model is not None:
         base = validate(
             model,

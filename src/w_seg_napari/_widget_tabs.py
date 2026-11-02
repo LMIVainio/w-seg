@@ -193,6 +193,17 @@ class Tab1Pipeline(QScrollArea):
         self.combo_weights.setCurrentIndex(index)
         self._on_reload_clicked()
 
+    def unload_model(self):
+        """Drops the loaded model so that its GPU memory can be released."""
+        self.model_state['generator'] = None
+        if hasattr(self, 'w_net_widget'):
+            self.w_net_widget.generator = None
+        self.loaded_weights = 'No weights loaded'
+        self.status_label.setText(
+            f'Device: {self.device.type.upper()} | Model unloaded for '
+            'training. Select a model and reload it afterwards.'
+        )
+
     def _on_reload_clicked(self):
         selected_weight_identifier = (
             self.combo_weights.currentData()
