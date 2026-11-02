@@ -322,6 +322,7 @@ def main(argv=None):
             'step', 'train_total', 'train_sem', 'train_aff',
             'eval_step', 'val_total', 'val_sem', 'val_aff', 'val_dice',
             'val_int_wall', 'val_int_aff',
+            'train_geo', 'val_geo', 'train_interior', 'val_interior',
         )
     }  # fmt: skip
     log_path = os.path.join(run_dir, 'log.csv')
@@ -359,6 +360,8 @@ def main(argv=None):
         )
         for k in ('total', 'sem', 'aff', 'dice', 'int_wall', 'int_aff'):
             history[f'val_{k}'].append(val[k])
+        history['val_geo'].append(val['geo'])
+        history['val_interior'].append(val['int_wall'] + val['int_aff'])
         history['eval_step'].append(step)
 
         recent = float(np.mean(history['train_total'][-args.eval_every :]))
@@ -441,6 +444,10 @@ def main(argv=None):
             history['train_total'].append(parts['total'])
             history['train_sem'].append(parts['sem'])
             history['train_aff'].append(parts['aff'])
+            history['train_geo'].append(parts['geo'])
+            history['train_interior'].append(
+                parts['int_wall'] + parts['int_aff']
+            )
             if not np.isfinite(parts['total']):
                 emit(
                     'error',

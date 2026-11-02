@@ -88,6 +88,7 @@ from w_seg_napari._curation_ops import (
     merge_label_groups,
     touching_groups,
 )
+from w_seg_napari._geometry_fields import clean_geometry
 
 
 def get_device() -> torch.device:
@@ -948,6 +949,7 @@ def process_large_image(
     hue_encoding='raw',
     enable_lab=True,
     output_names=('semantic_head', 'affinity_head'),
+    geometry_name=None,
 ):
     """
     Memory-safe inference pipeline for Napari.
@@ -955,6 +957,10 @@ def process_large_image(
     Works with old models (output: (semantic, affinity) tuple, 2 affinity
     channels) and new models (output: dict, any number of affinity channels).
     Returns (semantic [1, H, W], affinities [n, H, W]).
+
+    With ``geometry_name`` (the geometry output of a wasp_v4 model) the
+    stitched geometry [4, H, W] is returned as a third value: edge distance,
+    dir_y, dir_x, skeleton. Without it the return value is unchanged.
 
     Runs global 6-channel preprocessing on CPU (RAM) to avoid GPU VRAM spikes,
     then transfers individual 256x256 patches to CUDA for model inference.
@@ -998,6 +1004,7 @@ def process_large_image(
     # Allocated after the first patch, once the number of affinity channels is known
     aff_canvas_cpu = None
     aff_weight_cpu = torch.zeros((1, H, W), dtype=torch.float32)
+    geo_canvas_cpu = None  # [4, H, W], only with geometry_name
 
     # Blend mask can live on CPU for canvas accumulation
     blend_mask_cpu = create_blend_mask(patch_size).unsqueeze(0)
@@ -1022,7 +1029,9 @@ def process_large_image(
             for x in x_coords:
                 if is_cancelled and is_cancelled():
                     print('[w-seg] Inference cancelled...')
-                    return None, None
+                    return (
+                        (None, None, None) if geometry_name else (None, None)
+                    )
                 # Print progress
                 progress_count += 1
                 progress_out = progress_count / total_patches * 100
@@ -1071,8 +1080,12 @@ def process_large_image(
                 if isinstance(model_out, dict):  # new models
                     pred_sem_gpu = model_out[output_names[0]]
                     pred_aff_gpu = model_out[output_names[1]]
+                    pred_geo_gpu = (
+                        model_out[geometry_name] if geometry_name else None
+                    )
                 else:  # old models: (semantic, affinity)
                     pred_sem_gpu, pred_aff_gpu = model_out
+                    pred_geo_gpu = None
 
                 # 4. Convert model outputs (1, 256, 256, C) -> Channels-First (1, C, 256, 256)
                 pred_sem_gpu = pred_sem_gpu.permute(
@@ -1082,8 +1095,18 @@ def process_large_image(
                     0, 3, 1, 2
                 )  # (1, n_aff, 256, 256)
 
+                if pred_geo_gpu is not None:
+                    pred_geo_gpu = pred_geo_gpu.permute(0, 3, 1, 2)
+
                 # 5. Resize predictions back to extracted patch dimensions (h, w)
                 if (h, w) != (256, 256):
+                    if pred_geo_gpu is not None:
+                        pred_geo_gpu = F.interpolate(
+                            pred_geo_gpu,
+                            size=(h, w),
+                            mode='bilinear',
+                            align_corners=False,
+                        )
                     pred_sem_gpu = F.interpolate(
                         pred_sem_gpu,
                         size=(h, w),
@@ -1105,6 +1128,13 @@ def process_large_image(
                         (pred_aff.shape[0], H, W), dtype=torch.float32
                     )
 
+                if pred_geo_gpu is not None:
+                    pred_geo = pred_geo_gpu.squeeze(0).cpu()  # (4, h, w)
+                    if geo_canvas_cpu is None:
+                        geo_canvas_cpu = torch.zeros(
+                            (pred_geo.shape[0], H, W), dtype=torch.float32
+                        )
+
                 # 7. Strictly mask predictions AND blend weights using patch_fg_mask
                 fg_mask_patch = patch_fg_mask[:h, :w].bool()
                 # Zero out bacground
@@ -1122,6 +1152,10 @@ def process_large_image(
                     pred_aff * mask_patch
                 )
                 aff_weight_cpu[:, y : y + h, x : x + w] += mask_patch
+                if pred_geo_gpu is not None:
+                    geo_canvas_cpu[:, y : y + h, x : x + w] += (
+                        pred_geo * fg_mask_patch * mask_patch
+                    )
 
                 # Live Napari Update (CPU numpy slice)
                 if live_view:
@@ -1161,7 +1195,17 @@ def process_large_image(
     final_sem[:, ~fg_mask_np] = 0.0
     final_aff[:, ~fg_mask_np] = 0.0
     sys.stdout.write('\n')
-    return final_sem, final_aff
+    if not geometry_name:
+        return final_sem, final_aff
+
+    # The geometry canvas uses the same blend weights as the affinities.
+    if geo_canvas_cpu is None:  # no foreground patch at all
+        geo_canvas_cpu = torch.zeros((4, H, W), dtype=torch.float32)
+    final_geo = torch.where(
+        aff_weight_cpu > 0, geo_canvas_cpu / aff_weight_cpu, 0.0
+    ).numpy()
+    final_geo[:, ~fg_mask_np] = 0.0
+    return final_sem, final_aff, clean_geometry(final_geo)
 
 
 # =====================================================================

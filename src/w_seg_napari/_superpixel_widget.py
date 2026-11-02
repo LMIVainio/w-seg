@@ -24,9 +24,12 @@ from w_seg_napari._affinity import (
     gather,
     mutex_inputs,
 )
+from w_seg_napari._seeded_watershed import seeded_edt_watershed
 
 # Importing skimage.morphology remove_small_objects() in a version independent manner
 from w_seg_napari._wsegutils import remove_small_objects_safe
+
+SKELETON_ALGO = 'Skeleton-seeded EDT Watershed (geometry)'
 
 
 class SuperpixelWidget(QGroupBox):
@@ -64,6 +67,7 @@ class SuperpixelWidget(QGroupBox):
                 'Felzenszwalb Superpixels',
                 'Seeded Mutex Watershed (elf)',
                 'Mutex Watershed (elf)',
+                SKELETON_ALGO,
             ]
         )
         self.combo_algorithm.currentIndexChanged.connect(
@@ -83,6 +87,11 @@ class SuperpixelWidget(QGroupBox):
         self.combo_aff = QComboBox()
         self.combo_aff.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         form_layout.addRow('Affinities of:', self.combo_aff)
+
+        # Skeleton predicted by a geometry-head model (geo_skel_<image>)
+        self.combo_skel = QComboBox()
+        self.combo_skel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        form_layout.addRow('Skeleton layer:', self.combo_skel)
 
         # 3. Global Pre-Smoothing Parameter
         self.spin_smooth_sigma = QDoubleSpinBox()
@@ -268,6 +277,45 @@ class SuperpixelWidget(QGroupBox):
 
         self.param_stack.addWidget(page_mutex)
 
+        # --- Page 5: Skeleton-seeded EDT Watershed Params ---
+        page_skel = QWidget()
+        layout_skel = QFormLayout(page_skel)
+        layout_skel.setContentsMargins(0, 0, 0, 0)
+
+        self.spin_skel_threshold = QDoubleSpinBox()
+        self.spin_skel_threshold.setRange(0.0, 1.0)
+        self.spin_skel_threshold.setSingleStep(0.05)
+        self.spin_skel_threshold.setValue(0.5)
+        self.spin_skel_threshold.setToolTip(
+            'Skeleton probability above which a pixel belongs to a seed. '
+            'Each connected skeleton piece becomes one cell.'
+        )
+        layout_skel.addRow('Skeleton Threshold:', self.spin_skel_threshold)
+
+        self.spin_skel_min_seed = QSpinBox()
+        self.spin_skel_min_seed.setRange(1, 1000)
+        self.spin_skel_min_seed.setValue(5)
+        self.spin_skel_min_seed.setToolTip(
+            'Skeleton pieces with fewer pixels are ignored as noise.'
+        )
+        layout_skel.addRow('Min Seed Pixels:', self.spin_skel_min_seed)
+
+        self.spin_skel_compactness = QDoubleSpinBox()
+        self.spin_skel_compactness.setRange(0.0, 10.0)
+        self.spin_skel_compactness.setSingleStep(0.01)
+        self.spin_skel_compactness.setValue(0.0)
+        layout_skel.addRow('Compactness:', self.spin_skel_compactness)
+
+        self.check_skel_fill = QCheckBox('Label cells without a skeleton')
+        self.check_skel_fill.setChecked(True)
+        self.check_skel_fill.setToolTip(
+            'Interior regions the skeleton missed become a cell of their own '
+            '(seeded at their deepest point) instead of staying empty.'
+        )
+        layout_skel.addRow(self.check_skel_fill)
+
+        self.param_stack.addWidget(page_skel)
+
         main_layout.addWidget(self.param_stack)
 
         # 5. Run Button
@@ -301,9 +349,11 @@ class SuperpixelWidget(QGroupBox):
             'Distance Watershed',
             'Local Affinity Watershed',
             'Seeded Mutex Watershed (elf)',
+            SKELETON_ALGO,
         ]
         uses_semantic = selected_algo in semantic_algorithms
         self.combo_sem_layer.setEnabled(uses_semantic)
+        self.combo_skel.setEnabled(selected_algo == SKELETON_ALGO)
 
     def refresh_layer_choices(self, event=None):
         if self.viewer is None:
@@ -335,6 +385,7 @@ class SuperpixelWidget(QGroupBox):
 
         # Standar layers with selected prfixes
         _update_combo(self.combo_sem_layer, prefix='pred_')
+        _update_combo(self.combo_skel, prefix='geo_skel_')
         current = self.combo_aff.currentText()
         self.combo_aff.blockSignals(True)
         self.combo_aff.clear()
@@ -401,6 +452,11 @@ class SuperpixelWidget(QGroupBox):
             'mutex_strides': self.spin_mutex_strides.value(),
             'mutex_randomize': self.check_mutex_randomize_strides.isChecked(),
             'mutex_noise': self.spin_mutex_noise_level.value(),
+            # 5: Skeleton-seeded EDT watershed
+            'skel_threshold': self.spin_skel_threshold.value(),
+            'skel_min_seed': self.spin_skel_min_seed.value(),
+            'skel_compactness': self.spin_skel_compactness.value(),
+            'skel_fill': self.check_skel_fill.isChecked(),
         }
 
     @classmethod
@@ -412,12 +468,14 @@ class SuperpixelWidget(QGroupBox):
         felz_signal=None,
         smutex_sem=None,
         mutex_sem=None,
+        skeleton=None,
     ):
         """Runs the algorithm chosen in ``params`` (see snapshot_params).
 
         sem_data   semantic (wall) prediction, used by algorithms 0 and 1
         aset       AffinitySet, used by algorithms 1-4
         felz_signal / smutex_sem / mutex_sem   optional extra maps
+        skeleton   predicted skeleton (geometry head), used by algorithm 5
         Returns the superpixel labels; raises ValueError when an input the
         algorithm needs is missing.
         """
@@ -437,6 +495,26 @@ class SuperpixelWidget(QGroupBox):
                 compactness=params['compactness'],
                 min_cell_size=params['min_cell_size'],
                 fill_holes=False,
+            )
+
+        if algo_idx == 5:  # Skeleton-seeded EDT watershed (geometry head)
+            if sem_data is None:
+                raise ValueError('Semantic prediction layer required.')
+            if skeleton is None:
+                raise ValueError(
+                    'A skeleton layer (geo_skel_*) is required. It is made by '
+                    'models with a geometry head.'
+                )
+            return seeded_edt_watershed(
+                sem_data,
+                skeleton,
+                wall_threshold=params['mask_thresh'],
+                sigma=sigma,
+                skeleton_threshold=params['skel_threshold'],
+                min_seed_px=params['skel_min_seed'],
+                fill_unseeded=params['skel_fill'],
+                min_cell_size=params['min_cell_size'],
+                compactness=params['skel_compactness'],
             )
 
         if aset is None:
@@ -542,6 +620,7 @@ class SuperpixelWidget(QGroupBox):
                 felz_signal=_data(self.felz_signal),
                 smutex_sem=_data(self.smutex_signal),
                 mutex_sem=_data(self.mutex_signal),
+                skeleton=_data(self.combo_skel),
             )
         except ValueError as e:
             print(f'[w-seg] Error: {e}')
@@ -1203,6 +1282,15 @@ class SuperpixelWidget(QGroupBox):
                     'sp_strides': self.spin_smutex_strides.value(),
                     'sp_randomize_strides': self.check_smutex_randomize_strides.isChecked(),
                     'sp_noise_level': self.spin_smutex_noise_level.value(),
+                }
+            )
+        elif selected_algo == SKELETON_ALGO:
+            settings.update(
+                {
+                    'sp_skeleton_threshold': self.spin_skel_threshold.value(),
+                    'sp_min_seed_pixels': self.spin_skel_min_seed.value(),
+                    'sp_compactness': self.spin_skel_compactness.value(),
+                    'sp_fill_unseeded': self.check_skel_fill.isChecked(),
                 }
             )
         elif selected_algo == 'Mutex Watershed (elf)':

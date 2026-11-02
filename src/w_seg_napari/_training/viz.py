@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from skimage.color import lab2rgb
 
+from w_seg_napari._geometry_fields import direction_to_rgb
+
 
 def input_to_rgb(x):
     """[H, W, 6] network input (channels 0-2 = LAB scaled to [-1, 1]) -> RGB for display."""
@@ -72,23 +74,6 @@ def sample_row(axes, sample, aff_channels, aff_labels, row_name):
             f'{label}: prediction',
             'gray',
         )
-
-
-def direction_to_rgb(vec, valid=None):
-    """
-    [H, W, 2] (dir_y, dir_x) in -1..1 -> RGB. Grey = no direction.
-    Horizontal component x: red (+, pointing right) / cyan (-, left).
-    Vertical component y:   blue (+, pointing down) / yellow (-, up).
-    `valid` (bool [H, W]) greys out pixels without a meaningful direction.
-    """
-    vec = np.clip(np.asarray(vec, dtype=np.float64), -1, 1)
-    rgb = np.empty(vec.shape[:2] + (3,))
-    rgb[..., 0] = 0.5 + 0.5 * vec[..., 1]
-    rgb[..., 1] = 0.5
-    rgb[..., 2] = 0.5 + 0.5 * vec[..., 0]
-    if valid is not None:
-        rgb[~np.asarray(valid, dtype=bool)] = 0.5
-    return rgb
 
 
 def overlay_skeleton(rgb, skeleton, threshold=0.5):
@@ -205,20 +190,36 @@ def make_progress_figure(
     ax_loss.set_yscale('log')
     ax_loss.set_title('total loss (log scale)', fontsize=11)
 
-    for key, color, label in (
+    # Wall and affinity always; geometry and the interior term only when the
+    # run has them (a model without geometry head logs geo = 0).
+    train_parts = [
         ('train_sem', 'tab:blue', 'wall, train'),
         ('train_aff', 'tab:green', 'affinity, train'),
-    ):
-        ax_parts.plot(
-            steps, smooth(history[key], window), color=color, label=label
-        )
-    for key, color, label in (
+        ('train_geo', 'tab:brown', 'geometry, train'),
+        ('train_interior', 'tab:olive', 'interior, train'),
+    ]
+    val_parts = [
         ('val_sem', 'tab:orange', 'wall, val'),
         ('val_aff', 'tab:red', 'affinity, val'),
-    ):
-        ax_parts.plot(
-            history['eval_step'], history[key], 'o--', color=color, label=label
-        )
+        ('val_geo', 'tab:pink', 'geometry, val'),
+        ('val_interior', 'tab:cyan', 'interior, val'),
+    ]
+    for key, color, label in train_parts:
+        values = history.get(key)
+        if values is not None and len(values) == len(steps) and np.any(values):
+            ax_parts.plot(
+                steps, smooth(values, window), color=color, label=label
+            )
+    for key, color, label in val_parts:
+        values = history.get(key)
+        if (
+            values is not None
+            and len(values) == len(history['eval_step'])
+            and np.any(values)
+        ):
+            ax_parts.plot(
+                history['eval_step'], values, 'o--', color=color, label=label
+            )
     ax_parts.set_yscale('log')
     ax_parts.set_title('loss parts', fontsize=11)
 
@@ -238,8 +239,8 @@ def make_progress_figure(
         ax.set_xlabel('step', fontsize=10)
         ax.grid(alpha=0.3)
         ax.tick_params(labelsize=10)
-    for ax in (ax_loss, ax_parts):
-        ax.legend(fontsize=9)
+    ax_loss.legend(fontsize=9)
+    ax_parts.legend(fontsize=8, ncol=2)
     if has_geo:
         title = (
             (f'{title}\n' if title else '')

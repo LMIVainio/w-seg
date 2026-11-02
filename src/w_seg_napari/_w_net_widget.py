@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
 
 from w_seg_napari._affinity import layer_payloads
 from w_seg_napari._batch_io import to_rgb
+from w_seg_napari._geometry_fields import geometry_payloads
 from w_seg_napari._wsegutils import get_model_config, process_large_image
 
 
@@ -249,6 +250,7 @@ class WNetWidget(QGroupBox):
         cfg = get_model_config(self.generator)
         pre = cfg['preprocessing']
         output_names = (cfg['outputs']['wall'], cfg['outputs']['affinity'])
+        geometry_name = cfg['outputs'].get('geometry')  # wasp_v4 models only
 
         # Instantiate background thread worker using napari.qt.thread_worker
         @thread_worker
@@ -265,6 +267,7 @@ class WNetWidget(QGroupBox):
                     hue_encoding=pre['hue_encoding'],
                     enable_lab=pre['enable_lab'],
                     output_names=output_names,
+                    geometry_name=geometry_name,
                 )
             )
 
@@ -318,7 +321,11 @@ class WNetWidget(QGroupBox):
         self, result, original_name, layer_scale, layer_translate, cfg
     ):
         """Called when thread returns output or gets cancelled."""
-        final_sem, final_aff = result if result else (None, None)
+        final_geo = None
+        if result and len(result) == 3:
+            final_sem, final_aff, final_geo = result
+        else:
+            final_sem, final_aff = result if result else (None, None)
 
         self._cleanup_live_layer()
         self._set_ui_processing_state(False)
@@ -354,6 +361,11 @@ class WNetWidget(QGroupBox):
                 )
             self.viewer.layers.move(self.viewer.layers.index(aff_layer), 0)
 
+        if final_geo is not None:
+            self._add_geometry_layers(
+                final_geo, original_name, layer_scale, layer_translate
+            )
+
         if predicted_layer_name in self.viewer.layers:
             final_layer = self.viewer.layers[predicted_layer_name]
             final_layer.data = sem_numpy
@@ -381,6 +393,26 @@ class WNetWidget(QGroupBox):
         print('[w-seg] Processing complete!')
         if self.viewer:
             self.viewer.status = '[w-seg] Prediction complete!'
+
+    def _add_geometry_layers(self, geo, source, scale, translate):
+        """Edge distance, skeleton, direction (RGB) and vector layers."""
+        for p in geometry_payloads(geo, source):
+            name, data = p['name'], p['data']
+            if name in self.viewer.layers:
+                layer = self.viewer.layers[name]
+                layer.data = data
+                layer.scale = scale
+                layer.translate = translate
+                continue
+            kwargs = dict(
+                name=name, scale=scale, translate=translate, **p['kwargs']
+            )
+            if p['kind'] == 'vectors':
+                self.viewer.add_vectors(data, **kwargs)
+            elif p['kind'] == 'rgb':
+                self.viewer.add_image(data, rgb=True, **kwargs)
+            else:
+                self.viewer.add_image(data, **kwargs)
 
     def get_settings(self):
         return {
