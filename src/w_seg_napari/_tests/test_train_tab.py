@@ -79,7 +79,7 @@ def test_find_max_batch_and_safe_batch():
     for limit_fit in (1, 2, 3, 7, 8, 13, 40, 127, 128, 500):
         calls = []
 
-        def fits(b, n=limit_fit):
+        def fits(b, n=limit_fit, calls=calls):
             calls.append(b)
             return b <= n
 
