@@ -49,6 +49,16 @@ def direction_to_rgb(vec, valid=None):
     return rgb
 
 
+def rgb_to_direction(rgb):
+    """
+    Inverse of direction_to_rgb: [H, W, 3] -> [H, W, 2] (dir_y, dir_x).
+    Grey (unset) pixels give zero. This lets the geo_dir_ layer carry the
+    vector field, so no extra layer is needed.
+    """
+    rgb = np.asarray(rgb, dtype=np.float32)
+    return np.stack([2 * rgb[..., 2] - 1, 2 * rgb[..., 0] - 1], axis=-1)
+
+
 def vector_glyphs(geo, step=12, max_vectors=40000, min_distance=0.05):
     """
     Subsampled direction vectors for a napari Vectors layer.

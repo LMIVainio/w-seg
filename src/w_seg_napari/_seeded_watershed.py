@@ -20,6 +20,86 @@ from skimage.measure import label as cc_label
 from skimage.morphology import skeletonize
 from skimage.segmentation import relabel_sequential, watershed
 
+RIDGE_METHODS = ('convergence', 'sato', 'both')
+
+
+def _unit_range(a, gate):
+    """Scale a non-negative map to 0..1 by its 99th percentile inside gate."""
+    a = np.where(gate, np.maximum(a, 0.0), 0.0)
+    vals = a[gate]
+    top = np.percentile(vals, 99) if vals.size else 0.0
+    if top <= 0:
+        return np.zeros_like(a, dtype=np.float32)
+    return np.clip(a / top, 0.0, 1.0).astype(np.float32)
+
+
+def ridge_map(
+    edge_distance,
+    direction=None,
+    method='convergence',
+    sigma=1.0,
+    min_distance=0.2,
+    sato_sigmas=(1, 2, 3),
+):
+    """
+    Ridge strength 0..1 along the middle of each cell, from the geometry head.
+
+    edge_distance  [H, W] 0 at cell edges, 1 at each cell's deepest point
+    direction      [H, W, 2] (dir_y, dir_x) unit vectors pointing away from the
+                   nearest edge (needed for 'convergence' and 'both')
+    method         'convergence': -divergence of the smoothed unit vector
+                       field. Vectors from both sides of a cell point toward
+                       each other along its middle, so the field converges
+                       there and spreads out near the walls.
+                   'sato': ridge filter (skimage) on the smoothed edge
+                       distance; does not use the direction field.
+                   'both': product of the two, so a pixel must satisfy both.
+    sigma          Gaussian smoothing of the inputs (pixels)
+    min_distance   pixels with a lower edge distance get 0 (removes the noisy
+                   zone next to the walls)
+    sato_sigmas    scales of the Sato filter
+
+    Each map is scaled by its 99th percentile, so thresholds around 0.2-0.6
+    mean the same on any image.
+    """
+    if method not in RIDGE_METHODS:
+        raise ValueError(
+            f'method must be one of {RIDGE_METHODS}, got {method}'
+        )
+    dist = np.squeeze(np.asarray(edge_distance)).astype(np.float32)
+    gate = dist > min_distance
+    maps = []
+    if method in ('convergence', 'both'):
+        if direction is None:
+            raise ValueError(f"Method '{method}' needs the direction field.")
+        vec = np.asarray(direction, dtype=np.float32)
+        if vec.shape[:2] != dist.shape:
+            raise ValueError('Direction and edge distance shapes differ.')
+        vy, vx = vec[..., 0], vec[..., 1]
+        if sigma > 0:
+            vy, vx = (
+                ndi.gaussian_filter(vy, sigma),
+                ndi.gaussian_filter(vx, sigma),
+            )
+        norm = np.hypot(vy, vx) + 1e-6
+        vy, vx = vy / norm, vx / norm
+        div = np.gradient(vy, axis=0) + np.gradient(vx, axis=1)
+        maps.append(_unit_range(-div, gate))
+    if method in ('sato', 'both'):
+        from skimage.filters import sato
+
+        smooth = ndi.gaussian_filter(dist, sigma) if sigma > 0 else dist
+        maps.append(
+            _unit_range(
+                sato(smooth, sigmas=list(sato_sigmas), black_ridges=False),
+                gate,
+            )
+        )
+    out = maps[0]
+    for m in maps[1:]:
+        out = out * m
+    return out
+
 
 def map_seeds(
     values,
@@ -83,6 +163,11 @@ def seeded_edt_watershed(
     compactness=0.0,
     thin_seeds=False,
     seed_labels=None,
+    ridge_method=None,
+    edge_distance=None,
+    direction=None,
+    ridge_sigma=1.0,
+    ridge_min_distance=0.2,
 ):
     """
     Cell labels from the wall prediction and a seed map or seed labels.
@@ -92,6 +177,13 @@ def seeded_edt_watershed(
                          connected pieces above seed_threshold are the seeds
     seed_labels          alternatively an integer label image used as seeds
                          (seed_map is then ignored)
+    ridge_method         'convergence', 'sato' or 'both': build the seed map
+                         from the geometry head's edge_distance (and
+                         direction) with ridge_map; seed_map is then ignored.
+                         seed_threshold applies to the 0..1 ridge map; thin
+                         the result with thin_seeds if the ridges are wide.
+    edge_distance, direction, ridge_sigma, ridge_min_distance
+                         inputs and settings of ridge_map
     wall_threshold       cell interior = smoothed wall probability below this
     sigma                Gaussian smoothing of the wall map before thresholding
     seed_threshold       see map_seeds
@@ -107,6 +199,16 @@ def seeded_edt_watershed(
     Returns uint64 labels [H, W]; 0 = wall / background.
     """
     wall = np.squeeze(np.asarray(wall)).astype(np.float32)
+    if seed_labels is None and ridge_method:
+        if edge_distance is None:
+            raise ValueError('The ridge seeds need the edge distance map.')
+        seed_map = ridge_map(
+            edge_distance,
+            direction,
+            ridge_method,
+            ridge_sigma,
+            ridge_min_distance,
+        )
     given = seed_labels if seed_labels is not None else seed_map
     if given is None:
         raise ValueError('Give a seed map or seed labels.')

@@ -24,12 +24,15 @@ from w_seg_napari._affinity import (
     gather,
     mutex_inputs,
 )
+from w_seg_napari._geometry_fields import rgb_to_direction
 from w_seg_napari._seeded_watershed import seeded_edt_watershed
 
 # Importing skimage.morphology remove_small_objects() in a version independent manner
 from w_seg_napari._wsegutils import remove_small_objects_safe
 
 SKELETON_ALGO = 'Seeded EDT Watershed (any seed layer)'
+# index of the "Seeds from" dropdown -> ridge_method of seeded_edt_watershed
+RIDGE_SOURCES = (None, 'convergence', 'sato', 'both')
 
 
 class SuperpixelWidget(QGroupBox):
@@ -287,15 +290,57 @@ class SuperpixelWidget(QGroupBox):
         layout_skel = QFormLayout(page_skel)
         layout_skel.setContentsMargins(0, 0, 0, 0)
 
+        self.combo_seed_source = QComboBox()
+        self.combo_seed_source.addItems(
+            [
+                'Seed layer',
+                'Ridge: convergence (direction field)',
+                'Ridge: Sato filter (edge distance)',
+                'Ridge: convergence x Sato',
+            ]
+        )
+        self.combo_seed_source.setToolTip(
+            'Ridge sources are built from the geo_dist_ and geo_dir_ layers '
+            'that belong to the selected prediction layer (pred_<image>); '
+            'they follow the middle of each cell.'
+        )
+        self.combo_seed_source.currentIndexChanged.connect(
+            self._on_seed_source_changed
+        )
+        layout_skel.addRow('Seeds from:', self.combo_seed_source)
+
+        self.spin_ridge_min_dist = QDoubleSpinBox()
+        self.spin_ridge_min_dist.setRange(0.0, 1.0)
+        self.spin_ridge_min_dist.setSingleStep(0.05)
+        self.spin_ridge_min_dist.setValue(0.2)
+        self.spin_ridge_min_dist.setToolTip(
+            'Ridge sources ignore pixels whose predicted edge distance is '
+            'below this (removes the noisy zone next to the walls).'
+        )
+        layout_skel.addRow(
+            'Ridge Min Edge Distance:', self.spin_ridge_min_dist
+        )
+
+        self.spin_ridge_sigma = QDoubleSpinBox()
+        self.spin_ridge_sigma.setRange(0.0, 10.0)
+        self.spin_ridge_sigma.setSingleStep(0.5)
+        self.spin_ridge_sigma.setValue(1.0)
+        self.spin_ridge_sigma.setToolTip(
+            'Smoothing (pixels) of the direction field / edge distance before '
+            'the ridge is computed. Raise it for noisy predictions.'
+        )
+        layout_skel.addRow('Ridge Smoothing (Sigma):', self.spin_ridge_sigma)
+
         self.spin_skel_threshold = QDoubleSpinBox()
         self.spin_skel_threshold.setRange(0.0, 1.0)
         self.spin_skel_threshold.setSingleStep(0.05)
         self.spin_skel_threshold.setValue(0.5)
         self.spin_skel_threshold.setToolTip(
-            'Pixels of the seed layer above this value belong to a seed; '
-            'each connected piece becomes one cell. Try 0.6-0.8 for an '
-            'edge-distance layer or a blobby skeleton. Ignored for Labels '
-            'layers.'
+            'Pixels of the seed layer / ridge map above this value belong to '
+            'a seed; each connected piece becomes one cell. Try 0.6-0.8 for '
+            'an edge-distance layer or a blobby skeleton, 0.2-0.3 for a '
+            'ridge source (switching the source sets a sensible value). '
+            'Ignored for Labels layers.'
         )
         layout_skel.addRow('Seed Threshold:', self.spin_skel_threshold)
 
@@ -366,7 +411,17 @@ class SuperpixelWidget(QGroupBox):
         ]
         uses_semantic = selected_algo in semantic_algorithms
         self.combo_sem_layer.setEnabled(uses_semantic)
-        self.combo_seed.setEnabled(selected_algo == SKELETON_ALGO)
+        self._update_seed_widgets()
+
+    def _update_seed_widgets(self):
+        is_seeded = self.combo_algorithm.currentText() == SKELETON_ALGO
+        from_layer = self.combo_seed_source.currentIndex() == 0
+        self.combo_seed.setEnabled(is_seeded and from_layer)
+
+    def _on_seed_source_changed(self, index: int):
+        self._update_seed_widgets()
+        # sensible starting thresholds: a ridge map is fragmented by high ones
+        self.spin_skel_threshold.setValue(0.5 if index == 0 else 0.25)
 
     def refresh_layer_choices(self, event=None):
         if self.viewer is None:
@@ -487,6 +542,11 @@ class SuperpixelWidget(QGroupBox):
             'mutex_randomize': self.check_mutex_randomize_strides.isChecked(),
             'mutex_noise': self.spin_mutex_noise_level.value(),
             # 5: Seeded EDT watershed (any seed layer)
+            'ridge_method': RIDGE_SOURCES[
+                self.combo_seed_source.currentIndex()
+            ],
+            'ridge_min_distance': self.spin_ridge_min_dist.value(),
+            'ridge_sigma': self.spin_ridge_sigma.value(),
             'seed_is_labels': isinstance(
                 self.combo_seed.currentData(), napari.layers.Labels
             ),
@@ -507,6 +567,8 @@ class SuperpixelWidget(QGroupBox):
         smutex_sem=None,
         mutex_sem=None,
         seed_data=None,
+        edge_distance=None,
+        direction=None,
     ):
         """Runs the algorithm chosen in ``params`` (see snapshot_params).
 
@@ -539,16 +601,22 @@ class SuperpixelWidget(QGroupBox):
         if algo_idx == 5:  # Skeleton-seeded EDT watershed (geometry head)
             if sem_data is None:
                 raise ValueError('Semantic prediction layer required.')
-            if seed_data is None:
+            ridge = params.get('ridge_method')
+            if ridge is None and seed_data is None:
                 raise ValueError(
                     'A seed layer is required (for example geo_skel_* or '
                     'geo_dist_*, made by models with a geometry head).'
                 )
-            as_labels = params['seed_is_labels']
+            as_labels = params['seed_is_labels'] and ridge is None
             return seeded_edt_watershed(
                 sem_data,
                 None if as_labels else seed_data,
                 seed_labels=seed_data if as_labels else None,
+                ridge_method=ridge,
+                edge_distance=edge_distance,
+                direction=direction,
+                ridge_sigma=params.get('ridge_sigma', 1.0),
+                ridge_min_distance=params.get('ridge_min_distance', 0.2),
                 wall_threshold=params['mask_thresh'],
                 sigma=sigma,
                 seed_threshold=params['seed_threshold'],
@@ -654,6 +722,28 @@ class SuperpixelWidget(QGroupBox):
             layer = combo.currentData()
             return layer.data if layer is not None else None
 
+        geo_args = {}
+        if params['algo_name'] == SKELETON_ALGO and params['ridge_method']:
+            if sem_layer is None:
+                print('[w-seg] Error: select the prediction layer (pred_*).')
+                return
+            source_name = sem_layer.name.replace('pred_', '', 1)
+            names = (f'geo_dist_{source_name}', f'geo_dir_{source_name}')
+            missing = [n for n in names if n not in self.viewer.layers]
+            if missing:
+                print(
+                    f'[w-seg] Error: ridge seeds need the layers {missing}. '
+                    'They are created when a model with a geometry head '
+                    'predicts this image.'
+                )
+                return
+            geo_args = {
+                'edge_distance': self.viewer.layers[names[0]].data,
+                'direction': rgb_to_direction(
+                    self.viewer.layers[names[1]].data
+                ),
+            }
+
         try:
             superpixels = self.run_algorithm(
                 params,
@@ -663,6 +753,7 @@ class SuperpixelWidget(QGroupBox):
                 smutex_sem=_data(self.smutex_signal),
                 mutex_sem=_data(self.mutex_signal),
                 seed_data=_data(self.combo_seed),
+                **geo_args,
             )
         except ValueError as e:
             print(f'[w-seg] Error: {e}')
@@ -1329,6 +1420,9 @@ class SuperpixelWidget(QGroupBox):
         elif selected_algo == SKELETON_ALGO:
             settings.update(
                 {
+                    'sp_seed_source': self.combo_seed_source.currentText(),
+                    'sp_ridge_min_distance': self.spin_ridge_min_dist.value(),
+                    'sp_ridge_sigma': self.spin_ridge_sigma.value(),
                     'sp_seed_layer': self.combo_seed.currentText(),
                     'sp_seed_threshold': self.spin_skel_threshold.value(),
                     'sp_thin_seeds': self.check_skel_thin.isChecked(),

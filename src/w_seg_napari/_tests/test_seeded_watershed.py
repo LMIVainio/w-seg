@@ -2,12 +2,15 @@ import numpy as np
 
 from w_seg_napari._geometry_fields import (
     clean_geometry,
+    direction_to_rgb,
     geometry_payloads,
+    rgb_to_direction,
     vector_glyphs,
 )
 from w_seg_napari._seeded_watershed import (
     label_seeds,
     map_seeds,
+    ridge_map,
     seeded_edt_watershed,
 )
 from w_seg_napari._training.targets import compute_geometry
@@ -184,3 +187,79 @@ def test_labels_as_seed_layer_and_thinning():
         pass
     else:
         raise AssertionError('missing seeds not rejected')
+
+
+def _noisy_fields(inst):
+    wall, _, geo = _fields(inst)
+    rng = np.random.default_rng(0)
+    dist = np.clip(geo[..., 0] + rng.normal(0, 0.03, wall.shape), 0, 1)
+    vec = geo[..., 1:3] + rng.normal(0, 0.15, geo[..., 1:3].shape)
+    return wall, geo, dist.astype(np.float32), vec.astype(np.float32)
+
+
+def test_direction_rgb_roundtrip():
+    rng = np.random.default_rng(1)
+    vec = rng.uniform(-1, 1, (20, 20, 2)).astype(np.float32)
+    back = rgb_to_direction(direction_to_rgb(vec).astype(np.float32))
+    assert np.allclose(back, vec, atol=1e-5)
+    # unset (grey) pixels decode to zero
+    grey = direction_to_rgb(vec, valid=np.zeros((20, 20), bool))
+    assert np.allclose(rgb_to_direction(grey.astype(np.float32)), 0)
+
+
+def test_ridge_map_peaks_on_the_skeleton():
+    inst = _scene()
+    wall, geo, dist, vec = _noisy_fields(inst)
+    skel = geo[..., 3] > 0.5
+    from scipy import ndimage as ndi
+
+    near = ndi.binary_dilation(skel, iterations=2)
+    for method in ('convergence', 'sato', 'both'):
+        r = ridge_map(dist, vec, method)
+        assert r.shape == dist.shape and r.min() >= 0 and r.max() <= 1
+        assert (r[dist <= 0.2] == 0).all()  # the distance gate
+        k = int(skel.sum())
+        top = np.zeros(r.shape, bool)
+        top.ravel()[np.argsort(r.ravel())[-k:]] = True
+        assert (top & near).sum() / k > 0.7, method
+    # sato needs no direction field, the other two do
+    assert ridge_map(dist, None, 'sato').max() > 0
+    for method in ('convergence', 'both'):
+        try:
+            ridge_map(dist, None, method)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('missing direction not rejected')
+    try:
+        ridge_map(dist, vec, 'bogus')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('unknown method not rejected')
+
+
+def test_seeded_watershed_with_ridge_seeds():
+    inst = _scene()
+    wall, _, dist, vec = _noisy_fields(inst)
+    for method in ('convergence', 'sato', 'both'):
+        labels = seeded_edt_watershed(
+            wall,
+            None,
+            sigma=0.0,
+            ridge_method=method,
+            edge_distance=dist,
+            direction=vec,
+            seed_threshold=0.2,
+            thin_seeds=True,
+            min_cell_size=10,
+        )
+        assert len(np.unique(labels)) - 1 == 3, method
+        for cell in (1, 2, 3):  # the dumbbell stays ONE cell
+            assert len(np.unique(labels[inst == cell])) == 1, method
+    try:
+        seeded_edt_watershed(wall, None, ridge_method='sato')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('missing edge distance not rejected')
