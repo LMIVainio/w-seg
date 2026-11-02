@@ -22,6 +22,7 @@ from w_seg_napari._batch_widget import BatchTabWidget
 from w_seg_napari._cell_classification_widget import CellClassificationWidget
 from w_seg_napari._combine_layers_widget import (
     create_blend_widget,
+    create_border_merge_widget,
     create_cleanup_widget,
     create_label_combine_widget,
 )
@@ -347,12 +348,17 @@ class Tab3Curation(QScrollArea):
         self.blend_widget = create_blend_widget(self.viewer)
         self.cleanup_widget = create_cleanup_widget(self.viewer)
         self.label_combine_widget = create_label_combine_widget(self.viewer)
+        self.border_merge_widget = create_border_merge_widget(self.viewer)
 
         layout.addWidget(self.curation_panel)
         for title, tool in (
             ('Combine / threshold images', self.blend_widget),
             ('Remove unconnected noise', self.cleanup_widget),
             ('Combine labels layers', self.label_combine_widget),
+            (
+                'Merge touching labels by border length',
+                self.border_merge_widget,
+            ),
         ):
             box = QGroupBox(title)
             box_layout = QVBoxLayout(box)
@@ -368,6 +374,7 @@ class Tab3Curation(QScrollArea):
             self.blend_widget,
             self.cleanup_widget,
             self.label_combine_widget,
+            self.border_merge_widget,
         ):
             for name in (
                 'layer_a',
@@ -375,6 +382,7 @@ class Tab3Curation(QScrollArea):
                 'clean_target_layer',
                 'child_layer',
                 'parent_layer',
+                'labels_layer',
             ):
                 if hasattr(tool, name):
                     getattr(tool, name).reset_choices()

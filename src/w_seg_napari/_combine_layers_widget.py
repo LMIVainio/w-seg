@@ -5,7 +5,12 @@ from napari.utils.notifications import show_warning
 from scipy import ndimage
 from skimage.measure import regionprops
 
-from w_seg_napari._curation_ops import inherit_parent_labels
+from w_seg_napari._curation_ops import (
+    border_table,
+    groups_by_border,
+    inherit_parent_labels,
+    merge_label_groups,
+)
 
 ONLY_A = 'Layer A only (threshold one layer)'
 
@@ -473,4 +478,160 @@ def create_label_combine_widget(viewer: napari.Viewer):
 
     widget.mode.changed.connect(_update)
     _update()
+    return widget
+
+
+PREVIEW_NAME = '[Preview] border merge'
+
+
+def create_border_merge_widget(viewer: napari.Viewer):
+    """Merge touching labels that share a long enough border."""
+
+    @magicgui(
+        call_button='Merge touching labels',
+        labels_layer={'label': 'Labels layer'},
+        min_border={
+            'label': 'Min border length (px)',
+            'min': 1,
+            'max': 100000,
+            'tooltip': (
+                'Two touching cells are merged when the border between them '
+                'is at least this many pixels long.'
+            ),
+        },
+        min_fraction={
+            'label': 'Min border (% of smaller cell)',
+            'min': 0.0,
+            'max': 100.0,
+            'step': 5.0,
+            'tooltip': (
+                'Also require that the border is at least this percentage '
+                "of the smaller cell's perimeter (100 = the smaller cell is "
+                'completely surrounded by the other). 0 switches it off.'
+            ),
+        },
+        max_small_area={
+            'label': 'Max area of smaller cell (px)',
+            'min': 0,
+            'max': 10000000,
+            'tooltip': (
+                'Only merge when the smaller cell is at most this large, for '
+                'example to absorb small fragments. 0 = any size.'
+            ),
+        },
+        gap={
+            'label': 'Touch tolerance (px)',
+            'min': 1,
+            'max': 10,
+            'tooltip': (
+                '1 = cells must be directly adjacent; 2 also counts a border '
+                'across a one-pixel wall, and so on.'
+            ),
+        },
+        target={
+            'label': 'Merge into',
+            'choices': ['Lowest ID', 'Highest ID', 'Largest cell'],
+        },
+        fill_holes={'label': 'Fill holes / walls between merged cells'},
+        preview_only={
+            'label': 'Preview only (do not merge)',
+            'tooltip': (
+                'Shows the groups that would be merged as a temporary layer '
+                'and reports the counts, without changing anything.'
+            ),
+        },
+        output_name={'label': 'Output Name'},
+    )
+    def widget(
+        labels_layer: napari.layers.Labels = None,
+        min_border: int = 10,
+        min_fraction: float = 0.0,
+        max_small_area: int = 0,
+        gap: int = 1,
+        target: str = 'Lowest ID',
+        fill_holes: bool = True,
+        preview_only: bool = False,
+        output_name: str = 'merged_labels',
+    ):
+        if labels_layer is None:
+            return
+        data = np.asarray(labels_layer.data)
+        if data.ndim != 2:
+            show_warning('This tool works on 2D label images.')
+            return
+        groups, pairs = groups_by_border(
+            data,
+            min_border=min_border,
+            min_fraction=min_fraction / 100.0,
+            max_small_area=max_small_area,
+            gap=gap,
+        )
+        n_touching = len(border_table(data, gap))
+        if not groups:
+            viewer.status = (
+                f'[w-seg] No pair qualifies ({n_touching} touching pairs).'
+            )
+            show_warning(
+                f'No touching pair has a border of at least {min_border} px '
+                f'under these settings ({n_touching} touching pairs found).'
+            )
+            return
+        n_cells = sum(len(g) for g in groups)
+        summary = (
+            f'{len(pairs)} of {n_touching} touching pairs qualify: '
+            f'{n_cells} cells would become {len(groups)}.'
+        )
+
+        if preview_only:
+            preview = np.zeros(data.shape, dtype=np.int32)
+            for k, ids in enumerate(groups, start=1):
+                preview[np.isin(data, ids)] = k
+            if PREVIEW_NAME in viewer.layers:
+                viewer.layers[PREVIEW_NAME].data = preview
+                viewer.layers[PREVIEW_NAME].scale = labels_layer.scale
+                viewer.layers[PREVIEW_NAME].translate = labels_layer.translate
+            else:
+                viewer.add_labels(
+                    preview,
+                    name=PREVIEW_NAME,
+                    opacity=0.7,
+                    scale=labels_layer.scale,
+                    translate=labels_layer.translate,
+                )
+            viewer.status = f'[w-seg] Preview: {summary}'
+            return
+
+        areas = np.bincount(data.ravel())
+        rule = target
+        if target == 'Largest cell':
+            # biggest cell first, then take the first id of every group
+            groups = [
+                sorted(g, key=lambda i: -areas[i] if i < len(areas) else 0)
+                for g in groups
+            ]
+            rule = 'First Selected ID'
+        result = data.copy()
+        merge_label_groups(
+            result,
+            groups,
+            rule=rule,
+            fill_holes=fill_holes,
+            close_gap=gap - 1 if fill_holes else 0,
+        )
+        if output_name in viewer.layers:
+            viewer.layers[output_name].data = result
+            viewer.layers[output_name].scale = labels_layer.scale
+            viewer.layers[output_name].translate = labels_layer.translate
+            viewer.layers[output_name].refresh()
+        else:
+            viewer.add_labels(
+                result,
+                name=output_name,
+                scale=labels_layer.scale,
+                translate=labels_layer.translate,
+            )
+        if PREVIEW_NAME in viewer.layers:
+            viewer.layers.remove(PREVIEW_NAME)
+        viewer.status = f'[w-seg] Merged: {summary}'
+
     return widget

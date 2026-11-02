@@ -66,10 +66,15 @@ def choose_target(ids, rule):
     return ids[0]  # 'First Selected ID'
 
 
-def merge_label_groups(labels, groups, rule='Lowest ID', fill_holes=True):
+def merge_label_groups(
+    labels, groups, rule='Lowest ID', fill_holes=True, close_gap=0
+):
     """Merge each group of ids (in place) into one label. Returns the target ids.
 
-    Groups with a single id are left untouched.
+    Groups with a single id are left untouched. With close_gap > 0 the
+    background between the merged cells (a wall up to about 2 * close_gap
+    pixels thick) is given to the merged cell too, never taking pixels of
+    other labels.
     """
     targets = []
     for ids in groups:
@@ -80,9 +85,142 @@ def merge_label_groups(labels, groups, rule='Lowest ID', fill_holes=True):
         if fill_holes:
             mask = ndimage.binary_fill_holes(mask)
         labels[np.isin(labels, ids)] = 0
+        if close_gap > 0:
+            k = int(close_gap) + 1
+            padded = np.pad(mask, k)
+            closed = ndimage.binary_closing(
+                padded,
+                structure=np.ones((3, 3), bool),
+                iterations=int(close_gap),
+            )[k:-k, k:-k]
+            if fill_holes:
+                closed = ndimage.binary_fill_holes(closed)
+            mask = mask | (closed & (labels == 0))
         labels[mask] = target
         targets.append(int(target))
     return targets
+
+
+def border_table(labels, gap=1):
+    """
+    How long is the border between every pair of touching labels?
+
+    Border length = number of pixel pairs (a, b) next to each other along the
+    rows or columns, a in one label and b in the other. With gap=1 the labels
+    must be directly adjacent; with gap=2 a one-pixel wall (background)
+    between them is crossed as well, and so on.
+
+    Returns a list of dicts, one per touching pair, with keys
+        a, b          label ids (a < b)
+        border        border length in pixels
+        area_a/_b     areas
+        perimeter_a/_b   boundary pixels of each label
+        fraction      border / perimeter of the SMALLER label (capped at 1);
+                      1 means the smaller cell is enclosed by the other one
+    sorted by decreasing border length.
+    """
+    labels = np.asarray(labels)
+    if labels.ndim != 2:
+        raise ValueError('Labels must be a 2D array.')
+    gap = max(1, int(gap))
+    h, w = labels.shape
+    big = int(labels.max()) + 1
+    counts = {}
+    for d in range(1, gap + 1):
+        for axis in (0, 1):
+            if (h if axis == 0 else w) <= d:
+                continue
+            if axis == 0:
+                a, b = labels[: h - d], labels[d:]
+                mids = [labels[k : h - d + k] for k in range(1, d)]
+            else:
+                a, b = labels[:, : w - d], labels[:, d:]
+                mids = [labels[:, k : w - d + k] for k in range(1, d)]
+            ok = (a > 0) & (b > 0) & (a != b)
+            for m in mids:
+                ok &= m == 0  # only background between the two labels
+            if not ok.any():
+                continue
+            lo = np.minimum(a[ok], b[ok]).astype(np.int64)
+            hi = np.maximum(a[ok], b[ok]).astype(np.int64)
+            keys, n = np.unique(lo * big + hi, return_counts=True)
+            for key, c in zip(keys, n):
+                counts[int(key)] = counts.get(int(key), 0) + int(c)
+    if not counts:
+        return []
+
+    area = np.bincount(labels.ravel(), minlength=big)
+    # boundary pixel = has a 4-neighbour with a different label
+    edge = np.zeros(labels.shape, bool)
+    edge[:-1] |= labels[:-1] != labels[1:]
+    edge[1:] |= labels[1:] != labels[:-1]
+    edge[:, :-1] |= labels[:, :-1] != labels[:, 1:]
+    edge[:, 1:] |= labels[:, 1:] != labels[:, :-1]
+    perimeter = np.bincount(labels[edge].ravel(), minlength=big)
+
+    table = []
+    for key, n in counts.items():
+        a, b = divmod(key, big)
+        small = a if area[a] <= area[b] else b
+        table.append(
+            {
+                'a': a,
+                'b': b,
+                'border': n,
+                'area_a': int(area[a]),
+                'area_b': int(area[b]),
+                'perimeter_a': int(perimeter[a]),
+                'perimeter_b': int(perimeter[b]),
+                'fraction': min(1.0, n / max(int(perimeter[small]), 1)),
+            }
+        )
+    table.sort(key=lambda r: -r['border'])
+    return table
+
+
+def groups_by_border(
+    labels,
+    min_border=10,
+    min_fraction=0.0,
+    max_small_area=0,
+    gap=1,
+):
+    """
+    Groups of labels to merge because they share a long enough border.
+
+    A pair of touching labels qualifies when
+        border length >= min_border   (pixels)
+        and border / perimeter of the smaller label >= min_fraction (0 = off)
+        and, if max_small_area > 0, the smaller label has at most that area
+    Qualifying pairs are chained: if A-B and B-C qualify, A, B and C form one
+    group. Returns (groups, qualifying pairs); groups is a list of id lists.
+    """
+    table = border_table(labels, gap)
+    chosen = []
+    for r in table:
+        small_area = min(r['area_a'], r['area_b'])
+        if r['border'] < min_border:
+            continue
+        if r['fraction'] < min_fraction:
+            continue
+        if max_small_area > 0 and small_area > max_small_area:
+            continue
+        chosen.append(r)
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for r in chosen:
+        parent[find(r['b'])] = find(r['a'])
+    groups = {}
+    for x in list(parent):
+        groups.setdefault(find(x), []).append(int(x))
+    return [sorted(g) for g in groups.values()], chosen
 
 
 def cut_cell_with_line(labels, p0, p1, min_size=1):
