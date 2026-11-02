@@ -59,6 +59,17 @@ def rgb_to_direction(rgb):
     return np.stack([2 * rgb[..., 2] - 1, 2 * rgb[..., 0] - 1], axis=-1)
 
 
+def masked_direction(geo, min_distance=0.05):
+    """
+    [H, W, 2] (dir_y, dir_x) from a stitched geometry array [4, H, W], zero
+    where the edge distance is <= min_distance. This is exactly what the
+    geo_dir_ layer shows, so batch and interactive runs give the same seeds.
+    """
+    geo = np.asarray(geo)
+    vec = np.moveaxis(geo[1:3], 0, -1).astype(np.float32)
+    return np.where((geo[0] > min_distance)[..., None], vec, 0.0)
+
+
 def vector_glyphs(geo, step=12, max_vectors=40000, min_distance=0.05):
     """
     Subsampled direction vectors for a napari Vectors layer.

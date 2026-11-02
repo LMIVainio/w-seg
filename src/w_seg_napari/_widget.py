@@ -327,6 +327,16 @@ class WSegMasterWidget(QWidget):
                 colormap='gray',
                 blending='additive',
             )
+        for payload in results.get('geometry_layers', []):
+            kwargs = dict(payload['kwargs'])
+            if payload['kind'] == 'rgb':
+                kwargs['rgb'] = True
+            put(
+                payload['name'],
+                'vectors' if payload['kind'] == 'vectors' else 'image',
+                payload['data'],
+                **kwargs,
+            )
         put(
             f'pred_{base}',
             'image',

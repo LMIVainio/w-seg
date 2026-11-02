@@ -30,6 +30,7 @@ from w_seg_napari._batch_io import (
     table_path,
     to_model_input_range,
 )
+from w_seg_napari._geometry_fields import geometry_payloads, masked_direction
 
 STAGES = (
     'predict',
@@ -108,6 +109,42 @@ def _signal(kind, sem, rgb):
     return rgb2gray(to_model_input_range(rgb)).astype(np.float32)
 
 
+NO_GEOMETRY = (
+    'The seeded EDT watershed with this seed source needs the geometry head, '
+    'and no geometry prediction is available (the model has none, or the '
+    'prediction stage was skipped and the session has no geometry). Choose a '
+    'model with a geometry head, run the predict stage, or pick another '
+    'algorithm.'
+)
+
+
+def seed_arguments(params, store, sem):
+    """
+    Extra inputs of the seeded EDT watershed (algorithm 5) for one image, taken
+    from the stored predictions the same way the interactive widget takes them
+    from the viewer layers. Other algorithms get nothing extra.
+    """
+    if params.get('algo_idx') != 5:
+        return {}
+    geo = store.get('pred_geo')
+    if params.get('ridge_method'):
+        if geo is None:
+            raise ValueError(NO_GEOMETRY)
+        return {'edge_distance': geo[0], 'direction': masked_direction(geo)}
+    kind = params.get('seed_kind')
+    if kind in ('skeleton', 'edge_distance'):
+        if geo is None:
+            raise ValueError(NO_GEOMETRY)
+        return {'seed_data': geo[3] if kind == 'skeleton' else geo[0]}
+    if kind == 'prediction':
+        return {'seed_data': sem}
+    raise ValueError(
+        'The selected seed layer exists for one image only, so a batch cannot '
+        'use it. Choose a geo_skel_ or geo_dist_ layer, a pred_ layer or one '
+        'of the ridge sources.'
+    )
+
+
 # ---------------------------------------------------------------------
 # One image
 # ---------------------------------------------------------------------
@@ -150,7 +187,8 @@ def process_image(image_path, settings: dict, is_cancelled):
             to_model_input_range(rgb).transpose(2, 0, 1)
         )
         pre = cfg['preprocessing']
-        sem, aff = yield from process_large_image(
+        geometry_name = cfg['outputs'].get('geometry')  # wasp_v4 models only
+        out = yield from process_large_image(
             image=tensor,
             model=settings['model'],
             patch_size=settings['patch_size'],
@@ -161,9 +199,15 @@ def process_image(image_path, settings: dict, is_cancelled):
             hue_encoding=pre['hue_encoding'],
             enable_lab=pre['enable_lab'],
             output_names=(cfg['outputs']['wall'], cfg['outputs']['affinity']),
+            geometry_name=geometry_name,
         )
+        sem, aff, geo = out if geometry_name else (*out, None)
         if sem is None:
             return None
+        if geo is not None:
+            store['pred_geo'] = np.asarray(geo, dtype=np.float32)
+        else:
+            store.pop('pred_geo', None)  # an old session's geometry is stale
         store['pred_sem'] = np.squeeze(sem).astype(np.float32)
         store['pred_aff'] = np.clip(aff, 0.0, 1.0).astype(np.float32)
         done += 1
@@ -173,6 +217,10 @@ def process_image(image_path, settings: dict, is_cancelled):
     aset = affinity_set(store['pred_aff'], cfg, source)
     results['pred_sem'] = sem
     results['affinity_layers'] = layer_payloads(store['pred_aff'], cfg, source)
+    if 'pred_geo' in store:
+        results['geometry_layers'] = geometry_payloads(
+            store['pred_geo'], source
+        )
 
     if is_cancelled():
         return None
@@ -188,6 +236,7 @@ def process_image(image_path, settings: dict, is_cancelled):
             felz_signal=_signal(p['felz_signal_kind'], sem, rgb),
             smutex_sem=_signal(p['smutex_signal_kind'], sem, rgb),
             mutex_sem=_signal(p['mutex_signal_kind'], sem, rgb),
+            **seed_arguments(p, store, sem),
         )
         done += 1
     if 'sp_labels' in store:

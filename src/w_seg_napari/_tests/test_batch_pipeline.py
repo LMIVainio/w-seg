@@ -8,9 +8,11 @@ import pandas as pd
 import tifffile
 
 import w_seg_napari._batch_pipeline as bp
-from w_seg_napari._model_config import legacy_config
+from w_seg_napari._model_config import legacy_config, make_config
 
 CALLS = []
+SEED_ARGS = {}
+SEED_KEYS = ('seed_data', 'edge_distance', 'direction')
 
 
 def _install_fakes(monkeypatch):
@@ -18,18 +20,30 @@ def _install_fakes(monkeypatch):
 
     def process_large_image(image, model, is_cancelled=None, **kw):
         CALLS.append(('predict', image.shape))
+        geometry = kw.get('geometry_name')
         if is_cancelled and is_cancelled():
-            return None, None
+            return (None, None, None) if geometry else (None, None)
         _, h, w = image.shape
-        return np.full((1, h, w), 0.5, np.float32), np.full(
-            (2, h, w), 0.9, np.float32
+        n_aff = 8 if geometry else 2
+        out = (
+            np.full((1, h, w), 0.5, np.float32),
+            np.full((n_aff, h, w), 0.9, np.float32),
         )
+        if geometry:
+            geo = np.zeros((4, h, w), np.float32)
+            geo[0] = 0.8  # edge distance
+            geo[1] = 1.0  # dir_y
+            geo[3] = 0.6  # skeleton
+            out = (*out, geo)
+        return out
         yield  # makes this a generator, like the real function
 
     class SP:
         @classmethod
         def run_algorithm(cls, params, sem_data=None, aset=None, **kw):
             CALLS.append(('superpixels', aset.describe()))
+            SEED_ARGS.clear()
+            SEED_ARGS.update({k: v for k, v in kw.items() if k in SEED_KEYS})
             lab = np.ones(sem_data.shape, np.uint64)
             lab[:, sem_data.shape[1] // 2 :] = 2
             return lab
@@ -208,3 +222,89 @@ def test_render_event_carries_the_layers(tmp_path, monkeypatch):
     assert render[1] == 'a.tif'
     assert {'raw', 'pred_sem', 'sp_labels', 'gasp_labels'} <= set(render[2])
     assert render[2]['affinity_layers']
+
+
+def _geometry_settings(**sp):
+    s = _settings()
+    s['model_cfg'] = make_config(ranges=(6, 32), geometry=True)
+    s['sp_params'] = {
+        'algo_idx': 5,
+        'felz_signal_kind': None,
+        'smutex_signal_kind': None,
+        'mutex_signal_kind': None,
+        'ridge_method': None,
+        'seed_kind': 'skeleton',
+        **sp,
+    }
+    return s
+
+
+def test_geometry_model_feeds_the_seeded_watershed(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+
+    # seeds from the skeleton channel
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _geometry_settings(), lambda: False)
+    )
+    assert n_ok == 1 and failed == []
+    assert SEED_ARGS['seed_data'].shape == (16, 20)
+    assert np.allclose(SEED_ARGS['seed_data'], 0.6)  # the skeleton channel
+    # the geometry is kept in the session for later stages
+    session = next(iter(sessions.values()))
+    assert session['pred_geo'].shape == (4, 16, 20)
+
+    # edge distance as seed layer
+    _drain(
+        bp.run_batch(
+            ['a.tif'],
+            tmp_path,
+            _geometry_settings(seed_kind='edge_distance'),
+            lambda: False,
+        )
+    )
+    assert np.allclose(SEED_ARGS['seed_data'], 0.8)
+
+    # ridge sources get edge distance and direction (zero where unset)
+    _drain(
+        bp.run_batch(
+            ['a.tif'],
+            tmp_path,
+            _geometry_settings(ridge_method='convergence'),
+            lambda: False,
+        )
+    )
+    assert SEED_ARGS['edge_distance'].shape == (16, 20)
+    assert SEED_ARGS['direction'].shape == (16, 20, 2)
+    assert np.allclose(SEED_ARGS['direction'][..., 0], 1.0)
+
+
+def test_seeded_watershed_errors_are_clear_per_image(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    # a seed layer that only exists for one image
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(
+            ['a.tif'],
+            tmp_path,
+            _geometry_settings(seed_kind='other'),
+            lambda: False,
+        )
+    )
+    assert n_ok == 0 and 'one image only' in failed[0][1]
+
+    # a model without geometry head cannot give geometry seeds
+    s = _geometry_settings()
+    s['model_cfg'] = legacy_config()
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(['a.tif'], tmp_path, s, lambda: False)
+    )
+    assert n_ok == 0 and 'geometry head' in failed[0][1]
+
+    # ... but a prediction map as seeds works with any model
+    s = _geometry_settings(seed_kind='prediction')
+    s['model_cfg'] = legacy_config()
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(['a.tif'], tmp_path, s, lambda: False)
+    )
+    assert n_ok == 1 and failed == []

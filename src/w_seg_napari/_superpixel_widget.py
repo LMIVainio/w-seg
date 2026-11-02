@@ -35,6 +35,24 @@ SKELETON_ALGO = 'Seeded EDT Watershed (any seed layer)'
 RIDGE_SOURCES = (None, 'convergence', 'sato', 'both')
 
 
+def seed_kind(layer):
+    """
+    Which map a seed layer stands for, so the batch tab can take the same kind
+    of map for every image. None means the layer exists for one image only.
+    """
+    if layer is None:
+        return None
+    if isinstance(layer, napari.layers.Labels):
+        return 'labels'
+    if layer.name.startswith('geo_skel_'):
+        return 'skeleton'
+    if layer.name.startswith('geo_dist_'):
+        return 'edge_distance'
+    if layer.name.startswith('pred_'):
+        return 'prediction'
+    return 'other'
+
+
 class SuperpixelWidget(QGroupBox):
     def __init__(self, viewer: napari.Viewer, parent=None):
         super().__init__('Superpixel & Seed Generation', parent)
@@ -547,6 +565,7 @@ class SuperpixelWidget(QGroupBox):
             ],
             'ridge_min_distance': self.spin_ridge_min_dist.value(),
             'ridge_sigma': self.spin_ridge_sigma.value(),
+            'seed_kind': seed_kind(self.combo_seed.currentData()),
             'seed_is_labels': isinstance(
                 self.combo_seed.currentData(), napari.layers.Labels
             ),
