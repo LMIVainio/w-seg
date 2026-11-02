@@ -6,8 +6,9 @@ from w_seg_napari._geometry_fields import (
     vector_glyphs,
 )
 from w_seg_napari._seeded_watershed import (
+    label_seeds,
+    map_seeds,
     seeded_edt_watershed,
-    skeleton_seeds,
 )
 from w_seg_napari._training.targets import compute_geometry
 
@@ -64,10 +65,10 @@ def test_noise_pieces_and_threshold():
     noisy = skel.copy()
     noisy[100, 70] = 1.0  # a lone pixel inside the background
     cell = wall < 0.35
-    seeds = skeleton_seeds(noisy, cell, 0.5, min_seed_px=5)
+    seeds = map_seeds(noisy, cell, 0.5, min_seed_px=5)
     assert seeds[100, 70] == 0  # outside cells and tiny
     assert seeds.max() == 3  # still one seed per cell
-    assert skeleton_seeds(np.zeros_like(skel), cell).max() == 0
+    assert map_seeds(np.zeros_like(skel), cell).max() == 0
 
 
 def test_missing_wall_merges_seeds():
@@ -130,3 +131,56 @@ def test_geometry_payloads_and_vectors():
         pass
     else:
         raise AssertionError('wrong channel count not rejected')
+
+
+def test_edge_distance_as_seed_layer():
+    """Edge distance works as seed map; a two-peak cell splits (documented)."""
+    inst = _scene()
+    wall, _, geo = _fields(inst)
+    dist = geo[..., 0]
+    labels = seeded_edt_watershed(
+        wall, dist, sigma=0.0, seed_threshold=0.6, min_cell_size=10
+    )
+    # rectangle and square stay one cell each ...
+    for cell in (2, 3):
+        assert len(np.unique(labels[inst == cell])) == 1
+    # ... the dumbbell has two distance peaks, hence two seeds
+    assert len(np.unique(labels[inst == 1])) == 2
+    # a high threshold keeps only the cell cores (smaller seeds, same cells)
+    high = map_seeds(dist, wall < 0.35, 0.9, min_seed_px=1)
+    low = map_seeds(dist, wall < 0.35, 0.5, min_seed_px=1)
+    assert (high > 0).sum() < (low > 0).sum()
+
+
+def test_labels_as_seed_layer_and_thinning():
+    inst = _scene()
+    wall, skel, _ = _fields(inst)
+    # an existing label image as seeds: erode each cell to a core
+    from scipy import ndimage as ndi
+
+    cores = np.zeros_like(inst)
+    for cell in (1, 2, 3):
+        cores[ndi.binary_erosion(inst == cell, iterations=3)] = cell
+    labels = seeded_edt_watershed(
+        wall, seed_labels=cores, sigma=0.0, min_cell_size=10
+    )
+    assert len(np.unique(labels)) - 1 == 3
+    for cell in (1, 2, 3):
+        assert len(np.unique(labels[inst == cell])) == 1
+    # label seeds that cross a wall are cut at the wall
+    crossing = np.where(wall > 0.5, 0, 1)  # one label over everything
+    cut = label_seeds(crossing * 7, wall < 0.35)
+    assert cut.max() >= 3 and (cut[wall > 0.5] == 0).all()
+    # thinning keeps one seed per piece
+    thick = skel > 0.5
+    thin = map_seeds(skel, wall < 0.35, 0.5, min_seed_px=1, thin=True)
+    plain = map_seeds(skel, wall < 0.35, 0.5, min_seed_px=1, thin=False)
+    assert thin.max() == plain.max()
+    assert (thin > 0).sum() <= thick.sum()
+    # no seed information at all is an error
+    try:
+        seeded_edt_watershed(wall)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('missing seeds not rejected')

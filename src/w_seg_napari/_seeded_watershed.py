@@ -1,13 +1,17 @@
 """
-Skeleton-seeded EDT watershed (plain numpy / scipy / skimage, no napari).
+Seeded EDT watershed (plain numpy / scipy / skimage, no napari).
 
-The geometry head predicts each cell's skeleton. Every connected piece of the
-skeleton becomes ONE seed, and a watershed on the distance-to-wall map grows
-the seeds to the cell walls. Compared with seeding from distance maxima this
-gives exactly one seed per cell, also for long cells with several maxima.
+Seeds come from any map or label image: the predicted skeleton, the predicted
+edge distance (high in the middle of each cell), a Labels layer, ... Every
+connected piece of a seed becomes ONE cell, and a watershed on the
+distance-to-wall map grows the seeds to the cell walls.
 
-Known weak spot: where a wall is missing, the skeletons of two neighbouring
-cells can touch and become one seed, which merges the cells.
+Compared with seeding from distance maxima this gives one seed per piece you
+choose, so with a skeleton a long cell with several distance maxima stays one
+cell. Weak spots:
+  * where a wall is missing, seeds of neighbouring cells can touch and merge;
+  * a thresholded edge-distance map has one seed per distance peak, so a
+    dumbbell-shaped cell is split in two (the skeleton keeps it whole).
 """
 
 import numpy as np
@@ -17,24 +21,23 @@ from skimage.morphology import skeletonize
 from skimage.segmentation import relabel_sequential, watershed
 
 
-def skeleton_seeds(
-    skeleton,
+def map_seeds(
+    values,
     cell_mask,
     threshold=0.5,
     min_seed_px=5,
-    thin=True,
+    thin=False,
 ):
     """
-    Connected skeleton pieces as integer seed labels [H, W].
+    Connected pieces of ``values > threshold`` as integer seed labels [H, W].
 
-    skeleton     predicted skeleton probability [H, W]
-    cell_mask    bool [H, W], only skeleton pixels inside it count
-    threshold    skeleton probability above which a pixel is skeleton
+    values       any map: skeleton probability, edge distance, ...
+    cell_mask    bool [H, W], only pixels inside it count
+    threshold    pixels above this belong to a seed
     min_seed_px  pieces with fewer pixels are dropped as noise
-    thin         re-skeletonize the thresholded map so that thick or blobby
-                 predictions become one-pixel lines (does not change topology)
+    thin         reduce every piece to a one-pixel line (keeps connectivity)
     """
-    sk = (np.asarray(skeleton) > threshold) & np.asarray(cell_mask, dtype=bool)
+    sk = (np.asarray(values) > threshold) & np.asarray(cell_mask, dtype=bool)
     if thin and sk.any():
         sk = skeletonize(sk)
     seeds = cc_label(sk, connectivity=2)  # diagonal neighbours are connected
@@ -46,26 +49,54 @@ def skeleton_seeds(
     return seeds.astype(np.int32)
 
 
+def label_seeds(seed_labels, cell_mask, min_seed_px=1):
+    """
+    Existing labels as seeds: each label is cut to the cell interior, and a
+    label that falls apart there keeps only its connected pieces as separate
+    seeds. Returns int32 labels [H, W].
+    """
+    seed_labels = np.squeeze(np.asarray(seed_labels))
+    inside = np.where(np.asarray(cell_mask, dtype=bool), seed_labels, 0)
+    out = np.zeros(inside.shape, dtype=np.int32)
+    next_id = 1
+    for lab in np.unique(inside):
+        if lab == 0:
+            continue
+        pieces = cc_label(inside == lab, connectivity=2)
+        for k in range(1, pieces.max() + 1):
+            m = pieces == k
+            if m.sum() >= min_seed_px:
+                out[m] = next_id
+                next_id += 1
+    return out
+
+
 def seeded_edt_watershed(
     wall,
-    skeleton,
+    seed_map=None,
     wall_threshold=0.35,
     sigma=1.0,
-    skeleton_threshold=0.5,
+    seed_threshold=0.5,
     min_seed_px=5,
     fill_unseeded=True,
     min_cell_size=15,
     compactness=0.0,
+    thin_seeds=False,
+    seed_labels=None,
 ):
     """
-    Cell labels from the wall prediction and the predicted skeleton.
+    Cell labels from the wall prediction and a seed map or seed labels.
 
     wall                 wall probability [H, W] (high on walls)
-    skeleton             skeleton probability [H, W]
+    seed_map             any map [H, W] (skeleton, edge distance, ...); its
+                         connected pieces above seed_threshold are the seeds
+    seed_labels          alternatively an integer label image used as seeds
+                         (seed_map is then ignored)
     wall_threshold       cell interior = smoothed wall probability below this
     sigma                Gaussian smoothing of the wall map before thresholding
-    skeleton_threshold   see skeleton_seeds
-    min_seed_px          see skeleton_seeds
+    seed_threshold       see map_seeds
+    min_seed_px          see map_seeds
+    thin_seeds           see map_seeds (thin = True)
     fill_unseeded        interior regions without any seed (the skeleton
                          missed the cell) become a cell of their own when
                          they are larger than min_cell_size; otherwise they
@@ -76,10 +107,13 @@ def seeded_edt_watershed(
     Returns uint64 labels [H, W]; 0 = wall / background.
     """
     wall = np.squeeze(np.asarray(wall)).astype(np.float32)
-    skeleton = np.squeeze(np.asarray(skeleton)).astype(np.float32)
-    if wall.shape != skeleton.shape:
+    given = seed_labels if seed_labels is not None else seed_map
+    if given is None:
+        raise ValueError('Give a seed map or seed labels.')
+    given = np.squeeze(np.asarray(given))
+    if wall.shape != given.shape:
         raise ValueError(
-            f'Wall {wall.shape} and skeleton {skeleton.shape} must have the same shape.'
+            f'Wall {wall.shape} and seeds {given.shape} must have the same shape.'
         )
     if sigma > 0:
         wall = ndi.gaussian_filter(wall, sigma=sigma)
@@ -88,9 +122,16 @@ def seeded_edt_watershed(
         return np.zeros(wall.shape, dtype=np.uint64)
 
     distance = ndi.distance_transform_edt(cell_mask)
-    seeds = skeleton_seeds(
-        skeleton, cell_mask, skeleton_threshold, min_seed_px
-    )
+    if seed_labels is not None:
+        seeds = label_seeds(given, cell_mask, min_seed_px)
+    else:
+        seeds = map_seeds(
+            given.astype(np.float32),
+            cell_mask,
+            seed_threshold,
+            min_seed_px,
+            thin_seeds,
+        )
 
     if fill_unseeded:
         regions = cc_label(cell_mask, connectivity=1)
