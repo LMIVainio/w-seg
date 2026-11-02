@@ -37,6 +37,15 @@ def build_args(p):
         '--workers', str(p['workers']),
         '--seed', str(p['seed']),
     ]  # fmt: skip
+    # loss options (the trainer's own defaults apply when a key is missing)
+    for key, flag in (
+        ('aff_floor', '--aff-floor'),
+        ('w_interior', '--w-interior'),
+        ('hard_neg', '--hard-neg'),
+        ('w_dot', '--w-dot'),
+    ):
+        if p.get(key) is not None:
+            args += [flag, str(p[key])]
     if p.get('geometry') and not p.get('init_from'):
         args.append('--geometry')
     if p.get('init_from'):

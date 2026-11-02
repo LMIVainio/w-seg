@@ -109,6 +109,26 @@ def parse_args(argv=None):
         'inside cells); 0 switches it off',
     )
     p.add_argument(
+        '--hard-neg',
+        type=float,
+        default=2.0,
+        help='extra loss weight for wall-free pixels that the network calls '
+        'wall (hard negatives); 0 switches it off',
+    )
+    p.add_argument(
+        '--w-dot',
+        type=float,
+        default=10.0,
+        help='weight of the dot penalty (small wall-like specks inside '
+        'cells, found with a morphological opening); 0 switches it off',
+    )
+    p.add_argument(
+        '--dot-radius',
+        type=int,
+        default=2,
+        help='specks thinner than 2 * radius + 1 pixels count as dots',
+    )
+    p.add_argument(
         '--interior-margin',
         type=int,
         default=3,
@@ -295,6 +315,9 @@ def main(argv=None):
         'aff_floor': args.aff_floor,
         'w_interior': args.w_interior,
         'interior_margin': args.interior_margin,
+        'hard_neg': args.hard_neg,
+        'w_dot': args.w_dot,
+        'dot_radius': args.dot_radius,
     }
     if (
         args.batch_size <= 0
@@ -397,7 +420,7 @@ def main(argv=None):
         for k in (
             'step', 'train_total', 'train_sem', 'train_aff',
             'eval_step', 'val_total', 'val_sem', 'val_aff', 'val_dice',
-            'val_int_wall', 'val_int_aff',
+            'val_int_wall', 'val_int_aff', 'val_int_dots',
             'train_geo', 'val_geo', 'train_interior', 'val_interior',
         )
     }  # fmt: skip
@@ -413,6 +436,7 @@ def main(argv=None):
                 'val_dice',
                 'val_int_wall',
                 'val_int_aff',
+                'val_int_dots',
                 'lr',
                 'minutes',
             ]
@@ -434,7 +458,15 @@ def main(argv=None):
             max_batches=len(val_loader),
             **loss_kw,
         )
-        for k in ('total', 'sem', 'aff', 'dice', 'int_wall', 'int_aff'):
+        for k in (
+            'total',
+            'sem',
+            'aff',
+            'dice',
+            'int_wall',
+            'int_aff',
+            'int_dots',
+        ):
             history[f'val_{k}'].append(val[k])
         history['val_geo'].append(val['geo'])
         history['val_interior'].append(val['int_wall'] + val['int_aff'])
@@ -467,12 +499,13 @@ def main(argv=None):
             csv.writer(f).writerow(
                 [step, f'{recent:.4f}', f'{val["total"]:.4f}', f'{val["sem"]:.4f}',
                  f'{val["aff"]:.4f}', f'{val["dice"]:.4f}',
-                 f'{val["int_wall"]:.4f}', f'{val["int_aff"]:.4f}', f'{lr:.2e}', f'{minutes:.1f}']
+                 f'{val["int_wall"]:.4f}', f'{val["int_aff"]:.4f}',
+                 f'{val["int_dots"]:.5f}', f'{lr:.2e}', f'{minutes:.1f}']
             )  # fmt: skip
         print(
             f'step {step:6d} | train {recent:.3f} | val {val["total"]:.3f} '
             f'(wall {val["sem"]:.3f}, aff {val["aff"]:.3f}) | val Dice {val["dice"]:.3f} '
-            f'| interior: wall {val["int_wall"]:.4f}, aff-holes {val["int_aff"]:.3f} '
+            f'| interior: wall {val["int_wall"]:.4f}, aff-holes {val["int_aff"]:.3f}, dots {val["int_dots"]:.4f} '
             f'| best {best_dice:.3f} | {minutes:.1f} min',
             flush=True,
         )

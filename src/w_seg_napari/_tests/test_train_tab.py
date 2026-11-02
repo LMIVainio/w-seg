@@ -91,3 +91,18 @@ def test_find_max_batch_and_safe_batch():
     assert safe_batch(0) == 0 and safe_batch(1) == 1 and safe_batch(2) == 1
     assert safe_batch(10) == 8 and safe_batch(40) == 34
     assert safe_batch(128) % 2 == 0 and safe_batch(128) <= 128 * 0.85
+
+
+def test_loss_options_are_passed_on_and_can_be_switched_off():
+    p = {
+        'train_dir': 'T', 'val_dir': 'V', 'out_root': 'O', 'name': 'n',
+        'stop_file': 'S', 'steps': 10, 'batch_size': 2, 'eval_every': 5,
+        'lr': 0.001, 'warmup': 1, 'val_samples': 8, 'ranges': [6, 32],
+        'zoom': (0.5, 1.5), 'tissue_bias': 0.7, 'workers': 0, 'seed': 0,
+    }  # fmt: skip
+    assert '--w-dot' not in build_args(p)  # the trainer's defaults apply
+    a = build_args({**p, 'w_dot': 0.0, 'hard_neg': 0.0, 'w_interior': 0.5})
+    assert a[a.index('--w-dot') + 1] == '0.0'  # 0 switches the term off
+    assert a[a.index('--hard-neg') + 1] == '0.0'
+    assert a[a.index('--w-interior') + 1] == '0.5'
+    assert '--aff-floor' not in a

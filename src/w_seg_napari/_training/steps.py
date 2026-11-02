@@ -70,6 +70,48 @@ def interior_errors(outputs, y, n_aff, margin=3):
     return int_wall, int_aff
 
 
+def soft_open(p, radius):
+    """
+    Grey-scale opening (erosion then dilation, square window of side
+    2 * radius + 1) of a [B, H, W, 1] map. Structures thinner than the window,
+    such as dots, disappear; larger ones survive. Differentiable.
+    """
+    ops = keras.ops
+    r = int(radius)
+    k = 2 * r + 1
+    pad = ((0, 0), (r, r), (r, r), (0, 0))
+    # constant padding with the neutral value of each step (1 for a minimum,
+    # 0 for a maximum) works on every Keras backend and keeps the borders fair
+    eroded = -ops.max_pool(
+        -ops.pad(p, pad, mode='constant', constant_values=1.0),
+        k,
+        strides=1,
+        padding='valid',
+    )
+    return ops.max_pool(
+        ops.pad(eroded, pad, mode='constant', constant_values=0.0),
+        k,
+        strides=1,
+        padding='valid',
+    )
+
+
+def interior_dots(outputs, y, margin=3, radius=2):
+    """
+    Dot-like false walls inside cells: the part of the predicted wall map that
+    an opening removes (small blobs and thin specks), averaged over the
+    interior pixels (no true wall within `margin` px). 0 for a perfect model.
+    """
+    ops = keras.ops
+    pred = outputs['semantic_head']
+    dots = ops.relu(pred - soft_open(pred, radius))
+    near_wall = ops.max_pool(
+        y[..., :1], 2 * int(margin) + 1, strides=1, padding='same'
+    )
+    interior = 1.0 - near_wall
+    return ops.sum(interior * dots) / ops.maximum(ops.sum(interior), 1.0)
+
+
 def compute_loss(
     outputs,
     y,
@@ -81,11 +123,15 @@ def compute_loss(
     aff_floor=1.0,
     w_interior=0.5,
     interior_margin=3,
+    hard_neg=2.0,
+    w_dot=10.0,
+    dot_radius=2,
 ):
     """
     Total loss = semantic FTL
                + w_aff * weighted-L1 on affinities
                + w_interior * (interior false-wall + interior affinity holes)
+               + w_dot * dot-like false walls inside cells
                + w_aux * sum of FTL on the auxiliary (deep supervision) heads
                + w_geo * geometry loss (only when the model has a geometry head).
 
@@ -97,7 +143,16 @@ def compute_loss(
     y_sem = y[..., :1]
     y_aff = y[..., 1 : 1 + n_aff]
 
-    sem = ftl(y_sem, outputs['semantic_head'], w)
+    # Hard negatives: wall-free pixels that the network currently calls wall
+    # get extra weight (added to the EDT map, which is ~10 next to walls and
+    # ~0.1 in a cell). The extra weight follows the prediction but is not
+    # differentiated, so it only steers where the loss looks.
+    if hard_neg > 0:
+        p_now = keras.ops.stop_gradient(outputs['semantic_head'])
+        w_sem = w + hard_neg * p_now * (1.0 - y_sem)
+    else:
+        w_sem = w
+    sem = ftl(y_sem, outputs['semantic_head'], w_sem)
     # Flatter weights for the affinities: the EDT map is ~10 next to a wall and
     # ~0.1 inside a cell, so an error deep in a cell was almost free. Raising
     # the floor to `aff_floor` (a few times the interior value) keeps the
@@ -114,8 +169,13 @@ def compute_loss(
     int_wall, int_aff = interior_errors(outputs, y, n_aff, interior_margin)
     interior = int_wall + int_aff
 
-    total = sem + w_aff * aff + w_aux * aux + w_interior * interior
+    dots = interior_dots(outputs, y, interior_margin, dot_radius)
+
+    total = (
+        sem + w_aff * aff + w_aux * aux + w_interior * interior + w_dot * dots
+    )
     parts = {
+        'int_dots': dots,
         'sem': sem,
         'aff': aff,
         'aux': aux,
@@ -169,6 +229,7 @@ def validate(generator, val_loader, ftl, device, max_batches=20, **loss_kw):
         'geo': 0.0,
         'int_wall': 0.0,
         'int_aff': 0.0,
+        'int_dots': 0.0,
         'dice': 0.0,
     }
     n = 0

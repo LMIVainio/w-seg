@@ -184,6 +184,38 @@ class TrainWidget(QGroupBox):
         self.workers_spin.setValue(4)
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(0, 1_000_000)
+
+        def loss_spin(value, tip, maximum=100.0):
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, maximum)
+            spin.setSingleStep(0.5)
+            spin.setDecimals(2)
+            spin.setValue(value)
+            spin.setToolTip(tip)
+            return spin
+
+        self.aff_floor_spin = loss_spin(
+            1.0,
+            'Minimum weight of the affinity loss. The wall weight map is '
+            '~0.1 inside cells; a higher floor makes errors inside cells '
+            'cost more. 0 = old behaviour.',
+        )
+        self.interior_spin = loss_spin(
+            0.5,
+            'Penalty for wall predicted deep inside cells and for affinity '
+            'holes there. 0 = off.',
+        )
+        self.hard_neg_spin = loss_spin(
+            2.0,
+            'Extra loss weight for wall-free pixels that the network '
+            'currently calls wall (hard negatives). 0 = off.',
+        )
+        self.dot_spin = loss_spin(
+            10.0,
+            'Penalty for small wall-like specks inside cells (found with a '
+            'morphological opening). 0 = off. Watch "dots" in the log.',
+            maximum=1000.0,
+        )
         adv_form.addRow('Learning rate:', self.lr_spin)
         adv_form.addRow('Warm-up steps:', self.warmup_spin)
         adv_form.addRow('Validation crops:', self.val_samples_spin)
@@ -192,6 +224,10 @@ class TrainWidget(QGroupBox):
         adv_form.addRow('Tissue bias (0-1):', self.bias_spin)
         adv_form.addRow('Data workers:', self.workers_spin)
         adv_form.addRow('Random seed:', self.seed_spin)
+        adv_form.addRow('Affinity weight floor:', self.aff_floor_spin)
+        adv_form.addRow('Interior penalty:', self.interior_spin)
+        adv_form.addRow('Hard-negative weight:', self.hard_neg_spin)
+        adv_form.addRow('Dot penalty:', self.dot_spin)
         adv.addRow(self.adv_body)
         self.adv_box.setLayout(adv)
         self.adv_body.setVisible(False)
@@ -313,6 +349,10 @@ class TrainWidget(QGroupBox):
             'tissue_bias': self.bias_spin.value(),
             'workers': self.workers_spin.value(),
             'seed': self.seed_spin.value(),
+            'aff_floor': self.aff_floor_spin.value(),
+            'w_interior': self.interior_spin.value(),
+            'hard_neg': self.hard_neg_spin.value(),
+            'w_dot': self.dot_spin.value(),
         }
 
     def _set_running(self, running):
