@@ -199,24 +199,70 @@ def compute_loss(
     return total, parts
 
 
-def train_step(generator, optimizer, batch, ftl, device, **loss_kw):
-    """One optimisation step. `optimizer` is a torch optimizer, as in your loop."""
-    x, y, w = (t.float().to(device) for t in batch)
+def forward(generator, x, training, amp=False):
+    """
+    Model forward pass. With amp the layers run in bfloat16 (weights stay
+    float32), which roughly halves the activation memory; the outputs are
+    converted back to float32 so the loss is computed at full precision.
+    """
+    if not amp:
+        return generator(x, training=training)
+    with torch.autocast('cuda', dtype=torch.bfloat16):
+        outputs = generator(x, training=training)
+    return {k: keras.ops.cast(v, 'float32') for k, v in outputs.items()}
 
-    optimizer.zero_grad()
-    outputs = generator(x, training=True)
-    total, parts = compute_loss(outputs, y, w, ftl, **loss_kw)
-    total.backward()
-    optimizer.step()
 
+def mean_parts(parts_list):
+    """Average a list of {name: value} dicts (the parts of several micro-batches)."""
     return {
-        k: float(v.detach()) if hasattr(v, 'detach') else float(v)
-        for k, v in parts.items()
+        k: sum(p[k] for p in parts_list) / len(parts_list)
+        for k in parts_list[0]
     }
 
 
+def train_step(
+    generator,
+    optimizer,
+    batch,
+    ftl,
+    device,
+    accum=1,
+    next_batch=None,
+    amp=False,
+    **loss_kw,
+):
+    """
+    One optimisation step. `optimizer` is a torch optimizer, as in your loop.
+
+    Gradient accumulation: with accum > 1 the step is made of `accum`
+    micro-batches (the given one, then accum - 1 more from `next_batch()`).
+    Every micro-batch contributes loss / accum to the gradient, which sums up
+    to the gradient of the average loss, and the weights are updated once. The
+    memory needed is that of ONE micro-batch.
+    """
+    accum = max(1, int(accum))
+    optimizer.zero_grad()
+    parts_list = []
+    for k in range(accum):
+        b = batch if k == 0 else next_batch()
+        x, y, w = (t.float().to(device) for t in b)
+        outputs = forward(generator, x, True, amp)
+        total, parts = compute_loss(outputs, y, w, ftl, **loss_kw)
+        (total / accum).backward()
+        parts_list.append(
+            {
+                key: float(v.detach()) if hasattr(v, 'detach') else float(v)
+                for key, v in parts.items()
+            }
+        )
+    optimizer.step()
+    return mean_parts(parts_list)
+
+
 @torch.no_grad()
-def validate(generator, val_loader, ftl, device, max_batches=20, **loss_kw):
+def validate(
+    generator, val_loader, ftl, device, max_batches=20, amp=False, **loss_kw
+):
     """
     Average loss and Dice (semantic head, threshold 0.5) on a FIXED validation
     set. Call this every N steps and keep the checkpoint with the best Dice.
@@ -237,7 +283,7 @@ def validate(generator, val_loader, ftl, device, max_batches=20, **loss_kw):
         if i >= max_batches:
             break
         x, y, w = (t.float().to(device) for t in batch)
-        outputs = generator(x, training=False)  # training=False: no dropout
+        outputs = forward(generator, x, False, amp)  # False: no dropout
         _, parts = compute_loss(outputs, y, w, ftl, **loss_kw)
 
         pred = (outputs['semantic_head'] > 0.5).float()

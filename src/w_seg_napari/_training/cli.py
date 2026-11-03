@@ -47,7 +47,12 @@ from w_seg_napari._training.autobatch import find_max_batch, safe_batch
 from w_seg_napari._training.data import LargeTiffCellDataset
 from w_seg_napari._training.losses import WeightedFocalTverskyLoss
 from w_seg_napari._training.model import Generator
-from w_seg_napari._training.steps import compute_loss, train_step, validate
+from w_seg_napari._training.steps import (
+    compute_loss,
+    forward,
+    train_step,
+    validate,
+)
 
 
 def emit(event, **kw):
@@ -93,6 +98,19 @@ def parse_args(argv=None):
         '--geometry',
         action='store_true',
         help='add the geometry head (architecture wasp_v4)',
+    )
+    p.add_argument(
+        '--mixed-precision',
+        action='store_true',
+        help='run the layers in bfloat16 (needs a GPU with bf16 support); '
+        'about half the activation memory',
+    )
+    p.add_argument(
+        '--accum',
+        type=int,
+        default=1,
+        help='gradient accumulation: batches per weight update (the update '
+        'then uses batch-size x accum images)',
     )
     p.add_argument(
         '--aff-floor',
@@ -151,7 +169,49 @@ def denoise(t):
     )
 
 
-def auto_batch_size(model, ftl, loss_kw, device, patch, in_ch, n_targets):
+def check_mixed_precision(
+    model, ftl, loss_kw, device, patch, in_ch, n_targets
+):
+    """
+    True when bfloat16 training works here: a GPU with bf16 support and one
+    real forward + backward pass in bf16 that runs without an error.
+    Otherwise says why not and returns False (training then uses float32).
+    """
+    why = None
+    if device != 'cuda':
+        why = 'there is no GPU'
+    elif torch.cuda.get_device_capability()[0] < 8:
+        # bf16 is native from the Ampere generation (compute capability 8.0)
+        why = (
+            'this GPU is older than the Ampere generation (no native bfloat16)'
+        )
+    else:
+        try:
+            x = torch.rand(1, patch, patch, in_ch, device=device)
+            y = torch.rand(1, patch, patch, n_targets, device=device)
+            w = torch.ones(1, patch, patch, 1, device=device)
+            total, _ = compute_loss(
+                forward(model, x, True, True), y, w, ftl, **loss_kw
+            )
+            total.backward()
+        except (RuntimeError, TypeError, ValueError) as e:
+            why = f'a test step failed ({str(e)[:120]})'
+        finally:
+            for p in model.parameters():
+                p.grad = None
+            torch.cuda.empty_cache()
+    if why:
+        msg = f'Mixed precision switched off: {why}. Training in float32.'
+        print(msg, flush=True)
+        emit('status', message=msg)
+        return False
+    emit('status', message='Mixed precision (bfloat16) is on.')
+    return True
+
+
+def auto_batch_size(
+    model, ftl, loss_kw, device, patch, in_ch, n_targets, amp=False
+):
     """
     Largest comfortable batch size for this GPU, found by running real
     forward + backward passes on random data (no weight update).
@@ -184,7 +244,7 @@ def auto_batch_size(model, ftl, loss_kw, device, patch, in_ch, n_targets):
             y = torch.rand(b, patch, patch, n_targets, device=device)
             w = torch.ones(b, patch, patch, 1, device=device)
             total_loss, _ = compute_loss(
-                model(x, training=True), y, w, ftl, **loss_kw
+                forward(model, x, True, amp), y, w, ftl, **loss_kw
             )
             total_loss.backward()
             ok = torch.cuda.max_memory_allocated() - base <= budget
@@ -330,18 +390,20 @@ def main(argv=None):
         'w_dot': args.w_dot,
         'dot_radius': args.dot_radius,
     }
+    n_targets = 1 + len(offsets) + (4 if geometry is not None else 0)
+    probe = (
+        cfg['input']['patch_size'],
+        cfg['input']['channels'],
+        n_targets,
+    )
+    amp = False
+    if args.mixed_precision:
+        amp = check_mixed_precision(model, ftl, loss_kw, device, *probe)
     if (
         args.batch_size <= 0
     ):  # automatic: as large as the free GPU memory allows
-        n_targets = 1 + len(offsets) + (4 if geometry is not None else 0)
         args.batch_size = auto_batch_size(
-            model,
-            ftl,
-            loss_kw,
-            device,
-            cfg['input']['patch_size'],
-            cfg['input']['channels'],
-            n_targets,
+            model, ftl, loss_kw, device, *probe, amp=amp
         )
     emit(
         'status',
@@ -393,6 +455,7 @@ def main(argv=None):
             ftl,
             device,
             max_batches=len(val_loader),
+            amp=amp,
             **loss_kw,
         )
         emit(
@@ -467,6 +530,7 @@ def main(argv=None):
             ftl,
             device,
             max_batches=len(val_loader),
+            amp=amp,
             **loss_kw,
         )
         for k in (
@@ -497,6 +561,8 @@ def main(argv=None):
                 'batch_size': args.batch_size,
                 'learning_rate': args.lr,
                 'loss': dict(loss_kw),
+                'mixed_precision': amp,
+                'accumulation_steps': args.accum,
                 'train_files': sorted(
                     p.name for p in Path(args.train_dir).glob('*.tif*')
                 ),
@@ -556,7 +622,15 @@ def main(argv=None):
                 stopped = True
                 break
             parts = train_step(
-                model, optimizer, next(batches), ftl, device, **loss_kw
+                model,
+                optimizer,
+                next(batches),
+                ftl,
+                device,
+                accum=args.accum,
+                next_batch=lambda: next(batches),
+                amp=amp,
+                **loss_kw,
             )
             scheduler.step()
             step += 1

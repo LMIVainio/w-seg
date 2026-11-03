@@ -142,12 +142,36 @@ class TrainWidget(QGroupBox):
             'training runs out of memory, switch this off and lower the number.'
         )
         self.auto_batch_cb.toggled.connect(self._update_batch_widgets)
+        self.amp_cb = QCheckBox(
+            'Mixed precision (bfloat16, needs RTX 30xx or newer)'
+        )
+        self.amp_cb.setToolTip(
+            'Runs the layers in bfloat16: about half the activation memory, '
+            'so a larger batch fits, and usually faster. Needs a GPU of the '
+            'Ampere generation or newer; otherwise training silently falls '
+            'back to float32 (the log says so).'
+        )
+        self.accum_spin = QSpinBox()
+        self.accum_spin.setRange(1, 64)
+        self.accum_spin.setValue(1)
+        self.accum_spin.setToolTip(
+            'Gradient accumulation: the weights are updated once per this '
+            'many batches, using their summed gradients. The update behaves '
+            'like one batch of (batch size x this number) images, but needs '
+            'the memory of one batch. A step takes this many times longer.'
+        )
+        self.effective_lbl = QLabel('')
+        self.batch_spin.valueChanged.connect(self._update_batch_widgets)
+        self.accum_spin.valueChanged.connect(self._update_batch_widgets)
         self.eval_spin = QSpinBox()
         self.eval_spin.setRange(1, 100_000)
         self.eval_spin.setValue(200)
         form.addRow('Training steps:', self.steps_spin)
         form.addRow('Batch size:', self.batch_spin)
         form.addRow(self.auto_batch_cb)
+        form.addRow('Gradient accumulation:', self.accum_spin)
+        form.addRow('', self.effective_lbl)
+        form.addRow(self.amp_cb)
         form.addRow('Evaluate every (steps):', self.eval_spin)
         layout.addLayout(form)
 
@@ -269,6 +293,7 @@ class TrainWidget(QGroupBox):
 
         self.refresh_base_models()
         self._update_counts()
+        self._update_batch_widgets()
 
     # ------------------------------------------------------------------
     def refresh_base_models(self):
@@ -349,6 +374,8 @@ class TrainWidget(QGroupBox):
             'batch_size': 0
             if self.auto_batch_cb.isChecked()
             else self.batch_spin.value(),
+            'accum': self.accum_spin.value(),
+            'mixed_precision': self.amp_cb.isChecked(),
             'eval_every': self.eval_spin.value(),
             'lr': self.lr_spin.value(),
             'warmup': warm,
@@ -366,7 +393,18 @@ class TrainWidget(QGroupBox):
 
     def _update_batch_widgets(self, _checked=None):
         """The batch size box is only used when automatic sizing is off."""
-        self.batch_spin.setEnabled(not self.auto_batch_cb.isChecked())
+        auto = self.auto_batch_cb.isChecked()
+        self.batch_spin.setEnabled(not auto)
+        accum = self.accum_spin.value()
+        if auto:
+            self.effective_lbl.setText(
+                f'Each update uses (automatic batch size) x {accum} images.'
+            )
+        else:
+            self.effective_lbl.setText(
+                f'Each update uses {self.batch_spin.value() * accum} images '
+                f'({self.batch_spin.value()} x {accum}).'
+            )
 
     def _set_running(self, running):
         self.btn_start.setEnabled(not running)
@@ -374,6 +412,7 @@ class TrainWidget(QGroupBox):
         for w in (
             self.train_row, self.val_row, self.out_row, self.name_edit, self.base_combo,
             self.steps_spin, self.auto_batch_cb, self.eval_spin, self.adv_box,
+            self.accum_spin, self.amp_cb,
         ):  # fmt: skip
             w.setEnabled(not running)
         self.geometry_cb.setEnabled(

@@ -46,6 +46,10 @@ def build_args(p):
     ):
         if p.get(key) is not None:
             args += [flag, str(p[key])]
+    if p.get('mixed_precision'):
+        args.append('--mixed-precision')
+    if int(p.get('accum') or 1) > 1:
+        args += ['--accum', str(int(p['accum']))]
     if p.get('geometry') and not p.get('init_from'):
         args.append('--geometry')
     if p.get('init_from'):

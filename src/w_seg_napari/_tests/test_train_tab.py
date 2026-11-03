@@ -106,3 +106,18 @@ def test_loss_options_are_passed_on_and_can_be_switched_off():
     assert a[a.index('--hard-neg') + 1] == '0.0'
     assert a[a.index('--w-interior') + 1] == '0.5'
     assert '--aff-floor' not in a
+
+
+def test_mixed_precision_and_accumulation_args():
+    p = {
+        'train_dir': 'T', 'val_dir': 'V', 'out_root': 'O', 'name': 'n',
+        'stop_file': 'S', 'steps': 10, 'batch_size': 4, 'eval_every': 5,
+        'lr': 0.001, 'warmup': 1, 'val_samples': 8, 'ranges': [6, 32],
+        'zoom': (0.5, 1.5), 'tissue_bias': 0.7, 'workers': 0, 'seed': 0,
+    }  # fmt: skip
+    plain = build_args(p)
+    assert '--mixed-precision' not in plain and '--accum' not in plain
+    assert '--accum' not in build_args({**p, 'accum': 1})
+    a = build_args({**p, 'accum': 4, 'mixed_precision': True})
+    assert '--mixed-precision' in a
+    assert a[a.index('--accum') + 1] == '4'

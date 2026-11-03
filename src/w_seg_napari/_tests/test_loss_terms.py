@@ -170,3 +170,11 @@ def test_larger_blobs_are_not_dots():
         d_small = float(steps.compute_loss(small, y, w, ftl)[1]['int_dots'])
         d_big = float(steps.compute_loss(big, y, w, ftl)[1]['int_dots'])
         assert d_small > 0 and d_big < d_small
+
+
+def test_mean_parts_for_accumulated_steps():
+    with _loss_modules() as (steps, _):
+        parts = [{'total': 1.0, 'sem': 0.5}, {'total': 3.0, 'sem': 1.5}]
+        mean = steps.mean_parts(parts)
+        assert mean == {'total': 2.0, 'sem': 1.0}
+        assert steps.mean_parts(parts[:1]) == parts[0]
