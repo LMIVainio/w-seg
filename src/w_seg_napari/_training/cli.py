@@ -167,8 +167,18 @@ def auto_batch_size(model, ftl, loss_kw, device, patch, in_ch, n_targets):
         'Finding the largest batch size...',
     )
 
+    # What counts as "fits": no out-of-memory error AND the peak memory of the
+    # step stays within 80 % of the free memory minus the optimizer's state
+    # (AdamW keeps two float32 values per weight, which this probe does not
+    # allocate). Without the second rule a size that only just squeezes in can
+    # still fail once real training adds the optimizer, the validation pass and
+    # allocator fragmentation.
+    base = torch.cuda.memory_allocated()
+    budget = 0.8 * free - 8 * int(model.count_params())
+
     def fits(b):
         ok = True
+        torch.cuda.reset_peak_memory_stats()
         try:
             x = torch.rand(b, patch, patch, in_ch, device=device)
             y = torch.rand(b, patch, patch, n_targets, device=device)
@@ -177,6 +187,7 @@ def auto_batch_size(model, ftl, loss_kw, device, patch, in_ch, n_targets):
                 model(x, training=True), y, w, ftl, **loss_kw
             )
             total_loss.backward()
+            ok = torch.cuda.max_memory_allocated() - base <= budget
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if 'out of memory' not in str(e).lower():
                 raise

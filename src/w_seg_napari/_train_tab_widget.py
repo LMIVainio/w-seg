@@ -129,19 +129,25 @@ class TrainWidget(QGroupBox):
         self.steps_spin.setSingleStep(500)
         self.steps_spin.setValue(5000)
         self.batch_spin = QSpinBox()
-        self.batch_spin.setRange(0, 128)
-        self.batch_spin.setSpecialValueText('Auto (fill GPU memory)')
-        self.batch_spin.setToolTip(
-            'Auto tries real training steps with growing batch sizes and '
-            'uses the largest one that fits in free GPU memory (with some '
-            'headroom). Pick a number to fix the batch size yourself.'
+        self.batch_spin.setRange(1, 128)
+        self.batch_spin.setValue(8)
+        self.auto_batch_cb = QCheckBox(
+            'Automatic batch size (use free GPU memory)'
         )
-        self.batch_spin.setValue(0)
+        self.auto_batch_cb.setChecked(False)
+        self.auto_batch_cb.setToolTip(
+            'Tries real training steps with growing batch sizes and uses the '
+            'largest one that fits in free GPU memory, with headroom for the '
+            'optimizer. When it is off, the batch size above is used. If '
+            'training runs out of memory, switch this off and lower the number.'
+        )
+        self.auto_batch_cb.toggled.connect(self._update_batch_widgets)
         self.eval_spin = QSpinBox()
         self.eval_spin.setRange(1, 100_000)
         self.eval_spin.setValue(200)
         form.addRow('Training steps:', self.steps_spin)
         form.addRow('Batch size:', self.batch_spin)
+        form.addRow(self.auto_batch_cb)
         form.addRow('Evaluate every (steps):', self.eval_spin)
         layout.addLayout(form)
 
@@ -339,7 +345,10 @@ class TrainWidget(QGroupBox):
             'init_from': self.base_combo.currentData(),
             'geometry': self.geometry_cb.isChecked(),
             'steps': self.steps_spin.value(),
-            'batch_size': self.batch_spin.value(),
+            # 0 tells the trainer to find the size itself
+            'batch_size': 0
+            if self.auto_batch_cb.isChecked()
+            else self.batch_spin.value(),
             'eval_every': self.eval_spin.value(),
             'lr': self.lr_spin.value(),
             'warmup': warm,
@@ -355,16 +364,23 @@ class TrainWidget(QGroupBox):
             'w_dot': self.dot_spin.value(),
         }
 
+    def _update_batch_widgets(self, _checked=None):
+        """The batch size box is only used when automatic sizing is off."""
+        self.batch_spin.setEnabled(not self.auto_batch_cb.isChecked())
+
     def _set_running(self, running):
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         for w in (
             self.train_row, self.val_row, self.out_row, self.name_edit, self.base_combo,
-            self.steps_spin, self.batch_spin, self.eval_spin, self.adv_box,
+            self.steps_spin, self.auto_batch_cb, self.eval_spin, self.adv_box,
         ):  # fmt: skip
             w.setEnabled(not running)
         self.geometry_cb.setEnabled(
             not running and self.base_combo.currentData() is None
+        )
+        self.batch_spin.setEnabled(
+            not running and not self.auto_batch_cb.isChecked()
         )
         # While a run is going, the other tabs are locked (the GPU belongs to
         # the training process).
