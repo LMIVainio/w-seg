@@ -496,6 +496,7 @@ _ACTIVE_MODEL_INFO = {
     'name': None,
     'yolo': None,
     'radial_symmetry': None,
+    'yolo_crop': None,
 }
 
 
@@ -505,9 +506,14 @@ def get_active_model_info() -> dict:
     return dict(_ACTIVE_MODEL_INFO)
 
 
-def _set_active_model_info(name, yolo, radial_symmetry):
+def _set_active_model_info(name, yolo, radial_symmetry, yolo_crop=None):
+    """yolo_crop: crop settings of the paired YOLO classifier (None = the
+    plugin defaults, see _model_config.DEFAULT_YOLO_CROP)."""
     _ACTIVE_MODEL_INFO.update(
-        name=name, yolo=yolo, radial_symmetry=radial_symmetry
+        name=name,
+        yolo=yolo,
+        radial_symmetry=radial_symmetry,
+        yolo_crop=yolo_crop,
     )
 
 
@@ -613,7 +619,7 @@ def load_my_generator(
 
     bundle = find_bundle(w_name)
     if bundle is not None:
-        from w_seg_napari._model_config import get_companions
+        from w_seg_napari._model_config import get_companions, get_yolo_crop
 
         generator, cfg = load_model_bundle(bundle, device)
         _MODEL_CONFIGS[generator] = cfg
@@ -626,6 +632,7 @@ def load_my_generator(
             bundle.name,
             str(yolo_file) if yolo_file else None,
             comp['radial_symmetry'],
+            get_yolo_crop(cfg),
         )
         print(f'Model bundle loaded on device: {device}')
         info = ', '.join(

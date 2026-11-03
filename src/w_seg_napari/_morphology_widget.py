@@ -39,6 +39,7 @@ from skimage.segmentation import (
     relabel_sequential,
 )
 
+from w_seg_napari._model_config import DEFAULT_YOLO_CROP
 from w_seg_napari._geometry import (
     label_frame_to_image_pixels,
     spatial_shape,
@@ -960,6 +961,7 @@ def measure_cell_morphology(
     radial_sym: bool = False,
     use_YOLO: bool = False,
     YOLO_weights: str = '',
+    YOLO_crop: dict = None,
     yolo_image: np.ndarray = None,
     yolo_image_scale=None,
     yolo_image_translate=None,
@@ -1181,6 +1183,8 @@ def measure_cell_morphology(
             yield (tot_cells, tot_cells, 'Running YOLO classification....')
         print('[w-seg] Running YOLO cell-type classification...')
         yolo_model = load_yolo_model(YOLO_weights)
+        # the crop settings the classifier was trained with (bundle config)
+        crop_settings = {**DEFAULT_YOLO_CROP, **(YOLO_crop or {})}
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         # The crops are cut from the YOLO image (the RGB image), not from the
@@ -1207,9 +1211,8 @@ def measure_cell_morphology(
             img_translation=None,
             img_scale=None,
             yolo_model=yolo_model,
-            target_size=256,
-            context_factor=2.5,
             device=device,
+            **crop_settings,
         )
         # Keep the measured values; add only the YOLO columns
         for col in df_pred.columns.difference(df_combined.columns):
@@ -1568,6 +1571,7 @@ class MorphologyWidget(QWidget):
                     center_coords=center_coords,
                     use_YOLO=use_yolo,
                     YOLO_weights=yolo_weights,
+                    YOLO_crop=get_active_model_info().get('yolo_crop'),
                     yolo_image=yolo_data,
                     yolo_image_scale=yolo_scale,
                     yolo_image_translate=yolo_translate,
@@ -2072,6 +2076,7 @@ class MorphologyWidget(QWidget):
             'center_coords': self.center_coords,
             'use_YOLO': yolo is not None,
             'YOLO_weights': yolo or '',
+            'YOLO_crop': get_active_model_info().get('yolo_crop'),
         }
 
     def get_feature_extraction_config(self) -> dict:

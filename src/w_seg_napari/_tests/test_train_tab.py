@@ -121,3 +121,25 @@ def test_mixed_precision_and_accumulation_args():
     a = build_args({**p, 'accum': 4, 'mixed_precision': True})
     assert '--mixed-precision' in a
     assert a[a.index('--accum') + 1] == '4'
+
+
+def test_yolo_args_and_unique_bundle_dir(tmp_path):
+    from w_seg_napari._train_args import build_yolo_args, unique_bundle_dir
+
+    p = {
+        'dataset': 'D', 'out_root': 'O', 'name': 'n', 'stop_file': 'S',
+        'base': 'yolo11n-cls.pt', 'epochs': 50, 'imgsz': 256, 'batch': 32,
+        'patience': 10, 'seed': 1,
+    }  # fmt: skip
+    a = build_yolo_args(p)
+    assert a[a.index('--epochs') + 1] == '50'
+    assert '--attach-to' not in a and '--info-json' not in a
+    a = build_yolo_args({**p, 'workers': 0, 'info_json': 'I', 'attach_to': 'B', 'out_bundle': 'NB'})
+    assert a[a.index('--attach-to') + 1] == 'B'
+    assert a[a.index('--out-bundle') + 1] == 'NB'
+    assert a[a.index('--workers') + 1] == '0'
+    assert all(isinstance(x, str) for x in a)
+    assert unique_bundle_dir(tmp_path, 'm') == tmp_path / 'm'
+    (tmp_path / 'm').mkdir()
+    (tmp_path / 'm_2').mkdir()
+    assert unique_bundle_dir(tmp_path, 'm') == tmp_path / 'm_3'

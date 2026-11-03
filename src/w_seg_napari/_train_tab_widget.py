@@ -40,6 +40,7 @@ from w_seg_napari._train_args import (
     safe_name,
 )
 from w_seg_napari._training_data_widget import TrainingDataWidget
+from w_seg_napari._yolo_train_widget import YoloTrainWidget
 from w_seg_napari._wsegutils import BUNDLE_DIR, list_local_bundles
 
 MARKER = '@@'
@@ -76,6 +77,7 @@ class TrainWidget(QGroupBox):
         self.viewer = viewer
         self.main_widget = main_widget
         self.process = None
+        self.peer = None  # the YOLO widget: disabled while this runs
         self.stop_file = None
         self._buffer = ''
         self._bundle_dir = None
@@ -442,6 +444,8 @@ class TrainWidget(QGroupBox):
         )
         # While a run is going, the other tabs are locked (the GPU belongs to
         # the training process).
+        if self.peer is not None:
+            self.peer.setEnabled(not running)
         lock = getattr(self.main_widget, 'set_training_running', None)
         if lock is not None:
             lock(running)
@@ -605,5 +609,12 @@ class Tab6Train(QScrollArea):
         self.training_data_widget = TrainingDataWidget(viewer=viewer)
         layout.addWidget(self.training_data_widget)
         layout.addWidget(self.train_widget)
+        self.yolo_widget = YoloTrainWidget(
+            viewer=viewer, main_widget=main_widget
+        )
+        # only one of the two trainings can use the GPU at a time
+        self.yolo_widget.peer = self.train_widget
+        self.train_widget.peer = self.yolo_widget
+        layout.addWidget(self.yolo_widget)
         layout.addStretch()
         self.setWidget(container)

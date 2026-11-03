@@ -66,3 +66,37 @@ def parse_ranges(text):
     if not vals or any(v < 1 for v in vals):
         raise ValueError('Affinity ranges must be positive whole numbers.')
     return sorted(set(vals))
+
+
+def build_yolo_args(p):
+    """Command-line arguments (after ``-m w_seg_napari._training.yolo``) for settings dict p."""
+    args = [
+        '--dataset', p['dataset'],
+        '--out-root', p['out_root'],
+        '--name', p['name'],
+        '--stop-file', p['stop_file'],
+        '--base', p['base'],
+        '--epochs', str(p['epochs']),
+        '--imgsz', str(p['imgsz']),
+        '--batch', str(p['batch']),
+        '--patience', str(p['patience']),
+        '--seed', str(p['seed']),
+    ]  # fmt: skip
+    if p.get('workers') is not None:
+        args += ['--workers', str(p['workers'])]
+    if p.get('info_json'):
+        args += ['--info-json', p['info_json']]
+    if p.get('attach_to'):
+        args += ['--attach-to', p['attach_to'], '--out-bundle', p['out_bundle']]
+    return args
+
+
+def unique_bundle_dir(root, name):
+    """root/name, or root/name_2, root/name_3 ... the first one that is free."""
+    root = Path(root)
+    out = root / name
+    n = 2
+    while out.exists():
+        out = root / f'{name}_{n}'
+        n += 1
+    return out

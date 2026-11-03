@@ -35,6 +35,17 @@ DEFAULT_RANGES = (6, 32)
 #   radial_symmetry True/False = preset the 'radial symmetry' option, None = leave as is
 DEFAULT_COMPANIONS = {'yolo': None, 'radial_symmetry': None}
 
+# How the cell crops for the paired YOLO classifier are cut. Training and
+# prediction must use the same numbers, so a trained bundle stores them in
+# config['yolo']['crop']; bundles without that block use these defaults (the
+# values the plugin always used).
+DEFAULT_YOLO_CROP = {
+    'target_size': 256,
+    'context_factor': 2.5,
+    'min_crop_size': 153,  # int(256 * 0.6)
+    'max_crop_size': 409,  # int(256 * 1.6)
+}
+
 # The geometry head (architecture 'wasp_v4'). Channel order of 'geometry_head':
 #   edge_distance  distance to the nearest edge / the cell's largest such distance (0 at edges, 1 on the skeleton)
 #   dir_y, dir_x   unit vector pointing away from the nearest edge (zero where undefined)
@@ -205,6 +216,62 @@ def get_companions(cfg, bundle_dir=None):
         if len(pts) == 1:
             comp['yolo'] = pts[0].name
     return comp
+
+
+def get_yolo_crop(cfg):
+    """Crop settings of the paired YOLO classifier (defaults for old bundles)."""
+    crop = dict(DEFAULT_YOLO_CROP)
+    crop.update((cfg.get('yolo') or {}).get('crop') or {})
+    return crop
+
+
+def attach_yolo(bundle_dir, weights, out_dir, info=None):
+    """
+    Write a copy of the W-seg bundle `bundle_dir` into `out_dir` that also
+    holds the YOLO classifier `weights` (a .pt file).
+
+    The config gets companions.yolo = the weights' file name and a 'yolo'
+    block built from `info` (dict with optional keys: crop, class_names,
+    class_ids, training). Any other .pt file in the copied bundle is left out,
+    so the bundle always has exactly one paired classifier. Returns out_dir.
+    Needs no keras: it only copies files and edits config.json.
+    """
+    import shutil
+
+    bundle_dir, out_dir, weights = Path(bundle_dir), Path(out_dir), Path(weights)
+    if not (bundle_dir / 'model.keras').is_file() or not (
+        bundle_dir / 'config.json'
+    ).is_file():
+        raise FileNotFoundError(
+            f'{bundle_dir} is not a model bundle (needs model.keras and config.json)'
+        )
+    if not weights.is_file():
+        raise FileNotFoundError(f'YOLO weights not found: {weights}')
+    if out_dir.resolve() == bundle_dir.resolve():
+        raise ValueError('Write the new bundle to a different folder.')
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise FileExistsError(f'{out_dir} already exists and is not empty')
+
+    cfg = load_config(bundle_dir / 'config.json')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for item in bundle_dir.iterdir():
+        if item.is_file() and item.suffix.lower() != '.pt':
+            shutil.copy2(item, out_dir / item.name)
+    shutil.copy2(weights, out_dir / weights.name)
+
+    comp = cfg.get('companions')
+    comp = dict(comp) if isinstance(comp, dict) else dict(DEFAULT_COMPANIONS)
+    comp['yolo'] = weights.name
+    cfg['companions'] = comp
+    info = dict(info or {})
+    cfg['yolo'] = {
+        'file': weights.name,
+        'task': 'classify',
+        'crop': {**DEFAULT_YOLO_CROP, **(info.get('crop') or {})},
+        **{k: v for k, v in info.items() if k != 'crop'},
+    }
+    save_config(out_dir / 'config.json', cfg)
+    return out_dir
 
 
 def save_config(path, cfg):
