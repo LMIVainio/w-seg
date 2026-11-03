@@ -172,6 +172,23 @@ class TrainWidget(QGroupBox):
         form.addRow('Gradient accumulation:', self.accum_spin)
         form.addRow('', self.effective_lbl)
         form.addRow(self.amp_cb)
+        self.aug_combo = QComboBox()
+        self.aug_combo.addItem('Mild (default)', 'mild')
+        self.aug_combo.addItem('Strong (mixed scanners / stainings)', 'strong')
+        self.aug_combo.setToolTip(
+            'Colour and sharpness variation added to the training images. '
+            'Strong adds gamma, stain strength, white balance, hue rotation, '
+            'blur and sharpening, so the model copes with slides that differ '
+            'in acquisition. No cost at prediction time.'
+        )
+        self.stem_cb = QCheckBox('Learnable input stem (new models, or adds it when continuing)')
+        self.stem_cb.setToolTip(
+            'A few small layers in front of the network that learn their own '
+            'input normalisation (about 1% extra cost). It starts as the '
+            'identity, so a continued model keeps working at step 0.'
+        )
+        form.addRow('Image augmentation:', self.aug_combo)
+        form.addRow(self.stem_cb)
         form.addRow('Evaluate every (steps):', self.eval_spin)
         layout.addLayout(form)
 
@@ -376,6 +393,8 @@ class TrainWidget(QGroupBox):
             else self.batch_spin.value(),
             'accum': self.accum_spin.value(),
             'mixed_precision': self.amp_cb.isChecked(),
+            'aug': self.aug_combo.currentData(),
+            'input_stem': 16 if self.stem_cb.isChecked() else 0,
             'eval_every': self.eval_spin.value(),
             'lr': self.lr_spin.value(),
             'warmup': warm,
@@ -412,7 +431,7 @@ class TrainWidget(QGroupBox):
         for w in (
             self.train_row, self.val_row, self.out_row, self.name_edit, self.base_combo,
             self.steps_spin, self.auto_batch_cb, self.eval_spin, self.adv_box,
-            self.accum_spin, self.amp_cb,
+            self.accum_spin, self.amp_cb, self.aug_combo, self.stem_cb,
         ):  # fmt: skip
             w.setEnabled(not running)
         self.geometry_cb.setEnabled(

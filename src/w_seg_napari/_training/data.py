@@ -6,7 +6,7 @@ Design:
      denoise, LAB + HSV-derived channels) and cached on disk as a [H, W, 6]
      float16 .npy. Training and inference share exactly this code.
   2. The Dataset then only crops from the cached array (memory-mapped),
-     resizes, flips/rotates, applies mild photometric augmentation to the
+     resizes, flips/rotates, applies photometric augmentation (mild or strong) to the
      IMAGE ONLY, and builds targets from the annotation planes.
   3. Affinity targets follow an arbitrary list of (dy, dx) offsets (see
      wseg_config.py), so ranges and directions are configuration, not code.
@@ -35,6 +35,7 @@ import kornia.color as K_color
 import numpy as np
 import tifffile
 import torch
+from scipy import ndimage as ndi
 from skimage.transform import resize
 from torch.utils.data import Dataset
 
@@ -255,6 +256,81 @@ def ensure_wall_map(tif_path, cache_dir):
 
 
 # =====================================================================
+# Photometric augmentation
+# =====================================================================
+AUG_STRENGTHS = ('mild', 'strong')
+
+
+def _rotate_pair(x, c0, angle):
+    """Rotate channel pair (c0, c0+1) by `angle` radians (a hue shift)."""
+    cos, sin = math.cos(angle), math.sin(angle)
+    u, v = x[..., c0].copy(), x[..., c0 + 1].copy()
+    x[..., c0] = u * cos - v * sin
+    x[..., c0 + 1] = u * sin + v * cos
+
+
+def photometric_jitter(x, rng, strength='mild'):
+    """
+    Image-only colour / contrast / sharpness jitter on a [T, T, 6] float32
+    array in the cached channel layout (L, a, b, s*cos h, s*sin h, V).
+    Changes x in place and returns it clipped to [-1, 1].
+
+    'mild'   small gain/bias on L and V, a small colour shift, a little noise.
+    'strong' also simulates what differs between slides and scanners:
+               gamma and contrast of L and V,
+               stain strength (saturation) and white balance (a, b shifts),
+               a hue rotation, applied consistently to (a, b) and to the
+               chroma pair so the two colour descriptions never disagree,
+               blur (out-of-focus) and unsharp masking (over-sharpened).
+    """
+    if strength not in AUG_STRENGTHS:
+        raise ValueError(
+            f'strength must be one of {AUG_STRENGTHS}, got {strength!r}'
+        )
+    if strength == 'mild':
+        gain = rng.uniform(0.85, 1.15)
+        bias = rng.uniform(-0.10, 0.10)
+        for c in (0, 5):  # luminance-like channels: L and V
+            x[..., c] = x[..., c] * gain + bias
+        x[..., 1:5] += rng.normal(0.0, 0.03, size=4).astype(np.float32)
+        x += rng.standard_normal(x.shape, dtype=np.float32) * rng.uniform(
+            0.0, 0.03
+        )
+        return np.clip(x, -1.0, 1.0)
+
+    # --- gamma, contrast and brightness of the luminance channels ----------
+    gamma = math.exp(rng.uniform(-0.4, 0.4))
+    gain = rng.uniform(0.7, 1.3)
+    bias = rng.uniform(-0.15, 0.15)
+    for c in (0, 5):
+        u = np.clip((x[..., c] + 1.0) * 0.5, 0.0, 1.0) ** gamma
+        x[..., c] = (u * 2.0 - 1.0) * gain + bias
+
+    # --- stain strength, hue rotation, white balance -----------------------
+    sat = rng.uniform(0.7, 1.3)
+    angle = rng.uniform(-0.25, 0.25)
+    x[..., 1:5] *= sat
+    _rotate_pair(x, 1, angle)  # (a, b)
+    _rotate_pair(x, 3, angle)  # (s cos h, s sin h)
+    x[..., 1:3] += rng.normal(0.0, 0.05, size=2).astype(np.float32)
+    x[..., 3:5] += rng.normal(0.0, 0.05, size=2).astype(np.float32)
+
+    # --- sharpness -----------------------------------------------------------
+    r = rng.random()
+    if r < 0.4:  # out of focus
+        sigma = rng.uniform(0.5, 1.8)
+        x = ndi.gaussian_filter(x, sigma=(sigma, sigma, 0))
+    elif r < 0.6:  # over-sharpened
+        blurred = ndi.gaussian_filter(x, sigma=(1.5, 1.5, 0))
+        x = x + rng.uniform(0.5, 1.5) * (x - blurred)
+
+    x += rng.standard_normal(x.shape, dtype=np.float32) * rng.uniform(
+        0.0, 0.05
+    )
+    return np.clip(x, -1.0, 1.0).astype(np.float32, copy=False)
+
+
+# =====================================================================
 # Dataset
 # =====================================================================
 class LargeTiffCellDataset(Dataset):
@@ -284,6 +360,7 @@ class LargeTiffCellDataset(Dataset):
         samples_per_epoch=1000,
         augment=True,
         photometric=True,
+        photometric_strength='mild',
         scale_range=(0.8, 1.2),
         seed=None,
         enable_lab=True,
@@ -316,6 +393,11 @@ class LargeTiffCellDataset(Dataset):
         self.samples_per_epoch = samples_per_epoch
         self.augment = augment
         self.photometric = photometric
+        if photometric_strength not in AUG_STRENGTHS:
+            raise ValueError(
+                f'photometric_strength must be one of {AUG_STRENGTHS}'
+            )
+        self.photometric_strength = photometric_strength
         self.scale_range = scale_range
         self.seed = seed
         self.w0, self.sigma = w0, sigma
@@ -396,17 +478,8 @@ class LargeTiffCellDataset(Dataset):
         return self._open[i]
 
     def _photometric(self, x, rng):
-        """Mild, image-only jitter on a [T, T, 6] float32 array (in place)."""
-        gain = rng.uniform(0.85, 1.15)
-        bias = rng.uniform(-0.10, 0.10)
-        for c in (0, 5):  # luminance-like channels: L and V
-            x[..., c] = x[..., c] * gain + bias
-        x[..., 1:5] += rng.normal(0.0, 0.03, size=4).astype(
-            np.float32
-        )  # colour shift
-        noise_sigma = rng.uniform(0.0, 0.03)
-        x += rng.standard_normal(x.shape, dtype=np.float32) * noise_sigma
-        return np.clip(x, -1.0, 1.0)
+        """Image-only jitter on a [T, T, 6] float32 array (see photometric_jitter)."""
+        return photometric_jitter(x, rng, self.photometric_strength)
 
     def __getitem__(self, idx):
         rng = (

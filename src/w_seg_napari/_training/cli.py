@@ -46,7 +46,11 @@ from w_seg_napari._model_config import (
 from w_seg_napari._training.autobatch import find_max_batch, safe_batch
 from w_seg_napari._training.data import LargeTiffCellDataset
 from w_seg_napari._training.losses import WeightedFocalTverskyLoss
-from w_seg_napari._training.model import Generator
+from w_seg_napari._training.model import (
+    Generator,
+    add_input_stem,
+    has_input_stem,
+)
 from w_seg_napari._training.steps import (
     compute_loss,
     forward,
@@ -151,6 +155,21 @@ def parse_args(argv=None):
         type=int,
         default=3,
         help='pixels from any wall that count as "deep inside a cell"',
+    )
+    p.add_argument(
+        '--aug',
+        choices=['mild', 'strong'],
+        default='mild',
+        help="photometric augmentation: 'strong' adds gamma, stain strength, "
+        'white balance, hue rotation, blur and sharpening (for data from '
+        'different scanners / stainings)',
+    )
+    p.add_argument(
+        '--input-stem',
+        type=int,
+        default=0,
+        help='width of a learnable input stem (0 = none, 16 is a good start); '
+        'starts as the identity, so --init-from weights stay valid',
     )
     p.add_argument(
         '--init-from',
@@ -381,6 +400,11 @@ def main(argv=None):
             geometry=geometry is not None,
         )
     )
+    if has_input_stem(model):
+        cfg['architecture'].setdefault('input_stem', True)
+    elif args.input_stem > 0:
+        model = add_input_stem(model, args.input_stem)
+        cfg['architecture']['input_stem'] = int(args.input_stem)
     ftl = WeightedFocalTverskyLoss()
     loss_kw = {
         'aff_floor': args.aff_floor,
@@ -413,6 +437,7 @@ def main(argv=None):
         args.train_dir,
         samples_per_epoch=args.batch_size * 100,
         scale_range=tuple(args.zoom),
+        photometric_strength=args.aug,
         **common,
     )
     val_ds = LargeTiffCellDataset(
@@ -563,6 +588,7 @@ def main(argv=None):
                 'loss': dict(loss_kw),
                 'mixed_precision': amp,
                 'accumulation_steps': args.accum,
+                'augmentation': args.aug,
                 'train_files': sorted(
                     p.name for p in Path(args.train_dir).glob('*.tif*')
                 ),

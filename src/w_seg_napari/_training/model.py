@@ -305,6 +305,43 @@ def Generator(
     )
 
 
+def add_input_stem(model, hidden=16):
+    """
+    Put a small learnable stem in front of a finished model and return the
+    wrapped model (same output dict).
+
+    stem(x) = x + conv1x1( act( conv3x3( act( conv1x1(x) ) ) ) )
+
+    The last conv starts at zero, so the wrapped model initially computes
+    exactly what `model` computed. Existing weights can therefore be kept
+    (--init-from) and the stem only learns what helps (re-balancing colour
+    channels, local contrast, a little sharpening). No normalisation layer is
+    used on purpose: statistics of a single patch would change from tile to
+    tile at inference and cause seams.
+    """
+    shape = model.input_shape[1:]
+    channels = shape[-1]
+    inputs = layers.Input(shape=shape)
+    h = layers.Conv2D(hidden, 1, kernel_initializer=INIT)(inputs)
+    h = act()(h)
+    h = layers.Conv2D(hidden, 3, padding='same', kernel_initializer=INIT)(h)
+    h = act()(h)
+    h = layers.Conv2D(
+        channels,
+        1,
+        kernel_initializer='zeros',
+        bias_initializer='zeros',
+        name='input_stem_out',
+    )(h)
+    x = layers.Add(name='input_stem_add')([inputs, h])
+    return keras.Model(inputs, model(x), name=f'{model.name}-stem')
+
+
+def has_input_stem(model):
+    """True when add_input_stem was applied (by layer name)."""
+    return any(l.name == 'input_stem_out' for l in model.layers)
+
+
 def compile_model(model, lr=2e-4):
     """Example compile: Dice+BCE on semantic maps, BCE on affinities."""
     losses = {

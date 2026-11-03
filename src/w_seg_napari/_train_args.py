@@ -46,6 +46,10 @@ def build_args(p):
     ):
         if p.get(key) is not None:
             args += [flag, str(p[key])]
+    if p.get('aug') in ('mild', 'strong'):
+        args += ['--aug', p['aug']]
+    if int(p.get('input_stem') or 0) > 0:
+        args += ['--input-stem', str(int(p['input_stem']))]
     if p.get('mixed_precision'):
         args.append('--mixed-precision')
     if int(p.get('accum') or 1) > 1:
