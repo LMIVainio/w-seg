@@ -22,6 +22,27 @@ def list_input_files(dirpath) -> list[str]:
     )
 
 
+def find_session_dir(dirpath) -> Path:
+    """Where the sessions are: the wseg_batch folder of an image folder, or the folder itself."""
+    folder = Path(dirpath)
+    sub = folder / OUTPUT_DIRNAME
+    if sub.is_dir() and any(sub.glob('*_session.h5')):
+        return sub
+    return folder
+
+
+def list_session_names(dirpath) -> list[str]:
+    """
+    Sessions of a folder as virtual image names ('a.h5' stands for
+    a_session.h5), so the same name rules (session_path, table_path) apply.
+    """
+    suffix = '_session.h5'
+    return sorted(
+        f'{f.name[: -len(suffix)]}.h5'
+        for f in find_session_dir(dirpath).glob(f'*{suffix}')
+    )
+
+
 def output_dir(dirpath) -> Path:
     """Results go into a sub folder, so the input folder stays clean."""
     return Path(dirpath) / OUTPUT_DIRNAME

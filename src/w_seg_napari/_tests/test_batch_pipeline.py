@@ -546,3 +546,94 @@ def test_image_is_not_done_when_a_selected_stage_has_no_result(
     assert not bp.is_done('a.tif', out, {'predict': True, 'gasp': True})
     assert not bp.is_done('a.tif', out, {'predict': True, 'export': True})
     assert not bp.is_done('b.tif', out, {'predict': True})
+
+
+# ------------------------------------------------------------ sessions as input
+def _session_run(tmp_path, monkeypatch, **stages):
+    sessions = _install_fakes(monkeypatch)
+    monkeypatch.setattr(bp, 'read_attrs', lambda path: {'source_file': 'a.tif'})
+    return sessions
+
+
+def test_session_names_stand_in_for_images(tmp_path):
+    from w_seg_napari._batch_io import find_session_dir, list_session_names
+
+    out = tmp_path / 'wseg_batch'
+    out.mkdir()
+    for n in ('a', 'b'):
+        (out / f'{n}_session.h5').write_text('x')
+    assert list_session_names(tmp_path) == ['a.h5', 'b.h5']
+    assert list_session_names(out) == ['a.h5', 'b.h5']  # the folder itself
+    assert find_session_dir(tmp_path) == out
+
+
+def test_sessions_mode_measures_without_the_image_file(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    monkeypatch.setattr(bp, 'read_attrs', lambda path: {'source_file': 'a.tif'})
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    (tmp_path / 'a.tif').unlink()  # only the session is left
+    key, labels = _with_correction(tmp_path, sessions)
+    CALLS.clear()
+    s = _morph_only()
+    s['input_mode'] = 'sessions'
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(['a.h5'], tmp_path, s, lambda: False)
+    )
+    assert n_ok == 1 and not failed
+    assert (CALLS[0][2] == labels).all()
+    table = pd.read_csv(tmp_path / 'wseg_batch' / 'a_morphology.csv')
+    assert list(table['source_file'].unique()) == ['a.tif']
+    assert list(table['labels_source'].unique()) == ['corrected']
+
+
+def test_predicting_a_session_keeps_the_corrections(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    monkeypatch.setattr(bp, 'read_attrs', lambda path: {})
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, _ = _with_correction(tmp_path, sessions)
+    s = _settings(superpixels=False, gasp=False)
+    s['morph_labels'] = 'corrected'
+    s['input_mode'] = 'sessions'
+    events, _ = _drain(bp.run_batch(['a.h5'], tmp_path, s, lambda: False))
+    assert bp.CORRECTED in sessions[key]
+    assert not [e for e in events if e[0] == 'note']
+
+
+def test_session_without_image_is_a_clear_error(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    monkeypatch.setattr(bp, 'read_attrs', lambda path: {})
+    out = tmp_path / 'wseg_batch'
+    out.mkdir()
+    (out / 'a_session.h5').write_text('x')
+    sessions[str(out / 'a_session.h5')] = {bp.CORRECTED: np.ones((4, 4), int)}
+    s = _morph_only()
+    s['input_mode'] = 'sessions'
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(['a.h5'], tmp_path, s, lambda: False)
+    )
+    assert n_ok == 0 and 'no image' in failed[0][1]
+
+
+def test_recomputing_labels_of_a_session_discards_corrections(
+    tmp_path, monkeypatch
+):
+    sessions = _install_fakes(monkeypatch)
+    monkeypatch.setattr(bp, 'read_attrs', lambda path: {})
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, _ = _with_correction(tmp_path, sessions)
+    s = _settings()
+    s['input_mode'] = 'sessions'
+    events, _ = _drain(bp.run_batch(['a.h5'], tmp_path, s, lambda: False))
+    assert bp.CORRECTED not in sessions[key]
+    assert any('discarded' in e[1] for e in events if e[0] == 'note')
+
+
+def test_base_name_keeps_dots_that_are_not_extensions():
+    from w_seg_napari._session_io import base_name
+
+    assert base_name('a.tif') == 'a'
+    assert base_name('sample 1.2') == 'sample 1.2'
+    assert base_name('x') == 'x'

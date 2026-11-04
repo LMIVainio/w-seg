@@ -126,3 +126,20 @@ def test_old_layer_export_is_recognised(tmp_path):
     assert sio.session_kind(path) == 'layers'
     (p,) = sio.read_layer_file(path)
     assert p['name'] == 'my layer' and p['blending'] == 'additive'
+
+
+def test_hand_made_session_holds_image_and_labels(tmp_path):
+    path = tmp_path / 'mine_session.h5'
+    img = np.zeros((12, 16, 3), np.uint8)
+    lab = np.ones((12, 16), np.int32)
+    sio.save_edits(path, corrected=lab, raw=img, source_name='mine')
+    store = sio.load_session(path)
+    assert set(store) == {'raw', sio.CORRECTED}
+    assert sio.read_attrs(path)['source_file'] == 'mine'
+    assert sio.session_kind(path) == 'session'
+    with pytest.raises(ValueError):
+        sio.save_edits(
+            tmp_path / 'x_session.h5',
+            corrected=np.ones((3, 3), np.int32),
+            raw=img,
+        )

@@ -26,15 +26,18 @@ from w_seg_napari._affinity import gather, layer_payloads
 from w_seg_napari._batch_io import (
     load_image,
     output_dir,
+    find_session_dir,
     session_path,
     table_path,
     to_model_input_range,
+    to_rgb,
 )
 from w_seg_napari._geometry_fields import geometry_payloads, masked_direction
 from w_seg_napari._session_io import (
     CORRECTED,
     has_dataset,
     load_session,
+    read_attrs,
     save_session,
 )
 
@@ -251,27 +254,41 @@ def process_image(image_path, settings: dict, is_cancelled):
         return ('sub', message, done / n_stages)
 
     sess_path = session_path(settings['out_dir'], name)
+    sessions_mode = settings.get('input_mode') == 'sessions'
+    all_labels = all(stages.get(s) for s in ('predict', 'superpixels', 'gasp'))
     store = {}
-    if (
-        not all(stages.get(s) for s in ('predict', 'superpixels', 'gasp'))
-        and sess_path.is_file()
-    ):
+    if sessions_mode or (not all_labels and sess_path.is_file()):
         store = load_session(sess_path)  # earlier results of skipped stages
     notes = []
+    recompute_labels = bool(stages.get('superpixels') or stages.get('gasp'))
     if (
         sess_path.is_file()
-        and any(stages.get(s) for s in ('predict', 'superpixels', 'gasp'))
+        and recompute_labels
         and has_dataset(sess_path, CORRECTED)
     ):
         notes.append(
             f'{name}: new labels were computed, so the corrected labels '
             'saved earlier in its session were discarded.'
         )
-    if any(stages.get(s) for s in ('predict', 'superpixels', 'gasp')):
+    if recompute_labels:
         store.pop(CORRECTED, None)
+    if any(stages.get(s) for s in ('predict', 'superpixels', 'gasp')):
         store.pop('error_map', None)  # belongs to the old labels
 
-    rgb = load_image(image_path)
+    source_name = name
+    if sessions_mode:
+        # the image lives in the session (a hand-made session has no predictions)
+        if 'raw' not in store:
+            raise ValueError('This session holds no image (raw).')
+        rgb = to_rgb(store['raw'])
+        if all_labels:
+            store = {}  # everything is recomputed from the image
+        try:
+            source_name = read_attrs(sess_path).get('source_file') or name
+        except (OSError, KeyError):
+            pass
+    else:
+        rgb = load_image(image_path)
     results = {'raw': rgb}
 
     # 1. Prediction ------------------------------------------------------
@@ -407,7 +424,7 @@ def process_image(image_path, settings: dict, is_cancelled):
             return None
         done += 1
         df = df.copy()
-        df.insert(0, 'source_file', name)
+        df.insert(0, 'source_file', source_name)
         df.insert(
             1,
             'labels_source',
@@ -462,7 +479,7 @@ def process_image(image_path, settings: dict, is_cancelled):
         sess_path,
         store,
         {
-            'source_file': name,
+            'source_file': source_name,
             'model_config_json': json.dumps(cfg),
             'fe_config_json': json.dumps(
                 settings['morph_params'], default=str
@@ -480,7 +497,10 @@ def process_image(image_path, settings: dict, is_cancelled):
 def run_batch(files, dirpath, settings: dict, is_cancelled):
     """Process the image files of a folder one after the other (see module doc)."""
     settings = dict(settings)
-    out = output_dir(dirpath)
+    if settings.get('input_mode') == 'sessions':
+        out = find_session_dir(dirpath)
+    else:
+        out = output_dir(dirpath)
     out.mkdir(parents=True, exist_ok=True)
     settings['out_dir'] = out
 

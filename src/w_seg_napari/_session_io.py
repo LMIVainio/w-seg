@@ -147,7 +147,22 @@ def save_session(path, arrays: dict, attrs: dict):
     )
 
 
-def save_edits(path, corrected=None, corrected_layer=None, extras=None):
+def base_name(source) -> str:
+    """Image name without its file extension ('a.tif' -> 'a', 'sample 1.2' stays)."""
+    from w_seg_napari._batch_io import VALID_EXTS
+
+    p = Path(str(source))
+    return p.stem if p.suffix.lower() in VALID_EXTS else p.name
+
+
+def save_edits(
+    path,
+    corrected=None,
+    corrected_layer=None,
+    extras=None,
+    raw=None,
+    source_name=None,
+):
     """
     Add what you did in napari to a session file.
 
@@ -155,16 +170,30 @@ def save_edits(path, corrected=None, corrected_layer=None, extras=None):
                 labels_corrected; the original labels stay untouched)
     extras      list of layer payloads (see layer_to_payload) that replace the
                 extra/ group; None leaves it as it is, [] clears it
+    raw         the image, for a session that is made by hand (no batch run
+                behind it); stored as `raw`, with source_name as source_file
+                so the batch can open it later
     Raises ValueError when the labels do not fit the image in the file.
     """
     arrays = {}
     attrs = {'edited': datetime.now().isoformat(timespec='seconds')}
+    if raw is not None:
+        arrays['raw'] = np.ascontiguousarray(raw)
+        if source_name:
+            attrs['source_file'] = str(source_name)
     if corrected is not None:
         corrected = np.asarray(corrected)
         if corrected.ndim != 2:
             raise ValueError('The corrected labels must be a 2D image.')
         path = Path(path)
-        if path.is_file():
+        if raw is not None and tuple(corrected.shape) != tuple(
+            np.shape(raw)[:2]
+        ):
+            raise ValueError(
+                f'The labels layer has shape {tuple(corrected.shape)} but '
+                f'the image layer has {tuple(np.shape(raw)[:2])}.'
+            )
+        if path.is_file() and raw is None:
             shape = _stored_shape(path)
             if shape is not None and tuple(corrected.shape) != shape:
                 raise ValueError(
@@ -237,7 +266,7 @@ def session_results(path):
     source = attrs.get('source_file') or Path(path).name.removesuffix(
         SESSION_SUFFIX
     )
-    base = Path(source).stem
+    base = base_name(source)
     results = {}
     if 'raw' in store:
         results['raw'] = store['raw']

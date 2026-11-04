@@ -20,9 +20,15 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from w_seg_napari._batch_io import list_input_files, output_dir
+from w_seg_napari._batch_io import (
+    find_session_dir,
+    list_input_files,
+    list_session_names,
+    output_dir,
+)
 from w_seg_napari import _session_io as sio
 from w_seg_napari._batch_pipeline import is_done, run_batch
+from w_seg_napari._session_io import CORRECTED, has_dataset
 
 
 class BatchTabWidget(QWidget):
@@ -64,11 +70,25 @@ class BatchTabWidget(QWidget):
         dir_btn_layout.addWidget(self.btn_select_dir)
         dir_btn_layout.addWidget(self.lbl_selected_dir, stretch=1)
 
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel('Input:'))
+        self.combo_input = QComboBox()
+        self.combo_input.addItem('Image files', 'images')
+        self.combo_input.addItem('Sessions (*_session.h5)', 'sessions')
+        self.combo_input.setToolTip(
+            'Sessions: process the sessions of an earlier run, or sessions '
+            'you saved by hand. The image is taken from the session, so the '
+            'original image files are not needed.'
+        )
+        self.combo_input.currentIndexChanged.connect(self._refresh_files)
+        mode_row.addWidget(self.combo_input, stretch=1)
+
         self.lbl_file_count = QLabel('Found: 0 compatible image files')
         self.lbl_output = QLabel('')
         self.lbl_output.setWordWrap(True)
 
         io_layout.addLayout(dir_btn_layout)
+        io_layout.addLayout(mode_row)
         io_layout.addWidget(self.lbl_file_count)
         io_layout.addWidget(self.lbl_output)
         group_io.setLayout(io_layout)
@@ -265,6 +285,15 @@ class BatchTabWidget(QWidget):
             'original batch labels stay in the file.'
         )
         lab_row.addWidget(self.combo_save_labels, stretch=1)
+        img_row = QHBoxLayout()
+        img_row.addWidget(QLabel('Image (new session):'))
+        self.combo_save_image = QComboBox()
+        self.combo_save_image.setToolTip(
+            'Only for a session made by hand, without a batch run behind it: '
+            'the image layer saved as the session image, so the batch can '
+            'open the session later (Input: Sessions).'
+        )
+        img_row.addWidget(self.combo_save_image, stretch=1)
         self.list_extra = QListWidget()
         self.list_extra.setMaximumHeight(110)
         self.list_extra.setToolTip(
@@ -273,6 +302,7 @@ class BatchTabWidget(QWidget):
         sess_layout.addLayout(sess_btns)
         sess_layout.addWidget(self.lbl_session)
         sess_layout.addLayout(lab_row)
+        sess_layout.addLayout(img_row)
         sess_layout.addWidget(QLabel('Also keep these layers:'))
         sess_layout.addWidget(self.list_extra)
         group_sess.setLayout(sess_layout)
@@ -301,11 +331,31 @@ class BatchTabWidget(QWidget):
         self.lbl_selected_dir.setText(dirpath)
         self.lbl_selected_dir.setStyleSheet('color: gray; font-style: normal;')
 
-        self.files = list_input_files(dirpath)
-        self.lbl_file_count.setText(
-            f'Found: {len(self.files)} compatible image file(s)'
-        )
-        self.lbl_output.setText(f'Results go to: {output_dir(dirpath)}')
+        self._refresh_files()
+
+    def _sessions_mode(self):
+        return self.combo_input.currentData() == 'sessions'
+
+    def _out_dir(self):
+        """Where the sessions and tables of this folder are (or will be)."""
+        if self._sessions_mode():
+            return find_session_dir(self.selected_dir)
+        return output_dir(self.selected_dir)
+
+    def _refresh_files(self, *_):
+        if not self.selected_dir:
+            return
+        if self._sessions_mode():
+            self.files = list_session_names(self.selected_dir)
+            self.lbl_file_count.setText(
+                f'Found: {len(self.files)} session file(s)'
+            )
+        else:
+            self.files = list_input_files(self.selected_dir)
+            self.lbl_file_count.setText(
+                f'Found: {len(self.files)} compatible image file(s)'
+            )
+        self.lbl_output.setText(f'Results go to: {self._out_dir()}')
         self.btn_start_batch.setEnabled(len(self.files) > 0)
         self.status_label.setText('Ready to start batch process.')
         self._update_done_count()
@@ -316,7 +366,7 @@ class BatchTabWidget(QWidget):
             self.lbl_done.setText('')
             return
         stages = self._batch_ui_settings()['stages']
-        out = output_dir(self.selected_dir)
+        out = self._out_dir()
         n = sum(is_done(f, out, stages) for f in self.files)
         self.lbl_done.setText(
             f'{n} of {len(self.files)} file(s) already processed '
@@ -392,6 +442,22 @@ class BatchTabWidget(QWidget):
             self.combo_save_labels.setCurrentText(pick)
         self.combo_save_labels.blockSignals(False)
 
+        images = [
+            la.name
+            for la in v.layers
+            if la._type_string == 'image' and not self._is_batch_layer(la.name)
+        ]
+        keep_img = self.combo_save_image.currentText()
+        self.combo_save_image.blockSignals(True)
+        self.combo_save_image.clear()
+        self.combo_save_image.addItem('(do not save an image)')
+        self.combo_save_image.addItems(images)
+        if keep_img in images:
+            self.combo_save_image.setCurrentText(keep_img)
+        elif images and not self.session:
+            self.combo_save_image.setCurrentText(images[0])
+        self.combo_save_image.blockSignals(False)
+
         ticked = {
             self.list_extra.item(i).text()
             for i in range(self.list_extra.count())
@@ -431,7 +497,7 @@ class BatchTabWidget(QWidget):
 
     def _on_open_session(self):
         start = (
-            str(output_dir(self.selected_dir)) if self.selected_dir else ''
+            str(self._out_dir()) if self.selected_dir else ''
         )
         path, _ = QFileDialog.getOpenFileName(
             self, 'Open session', start, 'HDF5 sessions (*.h5 *.hdf5)'
@@ -491,16 +557,24 @@ class BatchTabWidget(QWidget):
     def _on_save_session(self):
         v = self.viewer
         path = self.session['path'] if self.session else None
-        if path is None:
-            start = (
-                str(output_dir(self.selected_dir)) if self.selected_dir else ''
-            )
+        raw, source_name = None, None
+        if path is None:  # a session made by hand: the image goes in too
+            image_name = self.combo_save_image.currentText()
+            if image_name in v.layers:
+                layer = v.layers[image_name]
+                raw = layer.data[0] if layer.multiscale else layer.data
+                source_name = image_name
+            start = str(self._out_dir()) if self.selected_dir else ''
+            if source_name:
+                start = str(Path(start) / f'{source_name}_session.h5')
             chosen, _ = QFileDialog.getSaveFileName(
                 self, 'Save session', start, 'HDF5 sessions (*.h5)'
             )
             if not chosen:
                 return
             path = Path(chosen)
+            if not path.name.endswith(sio.SESSION_SUFFIX):
+                path = path.with_name(path.stem + sio.SESSION_SUFFIX)
         corrected, layer_name = None, None
         label_name = self.combo_save_labels.currentText()
         if label_name in v.layers:
@@ -514,11 +588,12 @@ class BatchTabWidget(QWidget):
                 item.checkState() == Qt.Checked
                 and name in v.layers
                 and name != label_name
+                and name != source_name  # the image is stored as raw
             ):
                 payload = sio.layer_to_payload(v.layers[name], order=i)
                 if payload is not None:
                     payloads.append(payload)
-        if corrected is None and not payloads:
+        if corrected is None and not payloads and raw is None:
             QMessageBox.information(
                 self,
                 'Nothing to save',
@@ -543,12 +618,17 @@ class BatchTabWidget(QWidget):
                 corrected_layer=layer_name,
                 # no ticked layers: keep the ones already in the file
                 extras=payloads or None,
+                raw=raw,
+                source_name=source_name,
             )
         except Exception as e:
             QMessageBox.warning(self, 'Cannot save session', f'{type(e).__name__}: {e}')
             return
         if self.session is None:
-            self.session = {'path': path, 'base': Path(path).stem.removesuffix('_session')}
+            self.session = {
+                'path': path,
+                'base': sio.base_name(source_name or path.stem.removesuffix('_session')),
+            }
         self.lbl_session.setText(
             f'Saved to {path.name}: '
             + (f'labels "{layer_name}"' if layer_name else 'no labels')
@@ -572,6 +652,7 @@ class BatchTabWidget(QWidget):
             },
             'render': self.chk_render_viewer.isChecked(),
             'skip_done': self.chk_skip_done.isChecked(),
+            'input_mode': self.combo_input.currentData(),
             'morph_labels': self.morphology_labels.currentData(),
             'morph_signal': self.morphology_signal.currentData(),
         }
@@ -579,12 +660,44 @@ class BatchTabWidget(QWidget):
     def _set_running(self, running: bool):
         """Locks everything except the cancel button while a batch runs."""
         self.btn_select_dir.setEnabled(not running)
+        self.combo_input.setEnabled(not running)
         self.group_stages.setEnabled(not running)
         self.group_sess.setEnabled(not running)
         self.btn_start_batch.setEnabled(not running and bool(self.files))
         self.btn_cancel.setEnabled(running)
         if hasattr(self.main_widget, 'set_batch_running'):
             self.main_widget.set_batch_running(running)
+
+    def _confirm_discard(self) -> bool:
+        """Warns when this run would throw away corrected labels."""
+        ui = self._batch_ui_settings()
+        stages = ui['stages']
+        if not (stages.get('superpixels') or stages.get('gasp')):
+            return True  # the labels are not recomputed
+        out = self._out_dir()
+        from w_seg_napari._batch_io import session_path
+
+        n = 0
+        for f in self.files:
+            if ui['skip_done'] and is_done(f, out, stages):
+                continue
+            sp = session_path(out, f)
+            try:
+                if sp.is_file() and has_dataset(sp, CORRECTED):
+                    n += 1
+            except OSError:
+                pass
+        if not n:
+            return True
+        answer = QMessageBox.question(
+            self,
+            'Corrected labels will be discarded',
+            f'{n} session(s) hold corrected labels. This run computes new '
+            'superpixel / GASP labels, which discards those corrections.\n\n'
+            'To keep them, switch off stages 2 and 3 (and choose "Corrected '
+            'labels" for the morphology). Continue anyway?',
+        )
+        return answer == QMessageBox.Yes
 
     def _on_start_batch(self):
         if not self.selected_dir or not self.files or self.worker is not None:
@@ -605,6 +718,9 @@ class BatchTabWidget(QWidget):
                 )
         except ValueError as e:
             QMessageBox.warning(self, 'Cannot start batch', str(e))
+            return
+
+        if not self._confirm_discard():
             return
 
         self.cancel_event.clear()
@@ -675,7 +791,7 @@ class BatchTabWidget(QWidget):
                 msg += f'\n... and {len(self.notes) - 8} more'
         QMessageBox.information(self, 'Batch Execution', msg)
         self.status_label.setText(
-            f'Results are in {Path(self.selected_dir) / "wseg_batch"}'
+            f'Results are in {self._out_dir()}'
         )
 
     def _on_error(self, exc):
