@@ -32,6 +32,7 @@ from w_seg_napari._batch_io import (
     to_model_input_range,
     to_rgb,
 )
+from w_seg_napari._batch_settings import save_settings as save_settings_file
 from w_seg_napari._geometry_fields import geometry_payloads, masked_direction
 from w_seg_napari._session_io import (
     CORRECTED,
@@ -503,6 +504,11 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
         out = output_dir(dirpath)
     out.mkdir(parents=True, exist_ok=True)
     settings['out_dir'] = out
+
+    # the settings come first, before any image is touched
+    if settings.get('save_settings') and settings.get('settings_doc'):
+        path = save_settings_file(out, settings['settings_doc'])
+        yield ('progress', 0, f'Settings saved to {path.name}')
 
     total = len(files)
     n_ok, failed = 0, []

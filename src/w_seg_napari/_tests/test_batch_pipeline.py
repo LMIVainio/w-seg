@@ -637,3 +637,32 @@ def test_base_name_keeps_dots_that_are_not_extensions():
     assert base_name('a.tif') == 'a'
     assert base_name('sample 1.2') == 'sample 1.2'
     assert base_name('x') == 'x'
+
+
+# ------------------------------------------------------------ settings file
+def test_settings_are_saved_before_the_first_image(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    seen = {}
+    real = bp.process_image
+
+    def spy(image_path, settings, is_cancelled):
+        seen['saved_first'] = (tmp_path / 'wseg_batch' / 'batch_settings.json').is_file()
+        return (yield from real(image_path, settings, is_cancelled))
+
+    monkeypatch.setattr(bp, 'process_image', spy)
+    s = _settings()
+    s['save_settings'] = True
+    s['settings_doc'] = {'format_version': 1, 'saved': 'x', 'stages': {}}
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    assert seen['saved_first'] is True
+    assert events[0][0] == 'progress' and 'batch_settings.json' in events[0][2]
+
+
+def test_settings_are_not_saved_unless_asked(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    s = _settings()
+    s['settings_doc'] = {'format_version': 1}
+    _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    assert not (tmp_path / 'wseg_batch' / 'batch_settings.json').exists()

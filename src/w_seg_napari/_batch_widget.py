@@ -27,6 +27,14 @@ from w_seg_napari._batch_io import (
     output_dir,
 )
 from w_seg_napari import _session_io as sio
+from w_seg_napari._batch_settings import (
+    FILENAME as SETTINGS_FILENAME,
+    apply_loaded,
+    describe,
+    load_settings,
+    model_differences,
+    settings_document,
+)
 from w_seg_napari._batch_pipeline import is_done, run_batch
 from w_seg_napari._session_io import CORRECTED, has_dataset
 
@@ -49,6 +57,7 @@ class BatchTabWidget(QWidget):
         self.failed = []
         self.notes = []
         self.n_skipped = 0
+        self.settings_file = None  # a settings file chosen with "Load..."
         self.session = None  # {'path': Path | None, 'base': str} once opened
 
         self._init_ui()
@@ -254,6 +263,40 @@ class BatchTabWidget(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
 
+        self.chk_save_settings = QCheckBox(
+            f'Save the settings ({SETTINGS_FILENAME}) with the results, '
+            'before processing'
+        )
+        self.chk_save_settings.setChecked(True)
+        self.chk_save_settings.setToolTip(
+            'Written first, before the first image. An older file that '
+            'differs is kept as batch_settings_<date>.json.'
+        )
+        self.chk_use_saved = QCheckBox(
+            'Use the saved settings of the results folder, if it has them'
+        )
+        self.chk_use_saved.setToolTip(
+            'Continue a batch with exactly the settings of the earlier run '
+            '(Superpixel, GASP and Morphology tabs, patch size, stages).\n'
+            'The loaded model and the cell classifier stay as they are.'
+        )
+        self.chk_use_saved.toggled.connect(self._update_settings_label)
+        set_row = QHBoxLayout()
+        self.btn_load_settings = QPushButton('Load settings file...')
+        self.btn_load_settings.clicked.connect(self._on_load_settings_file)
+        self.btn_clear_settings = QPushButton('Clear')
+        self.btn_clear_settings.setEnabled(False)
+        self.btn_clear_settings.clicked.connect(self._on_clear_settings_file)
+        set_row.addWidget(self.btn_load_settings)
+        set_row.addWidget(self.btn_clear_settings)
+        self.lbl_settings = QLabel('Settings: the current tabs.')
+        self.lbl_settings.setWordWrap(True)
+        self.lbl_settings.setStyleSheet('color: gray;')
+
+        exec_layout.addWidget(self.chk_save_settings)
+        exec_layout.addWidget(self.chk_use_saved)
+        exec_layout.addLayout(set_row)
+        exec_layout.addWidget(self.lbl_settings)
         exec_layout.addLayout(btn_layout)
         exec_layout.addWidget(self.status_label)
         exec_layout.addWidget(self.progress_bar)
@@ -359,6 +402,84 @@ class BatchTabWidget(QWidget):
         self.btn_start_batch.setEnabled(len(self.files) > 0)
         self.status_label.setText('Ready to start batch process.')
         self._update_done_count()
+        self._update_settings_label()
+
+    # --------------------------------------------------------------------------
+    # Settings file
+    # --------------------------------------------------------------------------
+    def _folder_settings_path(self):
+        if not self.selected_dir:
+            return None
+        path = self._out_dir() / SETTINGS_FILENAME
+        return path if path.is_file() else None
+
+    def _settings_source(self):
+        """(path or None, is it the results folder's own file)."""
+        if self.settings_file:
+            return Path(self.settings_file), False
+        folder = self._folder_settings_path()
+        if self.chk_use_saved.isChecked() and folder:
+            return folder, True
+        return None, False
+
+    def _update_settings_label(self, *_):
+        src, _own = self._settings_source()
+        if src is None:
+            note = ''
+            if self.chk_use_saved.isChecked():
+                note = ' The results folder has no saved settings yet.'
+            self.lbl_settings.setText(f'Settings: the current tabs.{note}')
+            return
+        try:
+            text = describe(load_settings(src))
+        except ValueError as e:
+            text = str(e)
+        self.lbl_settings.setText(f'Settings from {src.name}: {text}')
+
+    def _on_load_settings_file(self):
+        start = str(self._out_dir()) if self.selected_dir else ''
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Batch settings', start, 'Settings (*.json)'
+        )
+        if not path:
+            return
+        try:
+            load_settings(path)
+        except ValueError as e:
+            QMessageBox.warning(self, 'Cannot use this file', str(e))
+            return
+        self.settings_file = path
+        self.btn_clear_settings.setEnabled(True)
+        self._update_settings_label()
+
+    def _on_clear_settings_file(self):
+        self.settings_file = None
+        self.btn_clear_settings.setEnabled(False)
+        self._update_settings_label()
+
+    def _apply_doc_to_ui(self, doc):
+        """Shows the stages / choices of a settings file in this tab."""
+        st = doc['stages']
+        for key, chk in (
+            ('predict', self.chk_predict),
+            ('superpixels', self.chk_superpixels),
+            ('gasp', self.chk_gasp),
+            ('morphology', self.chk_morphology),
+            ('classification', self.chk_classification),
+            ('export', self.chk_export_table),
+        ):
+            chk.setChecked(bool(st.get(key)))
+        for combo, key in (
+            (self.morphology_labels, 'morph_labels'),
+            (self.morphology_signal, 'morph_signal'),
+        ):
+            i = combo.findData(doc[key])
+            if i >= 0:
+                combo.setCurrentIndex(i)
+        path = doc.get('error_model')
+        self.chk_errors.setChecked(bool(path))
+        self.error_model_path = path or ''
+        self.lbl_error_model.setText(Path(path).name if path else 'No model selected.')
 
     def _update_done_count(self, *_):
         """Shows how many files a run with the skip option would leave out."""
@@ -662,6 +783,12 @@ class BatchTabWidget(QWidget):
         self.btn_select_dir.setEnabled(not running)
         self.combo_input.setEnabled(not running)
         self.group_stages.setEnabled(not running)
+        for w in (
+            self.chk_save_settings,
+            self.chk_use_saved,
+            self.btn_load_settings,
+        ):
+            w.setEnabled(not running)
         self.group_sess.setEnabled(not running)
         self.btn_start_batch.setEnabled(not running and bool(self.files))
         self.btn_cancel.setEnabled(running)
@@ -704,10 +831,28 @@ class BatchTabWidget(QWidget):
             return
 
         try:
+            doc = None
+            src, own_file = self._settings_source()
+            if src is not None:
+                doc = load_settings(src)
+                self._apply_doc_to_ui(doc)
             # Copies the settings of tabs 1 and 4 on the main thread
             settings = self.main_widget.collect_batch_settings(
                 self._batch_ui_settings()
             )
+            info = self.main_widget.get_active_models_info()
+            if doc is not None:
+                diffs = model_differences(
+                    doc, info.get('model_name'), settings.get('model_cfg')
+                )
+                if diffs and QMessageBox.question(
+                    self,
+                    'Different model',
+                    f'The settings in {src.name} were made with another '
+                    'model:\n- ' + '\n- '.join(diffs) + '\n\nContinue anyway?',
+                ) != QMessageBox.Yes:
+                    return
+                settings = apply_loaded(settings, doc)
             if self.chk_errors.isChecked() and self.chk_morphology.isChecked():
                 if not self.error_model_path:
                     raise ValueError('Choose an error model, or switch the flagging off.')
@@ -716,7 +861,21 @@ class BatchTabWidget(QWidget):
                 settings['error_bundle'] = load_error_model(
                     self.error_model_path
                 )
-        except ValueError as e:
+            # the file that goes with the results (built now, so that a value
+            # that cannot be saved is found before the run starts)
+            settings['settings_doc'] = settings_document(
+                settings,
+                model_name=info.get('model_name', ''),
+                classifier=info.get('classifier_type', ''),
+                error_model_path=(
+                    self.error_model_path if settings.get('error_bundle') else None
+                ),
+            )
+            # the folder's own file is already what will be used
+            settings['save_settings'] = self.chk_save_settings.isChecked() and not (
+                doc is not None and own_file
+            )
+        except (ValueError, TypeError) as e:
             QMessageBox.warning(self, 'Cannot start batch', str(e))
             return
 
