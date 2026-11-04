@@ -10,6 +10,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from w_seg_napari._batch_pipeline import describe_seed_source
+from w_seg_napari._model_config import has_geometry
 from w_seg_napari._train_tab_widget import Tab6Train
 from w_seg_napari._widget_tabs import (
     Tab1Pipeline,
@@ -18,8 +20,6 @@ from w_seg_napari._widget_tabs import (
     Tab4Analysis,
     Tab5Batch,
 )
-from w_seg_napari._batch_pipeline import describe_seed_source
-from w_seg_napari._model_config import has_geometry
 from w_seg_napari._wsegutils import get_model_config
 
 

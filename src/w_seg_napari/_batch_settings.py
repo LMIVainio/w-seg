@@ -111,10 +111,9 @@ def save_settings(out_dir, doc) -> Path:
         if old is not None and _same(old, doc):
             return path  # nothing changed: keep the original date
         stamp = str(old.get('saved', '') if old else '')
-        stamp = (
-            stamp.replace(':', '').replace('-', '').replace('T', '-')
-            or datetime.now().strftime('%Y%m%d-%H%M%S')
-        )
+        stamp = stamp.replace(':', '').replace('-', '').replace(
+            'T', '-'
+        ) or datetime.now().strftime('%Y%m%d-%H%M%S')
         archive = out_dir / f'batch_settings_{stamp}.json'
         n = 2
         while archive.exists():
@@ -147,7 +146,9 @@ def load_settings(path) -> dict:
     if missing:
         raise ValueError(f'{path.name} lacks: {", ".join(missing)}.')
     if not isinstance(doc['stages'], dict):
-        raise ValueError(f'{path.name}: "stages" must be a table of on/off values.')
+        raise ValueError(
+            f'{path.name}: "stages" must be a table of on/off values.'
+        )
     return doc
 
 
@@ -164,14 +165,18 @@ def model_differences(doc, model_name, model_cfg) -> list[str]:
     saved = doc.get('model') or {}
     diffs = []
     if saved.get('name') and model_name and saved['name'] != model_name:
-        diffs.append(f'weights: "{saved["name"]}" saved, "{model_name}" loaded')
+        diffs.append(
+            f'weights: "{saved["name"]}" saved, "{model_name}" loaded'
+        )
     cfg = saved.get('config')
     if cfg is not None and model_cfg is not None:
         norm = lambda x: json.dumps(  # noqa: E731
             json.loads(json.dumps(x, default=_default)), sort_keys=True
         )
         if norm(cfg) != norm(model_cfg):
-            diffs.append('the model configuration (outputs / preprocessing) differs')
+            diffs.append(
+                'the model configuration (outputs / preprocessing) differs'
+            )
     return diffs
 
 

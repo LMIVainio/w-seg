@@ -36,7 +36,9 @@ class FakeLayer:
         self.translate = (0.0, 0.0)
         self.visible = True
         self.blending = types.SimpleNamespace(value='additive')
-        self.colormap = types.SimpleNamespace(name='gray', color_dict=kw.get('colors'))
+        self.colormap = types.SimpleNamespace(
+            name='gray', color_dict=kw.get('colors')
+        )
         self.rgb = False
         self.shape_type = ['polygon'] * len(data) if kind == 'shapes' else []
 
@@ -80,7 +82,9 @@ def test_wrong_shape_is_refused_and_file_untouched(tmp_path):
 def test_extra_layers_round_trip(tmp_path):
     path = _make(tmp_path)
     layer = FakeLayer(
-        'labels', 'classes', np.arange(12 * 16, dtype=np.int32).reshape(12, 16),
+        'labels',
+        'classes',
+        np.arange(12 * 16, dtype=np.int32).reshape(12, 16),
         colors={1: [1.0, 0.0, 0.0, 1.0], None: [0, 0, 0, 0]},
     )
     shapes = FakeLayer('shapes', 'rois', [np.array([[0, 0], [0, 4], [4, 4]])])

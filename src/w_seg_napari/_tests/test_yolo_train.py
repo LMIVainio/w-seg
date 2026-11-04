@@ -65,21 +65,46 @@ def _dataset(tmp_path):
 
 def _lines(capsys):
     out = capsys.readouterr().out.splitlines()
-    return [json.loads(l[2:]) for l in out if l.startswith('@@')]
+    return [json.loads(ln[2:]) for ln in out if ln.startswith('@@')]
 
 
 def test_train_writes_result_and_progress(tmp_path, capsys, fake_ultralytics):
     ds = _dataset(tmp_path)
     info = tmp_path / 'info.json'
-    info.write_text(json.dumps({
-        'crop': {'context_factor': 2.0}, 'split_mode': 'by image',
-        'val_images': ['b'], 'folders': {'1': '01_a', '2': '02_b'},
-        'counts': {'train': {'01_a': 5}, 'val': {'01_a': 2}}, 'n_cells': 7,
-    }))
-    yolo.main(['--dataset', str(ds), '--out-root', str(tmp_path / 'out'),
-               '--name', 'tis', '--device', 'cpu', '--info-json', str(info)])
+    info.write_text(
+        json.dumps(
+            {
+                'crop': {'context_factor': 2.0},
+                'split_mode': 'by image',
+                'val_images': ['b'],
+                'folders': {'1': '01_a', '2': '02_b'},
+                'counts': {'train': {'01_a': 5}, 'val': {'01_a': 2}},
+                'n_cells': 7,
+            }
+        )
+    )
+    yolo.main(
+        [
+            '--dataset',
+            str(ds),
+            '--out-root',
+            str(tmp_path / 'out'),
+            '--name',
+            'tis',
+            '--device',
+            'cpu',
+            '--info-json',
+            str(info),
+        ]
+    )
     ev = _lines(capsys)
-    assert [e['event'] for e in ev] == ['start', 'progress', 'progress', 'progress', 'done']
+    assert [e['event'] for e in ev] == [
+        'start',
+        'progress',
+        'progress',
+        'progress',
+        'done',
+    ]
     assert ev[2]['best_top1'] == 0.8 and ev[3]['best_top1'] == 0.8
     out = tmp_path / 'out' / 'tis'
     assert (out / 'tis.pt').read_bytes() == b'best'
@@ -90,17 +115,39 @@ def test_train_writes_result_and_progress(tmp_path, capsys, fake_ultralytics):
     assert res['dataset']['split_mode'] == 'by image'
     assert (out / 'results.csv').is_file()
     # a second run with the same name does not overwrite the first
-    yolo.main(['--dataset', str(ds), '--out-root', str(tmp_path / 'out'),
-               '--name', 'tis', '--device', 'cpu'])
+    yolo.main(
+        [
+            '--dataset',
+            str(ds),
+            '--out-root',
+            str(tmp_path / 'out'),
+            '--name',
+            'tis',
+            '--device',
+            'cpu',
+        ]
+    )
     assert (tmp_path / 'out' / 'tis_2' / 'tis.pt').is_file()
 
 
-def test_stop_file_ends_after_current_epoch(tmp_path, capsys, fake_ultralytics):
+def test_stop_file_ends_after_current_epoch(
+    tmp_path, capsys, fake_ultralytics
+):
     ds = _dataset(tmp_path)
     stop = tmp_path / 'stop'
     stop.write_text('x')
-    yolo.main(['--dataset', str(ds), '--out-root', str(tmp_path / 'out'),
-               '--device', 'cpu', '--stop-file', str(stop)])
+    yolo.main(
+        [
+            '--dataset',
+            str(ds),
+            '--out-root',
+            str(tmp_path / 'out'),
+            '--device',
+            'cpu',
+            '--stop-file',
+            str(stop),
+        ]
+    )
     ev = _lines(capsys)
     assert [e['event'] for e in ev].count('progress') == 1
 
@@ -111,9 +158,22 @@ def test_attach_to_bundle(tmp_path, capsys, fake_ultralytics):
     src.mkdir()
     (src / 'model.keras').write_bytes(b'm')
     save_config(src / 'config.json', make_config(name='m'))
-    yolo.main(['--dataset', str(ds), '--out-root', str(tmp_path / 'out'),
-               '--name', 'tis', '--device', 'cpu', '--attach-to', str(src),
-               '--out-bundle', str(tmp_path / 'new_bundle')])
+    yolo.main(
+        [
+            '--dataset',
+            str(ds),
+            '--out-root',
+            str(tmp_path / 'out'),
+            '--name',
+            'tis',
+            '--device',
+            'cpu',
+            '--attach-to',
+            str(src),
+            '--out-bundle',
+            str(tmp_path / 'new_bundle'),
+        ]
+    )
     done = _lines(capsys)[-1]
     assert done['bundle'] == str(tmp_path / 'new_bundle')
     cfg = load_config(tmp_path / 'new_bundle' / 'config.json')
@@ -126,4 +186,6 @@ def test_missing_dataset_and_args(tmp_path, fake_ultralytics):
     with pytest.raises(FileNotFoundError):
         yolo.main(['--dataset', str(tmp_path), '--out-root', str(tmp_path)])
     with pytest.raises(SystemExit):
-        yolo.parse_args(['--dataset', 'a', '--out-root', 'b', '--attach-to', 'c'])
+        yolo.parse_args(
+            ['--dataset', 'a', '--out-root', 'b', '--attach-to', 'c']
+        )

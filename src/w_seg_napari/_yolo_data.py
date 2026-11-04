@@ -146,7 +146,11 @@ def split_cells(df, val_fraction=0.3, seed=0):
 
 # ------------------------------------------------------------------ crops
 def _to_uint8_rgb(crop):
-    a = crop.detach().cpu().numpy() if hasattr(crop, 'detach') else np.asarray(crop)
+    a = (
+        crop.detach().cpu().numpy()
+        if hasattr(crop, 'detach')
+        else np.asarray(crop)
+    )
     if a.ndim == 3 and a.shape[0] in (1, 3):  # [C, H, W] -> [H, W, C]
         a = np.moveaxis(a, 0, -1)
     if a.shape[-1] == 1:
@@ -208,7 +212,9 @@ def build_dataset(
         tables[s['name']] = df
         counts[s['name']] = df['class_id'].value_counts().to_dict()
         if df.empty:
-            warnings.append(f'{s["name"]}: no annotated cells of the chosen classes')
+            warnings.append(
+                f'{s["name"]}: no annotated cells of the chosen classes'
+            )
 
     n_total = sum(len(d) for d in tables.values())
     if n_total == 0:
@@ -233,8 +239,10 @@ def build_dataset(
                 'neighbouring cells overlap, so validation accuracy will '
                 'look optimistic. Use two or more images for an honest value.'
             )
-        for name, df in tables.items():
-            df['split'] = np.where(split_cells(df, val_fraction, seed), 'val', 'train')
+        for df in tables.values():
+            df['split'] = np.where(
+                split_cells(df, val_fraction, seed), 'val', 'train'
+            )
 
     out_dir = Path(out_dir)
     for split in ('train', 'val'):
@@ -247,7 +255,12 @@ def build_dataset(
         df = tables[s['name']]
         for r in df.to_dict('records'):
             tensor = crop_fn(
-                bbox=(int(r['bbox-0']), int(r['bbox-1']), int(r['bbox-2']), int(r['bbox-3'])),
+                bbox=(
+                    int(r['bbox-0']),
+                    int(r['bbox-1']),
+                    int(r['bbox-2']),
+                    int(r['bbox-3']),
+                ),
                 image_np=s['image'],
                 centroids=(round(r['centroid-0']), round(r['centroid-1'])),
                 axis_l=round(r['minor_axis_length']),
@@ -257,10 +270,16 @@ def build_dataset(
                 max_crop_size=crop['max_crop_size'],
             )
             folder = folders[int(r['class_id'])]
-            path = out_dir / r['split'] / folder / f'{safe_name(s["name"])}_{int(r["label_id"])}.png'
+            path = (
+                out_dir
+                / r['split']
+                / folder
+                / f'{safe_name(s["name"])}_{int(r["label_id"])}.png'
+            )
             Image.fromarray(_to_uint8_rgb(tensor)).save(path)
             summary_counts[r['split']][folders[int(r['class_id'])]] = (
-                summary_counts[r['split']].get(folders[int(r['class_id'])], 0) + 1
+                summary_counts[r['split']].get(folders[int(r['class_id'])], 0)
+                + 1
             )
             done += 1
             if progress is not None and done % 25 == 0:

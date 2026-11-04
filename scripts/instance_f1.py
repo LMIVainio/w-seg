@@ -61,7 +61,9 @@ def main(argv=None):
         store = load_session(path)
         name = path.name.removesuffix('_session.h5')
         if CORRECTED not in store or key not in store:
-            print(f'skipped {name}: no {CORRECTED if CORRECTED not in store else key}')
+            print(
+                f'skipped {name}: no {CORRECTED if CORRECTED not in store else key}'
+            )
             continue
         scores, cells = evaluate(store[key], store[CORRECTED], THRESHOLDS)
         rows.append(summary_row(name, scores, cells))

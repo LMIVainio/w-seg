@@ -39,12 +39,12 @@ from skimage.segmentation import (
     relabel_sequential,
 )
 
-from w_seg_napari._model_config import DEFAULT_YOLO_CROP
 from w_seg_napari._geometry import (
     label_frame_to_image_pixels,
     spatial_shape,
     world_to_data,
 )
+from w_seg_napari._model_config import DEFAULT_YOLO_CROP
 from w_seg_napari._wsegutils import (
     apply_feature_colormap,
     build_cell_contact_graph,

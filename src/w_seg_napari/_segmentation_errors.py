@@ -36,8 +36,8 @@ import numpy as np
 import pandas as pd
 from scipy import ndimage as ndi
 from skimage.measure import regionprops
-from skimage.segmentation import expand_labels
 from skimage.morphology import h_maxima
+from skimage.segmentation import expand_labels
 
 from w_seg_napari._instance_metrics import match, overlaps
 
@@ -94,7 +94,9 @@ def label_predicted_cells(pred, ref, threshold=0.5, piece=0.2):
         hits = by_pred.get(p, [])
         covered = sum(n for _r, n in hits)
         # corrected cells that lie mostly inside this cell: it is their union
-        inside = [r for r, n in hits if n / ref_area[r] >= 0.5 and n / area >= 0.05]
+        inside = [
+            r for r, n in hits if n / ref_area[r] >= 0.5 and n / area >= 0.05
+        ]
         big = [r for r, n in hits if n / area >= piece]
         r_best, n_best = max(hits, key=lambda h: h[1], default=(0, 0))
         if len(inside) >= 2:
@@ -154,7 +156,9 @@ def cell_features(labels, wall, pixel_size=1.0):
     labels = np.asarray(labels)
     wall = np.asarray(wall, np.float32)
     if labels.shape != wall.shape or labels.ndim != 2:
-        raise ValueError('labels and wall must be 2D images of the same shape.')
+        raise ValueError(
+            'labels and wall must be 2D images of the same shape.'
+        )
     px = float(pixel_size or 1.0)
     h, w = labels.shape
     rows = {}
@@ -177,7 +181,9 @@ def cell_features(labels, wall, pixel_size=1.0):
             'solidity': rp.solidity,
             'extent': rp.extent,
             'eccentricity': rp.eccentricity,
-            'circularity': 4 * np.pi * rp.area / perim**2 if perim > 0 else 0.0,
+            'circularity': 4 * np.pi * rp.area / perim**2
+            if perim > 0
+            else 0.0,
             'aspect': (
                 minor / major if (major := _axis(rp, 'major')) > 0 else 1.0
             )
@@ -190,7 +196,9 @@ def cell_features(labels, wall, pixel_size=1.0):
                 float(np.percentile(inner, 95)) if inner.size else np.nan
             ),
             'inner_wall_max': float(inner.max()) if inner.size else np.nan,
-            'border_wall_mean': float(border.mean()) if border.size else np.nan,
+            'border_wall_mean': float(border.mean())
+            if border.size
+            else np.nan,
             'border_wall_p10': (
                 float(np.percentile(border, 10)) if border.size else np.nan
             ),
@@ -211,25 +219,34 @@ def cell_features(labels, wall, pixel_size=1.0):
     # neighbours: strength and length of the shared borders
     contacts = _contacts(labels, wall)
     nb = {}
-    for a, b, wl, n in contacts[['a', 'b', 'wall', 'n']].itertuples(index=False):
+    for a, b, wl, n in contacts[['a', 'b', 'wall', 'n']].itertuples(
+        index=False
+    ):
         nb.setdefault(int(a), []).append((int(b), float(wl), int(n)))
         nb.setdefault(int(b), []).append((int(a), float(wl), int(n)))
     area = df['_area']
-    cols = {k: [] for k in (
-        'n_neighbours', 'contact_wall_min', 'contact_wall_mean',
-        'weakest_contact_um', 'weakest_nb_area_ratio', 'area_rel_neighbours',
-    )}
+    cols = {
+        k: []
+        for k in (
+            'n_neighbours',
+            'contact_wall_min',
+            'contact_wall_mean',
+            'weakest_contact_um',
+            'weakest_nb_area_ratio',
+            'area_rel_neighbours',
+        )
+    }
     for lab in df.index:
         lst = nb.get(int(lab), [])
         cols['n_neighbours'].append(len(lst))
         if lst:
             weakest = min(lst, key=lambda t: t[1])
             cols['contact_wall_min'].append(weakest[1])
-            cols['contact_wall_mean'].append(float(np.mean([t[1] for t in lst])))
-            cols['weakest_contact_um'].append(weakest[2] * px)
-            cols['weakest_nb_area_ratio'].append(
-                area[lab] / area[weakest[0]]
+            cols['contact_wall_mean'].append(
+                float(np.mean([t[1] for t in lst]))
             )
+            cols['weakest_contact_um'].append(weakest[2] * px)
+            cols['weakest_nb_area_ratio'].append(area[lab] / area[weakest[0]])
             cols['area_rel_neighbours'].append(
                 area[lab] / float(np.median([area[t[0]] for t in lst]))
             )
@@ -256,11 +273,18 @@ def table_from_session(path, pred_key='gasp_labels'):
     )
 
     store = load_session(path)
-    if CORRECTED not in store or pred_key not in store or 'pred_sem' not in store:
+    if (
+        CORRECTED not in store
+        or pred_key not in store
+        or 'pred_sem' not in store
+    ):
         return None
     attrs = read_attrs(path)
     try:
-        px = float(json.loads(attrs.get('fe_config_json', '{}')).get('pixel_spacing') or 1.0)
+        px = float(
+            json.loads(attrs.get('fe_config_json', '{}')).get('pixel_spacing')
+            or 1.0
+        )
     except (ValueError, TypeError):
         px = 1.0
     pred = store[pred_key]
@@ -324,10 +348,14 @@ def train_error_model(table, n_splits=5, seed=0):
     slides = t['slide'].to_numpy()
     n_slides = len(np.unique(slides))
     if n_slides >= 2:
-        folds = GroupKFold(n_splits=min(n_splits, n_slides)).split(X, y_bad, slides)
+        folds = GroupKFold(n_splits=min(n_splits, n_slides)).split(
+            X, y_bad, slides
+        )
         grouping = 'slides'
     else:
-        folds = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed).split(X, y_bad)
+        folds = StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=seed
+        ).split(X, y_bad)
         grouping = 'cells (only one slide: optimistic)'
     oof = np.full(len(t), np.nan)
     oof_rf = np.full(len(t), np.nan)
@@ -337,8 +365,11 @@ def train_error_model(table, n_splits=5, seed=0):
         m = _hgb(seed).fit(X.iloc[tr], y[tr])
         oof[te] = _p_error(m, X.iloc[te])
         rf = RandomForestClassifier(
-            300, min_samples_leaf=3, class_weight='balanced_subsample',
-            random_state=seed, n_jobs=-1,
+            300,
+            min_samples_leaf=3,
+            class_weight='balanced_subsample',
+            random_state=seed,
+            n_jobs=-1,
         ).fit(X.iloc[tr].fillna(-1), y[tr])
         oof_rf[te] = _p_error(rf, X.iloc[te].fillna(-1))
     seen = ~np.isnan(oof)
@@ -352,7 +383,9 @@ def train_error_model(table, n_splits=5, seed=0):
         'n_cells': int(len(t)),
         'n_wrong': int(y_bad.sum()),
         'wrong_share': float(y_bad.mean()),
-        'average_precision': float(average_precision_score(y_bad[seen], oof[seen])),
+        'average_precision': float(
+            average_precision_score(y_bad[seen], oof[seen])
+        ),
         'average_precision_random_forest': float(
             average_precision_score(y_bad[seen], oof_rf[seen])
         ),
@@ -362,7 +395,9 @@ def train_error_model(table, n_splits=5, seed=0):
         'chance_level': float(y_bad[seen].mean()),
         'threshold': thr,
         'recall_at_threshold': float(flagged[y_bad[seen] == 1].mean()),
-        'precision_at_threshold': float(y_bad[seen][flagged].mean()) if flagged.any() else 0.0,
+        'precision_at_threshold': float(y_bad[seen][flagged].mean())
+        if flagged.any()
+        else 0.0,
         'flagged_share': float(flagged.mean()),
     }
     final = _hgb(seed).fit(X, y)
@@ -392,7 +427,9 @@ def load_error_model(path):
     except Exception as e:  # unreadable or not a joblib file
         raise ValueError(f'Cannot read the error model {path}: {e}') from e
     if not isinstance(bundle, dict) or bundle.get('version') != MODEL_VERSION:
-        raise ValueError('This is not a w-seg error model (or a different version).')
+        raise ValueError(
+            'This is not a w-seg error model (or a different version).'
+        )
     missing = [f for f in bundle['features'] if f not in FEATURES]
     if missing:
         raise ValueError(f'The error model needs unknown features: {missing}')
@@ -402,7 +439,9 @@ def load_error_model(path):
 def score_cells(bundle, feats):
     """DataFrame label_id, p_error, error_type, flagged for a features table."""
     if feats.empty:
-        return pd.DataFrame(columns=['label_id', 'p_error', 'error_type', 'flagged'])
+        return pd.DataFrame(
+            columns=['label_id', 'p_error', 'error_type', 'flagged']
+        )
     model = bundle['model']
     X = feats.reindex(columns=bundle['features'])
     proba = model.predict_proba(X)
@@ -427,7 +466,9 @@ def error_map(labels, scores):
     """Float image: every cell filled with its p_error (0 on the background)."""
     labels = np.asarray(labels)
     lut = np.zeros(int(labels.max()) + 1, np.float32)
-    lut[scores['label_id'].to_numpy().astype(int)] = scores['p_error'].to_numpy()
+    lut[scores['label_id'].to_numpy().astype(int)] = scores[
+        'p_error'
+    ].to_numpy()
     return lut[labels]
 
 

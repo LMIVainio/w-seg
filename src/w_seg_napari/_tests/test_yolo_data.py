@@ -1,5 +1,3 @@
-import json
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -40,8 +38,17 @@ def _grid(n=3, size=20, gap=2, seed=0):
     return image, labels, classes
 
 
-def fake_crop(bbox, image_np, centroids=None, axis_l=None, target_size=256,
-              context_factor=3.0, min_crop_size=64, max_crop_size=384, **kw):
+def fake_crop(
+    bbox,
+    image_np,
+    centroids=None,
+    axis_l=None,
+    target_size=256,
+    context_factor=3.0,
+    min_crop_size=64,
+    max_crop_size=384,
+    **kw,
+):
     cy, cx = centroids
     t = np.zeros((3, 8, 8), np.float32)
     t[0] = (cy % 255) / 255.0  # encodes the position so tests can check it
@@ -58,7 +65,9 @@ def test_cell_table_and_majority_class():
     classes[tuple(cell2[:10].T)] = 1
     df = cell_table(labels, classes)
     assert len(df) == 9
-    assert {'bbox-0', 'bbox-3', 'centroid-0', 'minor_axis_length'} <= set(df.columns)
+    assert {'bbox-0', 'bbox-3', 'centroid-0', 'minor_axis_length'} <= set(
+        df.columns
+    )
     by = df.set_index('label_id')['class_id']
     assert by[1] == 0
     assert by[2] == 2
@@ -69,7 +78,9 @@ def test_cell_table_and_majority_class():
 
 def test_class_folder_order():
     assert class_folder(1, 'Pavement cell') == '01_Pavement_cell'
-    assert sorted([class_folder(10, 'a'), class_folder(2, 'b')])[0].startswith('02')
+    assert sorted([class_folder(10, 'a'), class_folder(2, 'b')])[0].startswith(
+        '02'
+    )
 
 
 def test_split_images_covers_every_class_on_both_sides():
@@ -82,7 +93,9 @@ def test_split_images_covers_every_class_on_both_sides():
 
 def test_split_images_none_when_impossible():
     assert split_images({'a': {1: 5}}) is None
-    assert split_images({'a': {1: 5}, 'b': {2: 5}}) is None  # no image holds both
+    assert (
+        split_images({'a': {1: 5}, 'b': {2: 5}}) is None
+    )  # no image holds both
 
 
 def test_split_cells_stratified_and_single_cell_class():
@@ -96,8 +109,21 @@ def test_build_dataset_by_image(tmp_path):
     samples = []
     for i in range(3):
         image, labels, classes = _grid(seed=i)
-        samples.append({'name': f'img{i}', 'image': image, 'labels': labels, 'classes': classes})
-    info = build_dataset(samples, {1: 'a', 2: 'b'}, tmp_path / 'ds', crop_fn=fake_crop, val_fraction=0.34)
+        samples.append(
+            {
+                'name': f'img{i}',
+                'image': image,
+                'labels': labels,
+                'classes': classes,
+            }
+        )
+    info = build_dataset(
+        samples,
+        {1: 'a', 2: 'b'},
+        tmp_path / 'ds',
+        crop_fn=fake_crop,
+        val_fraction=0.34,
+    )
     assert info['split_mode'] == 'by image'
     assert len(info['val_images']) == 1
     train = list((tmp_path / 'ds' / 'train').rglob('*.png'))
@@ -112,8 +138,17 @@ def test_build_dataset_by_image(tmp_path):
 def test_build_dataset_single_image_warns(tmp_path):
     image, labels, classes = _grid(n=4)
     info = build_dataset(
-        [{'name': 'only', 'image': image, 'labels': labels, 'classes': classes}],
-        {1: 'a', 2: 'b'}, tmp_path / 'ds', crop_fn=fake_crop,
+        [
+            {
+                'name': 'only',
+                'image': image,
+                'labels': labels,
+                'classes': classes,
+            }
+        ],
+        {1: 'a', 2: 'b'},
+        tmp_path / 'ds',
+        crop_fn=fake_crop,
     )
     assert info['split_mode'] == 'by cell'
     assert any('One image only' in w for w in info['warnings'])
@@ -125,15 +160,40 @@ def test_build_dataset_skips_unlisted_classes_and_checks(tmp_path):
     image, labels, classes = _grid()
     info = build_dataset(
         [{'name': 'x', 'image': image, 'labels': labels, 'classes': classes}],
-        {1: 'only1'}, tmp_path / 'ds', crop_fn=fake_crop,
+        {1: 'only1'},
+        tmp_path / 'ds',
+        crop_fn=fake_crop,
     )
     assert info['n_cells'] == 6  # classes 2 cells skipped
     with pytest.raises(ValueError):
-        build_dataset([{'name': 'x', 'image': image, 'labels': labels, 'classes': classes * 0}],
-                      {1: 'a'}, tmp_path / 'e', crop_fn=fake_crop)
+        build_dataset(
+            [
+                {
+                    'name': 'x',
+                    'image': image,
+                    'labels': labels,
+                    'classes': classes * 0,
+                }
+            ],
+            {1: 'a'},
+            tmp_path / 'e',
+            crop_fn=fake_crop,
+        )
     with pytest.raises(ValueError):
-        build_dataset([{'name': 'x', 'image': image, 'labels': labels, 'classes': classes}] * 2,
-                      {1: 'a'}, tmp_path / 'f', crop_fn=fake_crop)
+        build_dataset(
+            [
+                {
+                    'name': 'x',
+                    'image': image,
+                    'labels': labels,
+                    'classes': classes,
+                }
+            ]
+            * 2,
+            {1: 'a'},
+            tmp_path / 'f',
+            crop_fn=fake_crop,
+        )
 
 
 def test_layer_scale_maps_label_pixels_to_image_pixels(tmp_path):
@@ -148,12 +208,23 @@ def test_layer_scale_maps_label_pixels_to_image_pixels(tmp_path):
         return np.zeros((3, 4, 4), np.float32)
 
     build_dataset(
-        [{'name': 'x', 'image': big, 'labels': labels, 'classes': classes,
-          'labels_scale': (2, 2), 'image_scale': (1, 1)}],
-        {1: 'a', 2: 'b'}, tmp_path / 'ds', crop_fn=spy,
+        [
+            {
+                'name': 'x',
+                'image': big,
+                'labels': labels,
+                'classes': classes,
+                'labels_scale': (2, 2),
+                'image_scale': (1, 1),
+            }
+        ],
+        {1: 'a', 2: 'b'},
+        tmp_path / 'ds',
+        crop_fn=spy,
     )
     cy = sorted(c[0] for c in seen)
     from skimage.measure import regionprops
+
     want = sorted(round(2 * p.centroid[0]) for p in regionprops(labels))
     assert cy == want
 
@@ -166,11 +237,20 @@ def test_attach_yolo_copies_and_edits_config(tmp_path):
     save_config(src / 'config.json', make_config(name='m'))
     pt = tmp_path / 'best.pt'
     pt.write_bytes(b'new')
-    out = attach_yolo(src, pt, tmp_path / 'out', {
-        'crop': {'context_factor': 2.0},
-        'class_names': {'0': '01_a', '1': '02_b'},
-    })
-    assert sorted(p.name for p in out.iterdir()) == ['best.pt', 'config.json', 'model.keras']
+    out = attach_yolo(
+        src,
+        pt,
+        tmp_path / 'out',
+        {
+            'crop': {'context_factor': 2.0},
+            'class_names': {'0': '01_a', '1': '02_b'},
+        },
+    )
+    assert sorted(p.name for p in out.iterdir()) == [
+        'best.pt',
+        'config.json',
+        'model.keras',
+    ]
     cfg = load_config(out / 'config.json')
     assert get_companions(cfg, out)['yolo'] == 'best.pt'
     crop = get_yolo_crop(cfg)

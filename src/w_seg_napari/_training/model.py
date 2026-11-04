@@ -339,7 +339,7 @@ def add_input_stem(model, hidden=16):
 
 def has_input_stem(model):
     """True when add_input_stem was applied (by layer name)."""
-    return any(l.name == 'input_stem_out' for l in model.layers)
+    return any(lay.name == 'input_stem_out' for lay in model.layers)
 
 
 def compile_model(model, lr=2e-4):

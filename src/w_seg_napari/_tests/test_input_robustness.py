@@ -17,8 +17,10 @@ from w_seg_napari._training.data_stats import (
 
 
 def _x(seed=0):
-    return np.random.default_rng(seed).uniform(-0.8, 0.8, (64, 64, 6)).astype(
-        np.float32
+    return (
+        np.random.default_rng(seed)
+        .uniform(-0.8, 0.8, (64, 64, 6))
+        .astype(np.float32)
     )
 
 
@@ -36,7 +38,10 @@ def test_strong_changes_more_than_mild():
         for i in range(30):
             x = _x(i)
             diffs.append(
-                np.abs(photometric_jitter(x.copy(), np.random.default_rng(i), s) - x).mean()
+                np.abs(
+                    photometric_jitter(x.copy(), np.random.default_rng(i), s)
+                    - x
+                ).mean()
             )
         d[s] = np.mean(diffs)
     assert d['strong'] > 1.5 * d['mild']
@@ -60,12 +65,24 @@ def test_bad_strength():
 
 
 def test_build_args_aug_and_stem():
-    base = dict(
-        train_dir='a', val_dir='b', out_root='c', name='n', stop_file='s',
-        steps=1, batch_size=2, eval_every=1, lr=1e-4, warmup=0,
-        val_samples=8, ranges=[6, 32], zoom=(0.5, 1.5), tissue_bias=0.7,
-        workers=0, seed=0,
-    )  # fmt: skip
+    base = {
+        'train_dir': 'a',
+        'val_dir': 'b',
+        'out_root': 'c',
+        'name': 'n',
+        'stop_file': 's',
+        'steps': 1,
+        'batch_size': 2,
+        'eval_every': 1,
+        'lr': 1e-4,
+        'warmup': 0,
+        'val_samples': 8,
+        'ranges': [6, 32],
+        'zoom': (0.5, 1.5),
+        'tissue_bias': 0.7,
+        'workers': 0,
+        'seed': 0,
+    }
     a = build_args(base)
     assert '--aug' not in a and '--input-stem' not in a
     a = build_args({**base, 'aug': 'strong', 'input_stem': 16})
@@ -87,12 +104,18 @@ def test_stem_starts_as_identity_and_trains():
     )
     wrapped = add_input_stem(base, hidden=8)
     assert has_input_stem(wrapped) and not has_input_stem(base)
-    x = np.random.default_rng(0).uniform(-1, 1, (1, 32, 32, 6)).astype('float32')
+    x = (
+        np.random.default_rng(0)
+        .uniform(-1, 1, (1, 32, 32, 6))
+        .astype('float32')
+    )
     a = base(x, training=False)
     b = wrapped(x, training=False)
     for k in a:
         assert np.allclose(
-            keras.ops.convert_to_numpy(a[k]), keras.ops.convert_to_numpy(b[k]), atol=1e-5
+            keras.ops.convert_to_numpy(a[k]),
+            keras.ops.convert_to_numpy(b[k]),
+            atol=1e-5,
         )
     n_extra = wrapped.count_params() - base.count_params()
     assert 0 < n_extra < 2000
@@ -108,7 +131,11 @@ def test_stem_survives_save_and_load(tmp_path):
     )
 
     m = add_input_stem(
-        Generator(input_shape=(32, 32, 6), widths=(4, 8, 8, 8, 8), deep_supervision=False),
+        Generator(
+            input_shape=(32, 32, 6),
+            widths=(4, 8, 8, 8, 8),
+            deep_supervision=False,
+        ),
         hidden=8,
     )
     path = str(tmp_path / 'm.keras')
@@ -119,7 +146,9 @@ def test_stem_survives_save_and_load(tmp_path):
     o1, o2 = m(x, training=False), m2(x, training=False)
     for k in o1:
         assert np.allclose(
-            keras.ops.convert_to_numpy(o1[k]), keras.ops.convert_to_numpy(o2[k]), atol=1e-5
+            keras.ops.convert_to_numpy(o1[k]),
+            keras.ops.convert_to_numpy(o2[k]),
+            atol=1e-5,
         )
 
 
@@ -137,9 +166,15 @@ def _slide(path, brightness=1.0, blur=0.0, seed=0):
     wall = (inst == 0).astype(np.uint8)
     gray = np.where(wall > 0, 60.0, 200.0) * brightness
     gray = ndi.gaussian_filter(gray, blur) if blur else gray
-    rgb = np.stack([gray, gray * 0.9, gray * 0.8]) + rng.normal(0, 2, (3, H, W))
+    rgb = np.stack([gray, gray * 0.9, gray * 0.8]) + rng.normal(
+        0, 2, (3, H, W)
+    )
     st = np.concatenate(
-        [np.clip(rgb, 0, 255).astype(np.uint8), wall[None], inst[None].astype(np.uint8)]
+        [
+            np.clip(rgb, 0, 255).astype(np.uint8),
+            wall[None],
+            inst[None].astype(np.uint8),
+        ]
     )
     tifffile.imwrite(path, st, photometric='minisblack')
 

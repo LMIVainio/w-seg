@@ -20,15 +20,18 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from w_seg_napari import _session_io as sio
 from w_seg_napari._batch_io import (
     find_session_dir,
     list_input_files,
     list_session_names,
     output_dir,
 )
-from w_seg_napari import _session_io as sio
+from w_seg_napari._batch_pipeline import is_done, run_batch
 from w_seg_napari._batch_settings import (
     FILENAME as SETTINGS_FILENAME,
+)
+from w_seg_napari._batch_settings import (
     apply_loaded,
     describe,
     load_settings,
@@ -36,7 +39,6 @@ from w_seg_napari._batch_settings import (
     settings_document,
 )
 from w_seg_napari._review_widget import ReviewFlaggedWidget
-from w_seg_napari._batch_pipeline import is_done, run_batch
 from w_seg_napari._session_io import CORRECTED, has_dataset
 
 
@@ -226,7 +228,9 @@ class BatchTabWidget(QWidget):
         ):
             chk.toggled.connect(self._update_done_count)
 
-        self.chk_skip_done = QCheckBox('Skip images that are already processed')
+        self.chk_skip_done = QCheckBox(
+            'Skip images that are already processed'
+        )
         self.chk_skip_done.setToolTip(
             'Lets you continue a large batch later: an image is skipped when '
             'its session (and table) from an earlier run already hold the '
@@ -497,7 +501,9 @@ class BatchTabWidget(QWidget):
         path = doc.get('error_model')
         self.chk_errors.setChecked(bool(path))
         self.error_model_path = path or ''
-        self.lbl_error_model.setText(Path(path).name if path else 'No model selected.')
+        self.lbl_error_model.setText(
+            Path(path).name if path else 'No model selected.'
+        )
 
     def _update_done_count(self, *_):
         """Shows how many files a run with the skip option would leave out."""
@@ -632,13 +638,22 @@ class BatchTabWidget(QWidget):
     @staticmethod
     def _is_batch_layer(name):
         return name.startswith(
-            ('pred_', 'sp_', 'gasp_cells_', 'geo_', 'error_', 'flagged_', 'review_cell', '[Predicted Classes]')
-        ) or name.startswith(('aff_', 'affinity'))
+            (
+                'pred_',
+                'sp_',
+                'gasp_cells_',
+                'geo_',
+                'error_',
+                'flagged_',
+                'review_cell',
+                '[Predicted Classes]',
+                'aff_',
+                'affinity',
+            )
+        )
 
     def _on_open_session(self):
-        start = (
-            str(self._out_dir()) if self.selected_dir else ''
-        )
+        start = str(self._out_dir()) if self.selected_dir else ''
         path, _ = QFileDialog.getOpenFileName(
             self, 'Open session', start, 'HDF5 sessions (*.h5 *.hdf5)'
         )
@@ -647,7 +662,9 @@ class BatchTabWidget(QWidget):
         try:
             self._open_session(Path(path))
         except Exception as e:  # unreadable file, missing h5py, ...
-            QMessageBox.warning(self, 'Cannot open session', f'{type(e).__name__}: {e}')
+            QMessageBox.warning(
+                self, 'Cannot open session', f'{type(e).__name__}: {e}'
+            )
 
     def _open_session(self, path: Path):
         v = self.viewer
@@ -667,9 +684,7 @@ class BatchTabWidget(QWidget):
         results, _store, info = sio.session_results(path)
         base = info['base']
         if 'raw' in results and 'pred_sem' in results:
-            self.main_widget.render_batch_results(
-                info['source_file'], results
-            )
+            self.main_widget.render_batch_results(info['source_file'], results)
         elif 'raw' in results:
             v.add_image(results['raw'], name=base)
         if info['editable'] is not None:
@@ -762,12 +777,16 @@ class BatchTabWidget(QWidget):
                 source_name=source_name,
             )
         except Exception as e:
-            QMessageBox.warning(self, 'Cannot save session', f'{type(e).__name__}: {e}')
+            QMessageBox.warning(
+                self, 'Cannot save session', f'{type(e).__name__}: {e}'
+            )
             return
         if self.session is None:
             self.session = {
                 'path': path,
-                'base': sio.base_name(source_name or path.stem.removesuffix('_session')),
+                'base': sio.base_name(
+                    source_name or path.stem.removesuffix('_session')
+                ),
             }
         self.lbl_session.setText(
             f'Saved to {path.name}: '
@@ -864,17 +883,25 @@ class BatchTabWidget(QWidget):
                 diffs = model_differences(
                     doc, info.get('model_name'), settings.get('model_cfg')
                 )
-                if diffs and QMessageBox.question(
-                    self,
-                    'Different model',
-                    f'The settings in {src.name} were made with another '
-                    'model:\n- ' + '\n- '.join(diffs) + '\n\nContinue anyway?',
-                ) != QMessageBox.Yes:
+                if (
+                    diffs
+                    and QMessageBox.question(
+                        self,
+                        'Different model',
+                        f'The settings in {src.name} were made with another '
+                        'model:\n- '
+                        + '\n- '.join(diffs)
+                        + '\n\nContinue anyway?',
+                    )
+                    != QMessageBox.Yes
+                ):
                     return
                 settings = apply_loaded(settings, doc)
             if self.chk_errors.isChecked() and self.chk_morphology.isChecked():
                 if not self.error_model_path:
-                    raise ValueError('Choose an error model, or switch the flagging off.')
+                    raise ValueError(
+                        'Choose an error model, or switch the flagging off.'
+                    )
                 from w_seg_napari._segmentation_errors import load_error_model
 
                 settings['error_bundle'] = load_error_model(
@@ -887,12 +914,15 @@ class BatchTabWidget(QWidget):
                 model_name=info.get('model_name', ''),
                 classifier=info.get('classifier_type', ''),
                 error_model_path=(
-                    self.error_model_path if settings.get('error_bundle') else None
+                    self.error_model_path
+                    if settings.get('error_bundle')
+                    else None
                 ),
             )
             # the folder's own file is already what will be used
-            settings['save_settings'] = self.chk_save_settings.isChecked() and not (
-                doc is not None and own_file
+            settings['save_settings'] = (
+                self.chk_save_settings.isChecked()
+                and not (doc is not None and own_file)
             )
         except (ValueError, TypeError) as e:
             QMessageBox.warning(self, 'Cannot start batch', str(e))
@@ -977,15 +1007,11 @@ class BatchTabWidget(QWidget):
             if len(failed) > 5:
                 msg += f'\n... and {len(failed) - 5} more (see the console)'
         if self.notes:
-            msg += '\n\nNotes:\n' + '\n'.join(
-                f'- {n}' for n in self.notes[:8]
-            )
+            msg += '\n\nNotes:\n' + '\n'.join(f'- {n}' for n in self.notes[:8])
             if len(self.notes) > 8:
                 msg += f'\n... and {len(self.notes) - 8} more'
         QMessageBox.information(self, 'Batch Execution', msg)
-        self.status_label.setText(
-            f'Results are in {self._out_dir()}'
-        )
+        self.status_label.setText(f'Results are in {self._out_dir()}')
 
     def _on_error(self, exc):
         print(f'[w-seg] Batch stopped by an error: {exc}')

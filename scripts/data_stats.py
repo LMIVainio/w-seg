@@ -33,7 +33,9 @@ def main():
     for folder in a.folders:
         part = collect_stats(folder, n_crops=a.crops)
         for r in part:
-            r['file'] = f'{os.path.basename(os.path.normpath(folder))}/{r["file"]}'
+            r['file'] = (
+                f'{os.path.basename(os.path.normpath(folder))}/{r["file"]}'
+            )
         rows += part
     if not rows:
         raise SystemExit('No .tif files found.')

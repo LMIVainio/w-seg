@@ -6,7 +6,12 @@ from w_seg_napari import _flagged_cells as fc
 
 def _scene():
     labels = np.zeros((10, 20), np.int32)
-    labels[:, :5], labels[:, 5:10], labels[:, 10:15], labels[:5, 15:] = 1, 2, 3, 4
+    labels[:, :5], labels[:, 5:10], labels[:, 10:15], labels[:5, 15:] = (
+        1,
+        2,
+        3,
+        4,
+    )
     err = np.zeros(labels.shape, np.float32)
     for lab, p in {1: 0.1, 2: 0.9, 3: 0.6, 4: 0.97}.items():
         err[labels == lab] = p

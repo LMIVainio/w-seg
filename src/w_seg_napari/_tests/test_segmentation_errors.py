@@ -17,7 +17,9 @@ def _wall_from(ref):
     edge = np.zeros(ref.shape, bool)
     edge[:-1] |= ref[:-1] != ref[1:]
     edge[:, :-1] |= ref[:, :-1] != ref[:, 1:]
-    return np.clip(ndi.gaussian_filter(edge.astype(np.float32), 1.0) * 3.5, 0, 1)
+    return np.clip(
+        ndi.gaussian_filter(edge.astype(np.float32), 1.0) * 3.5, 0, 1
+    )
 
 
 def _slide(seed, n_merge=6, n_split=6):
@@ -34,7 +36,9 @@ def _slide(seed, n_merge=6, n_split=6):
         if a in used or done >= n_merge:
             continue
         dil = ndi.binary_dilation(ref == a, iterations=2)
-        nbs = [b for b in np.unique(ref[dil]) if b not in (a, 0) and b not in used]
+        nbs = [
+            b for b in np.unique(ref[dil]) if b not in (a, 0) and b not in used
+        ]
         if nbs:
             pred[pred == nbs[0]] = a
             used |= {a, nbs[0]}
@@ -48,7 +52,9 @@ def _slide(seed, n_merge=6, n_split=6):
         if len(ys) < 80:
             continue
         ang = rng.uniform(0, np.pi)
-        side = (ys - ys.mean()) * np.cos(ang) + (xs - xs.mean()) * np.sin(ang) > 0
+        side = (ys - ys.mean()) * np.cos(ang) + (xs - xs.mean()) * np.sin(
+            ang
+        ) > 0
         pred[ys[side], xs[side]] = nxt
         nxt += 1
         used.add(a)
@@ -70,7 +76,9 @@ def test_labelling_finds_the_kinds_of_error():
     pred2[0:5, 0:5] = 9
     ref2 = ref.copy()
     ref2[0:5, 0:5] = 0
-    s2 = se.label_predicted_cells(np.where(ref2 == 0, 9 * (pred2 == 9), pred2), ref2)
+    s2 = se.label_predicted_cells(
+        np.where(ref2 == 0, 9 * (pred2 == 9), pred2), ref2
+    )
     assert s2.set_index('label_id')['status'][9] == 'spurious'
 
 
@@ -90,7 +98,9 @@ def test_features_cover_every_cell_and_are_named():
 
 def test_merged_cells_have_a_wall_inside():
     ref, pred, wall = _slide(2)
-    status = se.label_predicted_cells(pred, ref).set_index('label_id')['status']
+    status = se.label_predicted_cells(pred, ref).set_index('label_id')[
+        'status'
+    ]
     f = se.cell_features(pred, wall).set_index('label_id')
     merged = f.loc[status[status == 'merged'].index, 'inner_wall_p95']
     ok = f.loc[status[status == 'ok'].index, 'inner_wall_p95']
@@ -100,7 +110,9 @@ def test_merged_cells_have_a_wall_inside():
 
 def test_fragments_have_a_weak_border_towards_their_neighbour():
     ref, pred, wall = _slide(3)
-    status = se.label_predicted_cells(pred, ref).set_index('label_id')['status']
+    status = se.label_predicted_cells(pred, ref).set_index('label_id')[
+        'status'
+    ]
     f = se.cell_features(pred, wall).set_index('label_id')
     frag = f.loc[status[status == 'fragment'].index, 'contact_wall_min']
     ok = f.loc[status[status == 'ok'].index, 'contact_wall_min']
@@ -132,7 +144,9 @@ def test_model_ranks_errors_on_unseen_slides_and_round_trips(tmp_path):
     again = se.load_error_model(path)
     ref, pred, wall = _slide(99)
     scores, emap = se.flag_labels(pred, wall, again)
-    status = se.label_predicted_cells(pred, ref).set_index('label_id')['status']
+    status = se.label_predicted_cells(pred, ref).set_index('label_id')[
+        'status'
+    ]
     p = scores.set_index('label_id')['p_error']
     bad = status.isin(se.BAD)
     assert p[bad[bad].index].mean() > p[status[status == 'ok'].index].mean()

@@ -24,9 +24,9 @@ import numpy as np
 
 from w_seg_napari._affinity import gather, layer_payloads
 from w_seg_napari._batch_io import (
+    find_session_dir,
     load_image,
     output_dir,
-    find_session_dir,
     session_path,
     table_path,
     to_model_input_range,
@@ -547,8 +547,11 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
         if 'n_flagged' in results:
             yield (
                 'note',
-                f'{name}: {results["n_flagged"]} cell(s) flagged as likely '
-                'segmentation errors (columns p_error, error_type).',
+                (
+                    f'{name}: {results["n_flagged"]} cell(s) flagged as '
+                    'likely segmentation errors (columns p_error, '
+                    'error_type).'
+                ),
             )
         if settings.get('render'):
             yield ('render', name, results)

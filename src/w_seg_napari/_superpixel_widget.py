@@ -592,7 +592,8 @@ class SuperpixelWidget(QGroupBox):
             ],
             'ridge_min_distance': self.spin_ridge_min_dist.value(),
             'ridge_sigma': self.spin_ridge_sigma.value(),
-            'seed_kind': self._seed_choice() or seed_kind(self.combo_seed.currentData()),
+            'seed_kind': self._seed_choice()
+            or seed_kind(self.combo_seed.currentData()),
             'seed_layer': (
                 '' if self._seed_choice() else self.combo_seed.currentText()
             ),

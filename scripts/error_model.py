@@ -79,17 +79,27 @@ def main(argv=None):
         sys.exit(str(e))
     save_error_model(bundle, args.out)
 
-    print(f'\nTrained on {r["n_cells"]} cells, {r["n_wrong"]} wrong '
-          f'({r["wrong_share"]:.0%}). Held out: {r["grouping"]}.')
-    print('Average precision (higher is better; chance = '
-          f'{r["chance_level"]:.2f}):')
+    print(
+        f'\nTrained on {r["n_cells"]} cells, {r["n_wrong"]} wrong '
+        f'({r["wrong_share"]:.0%}). Held out: {r["grouping"]}.'
+    )
+    print(
+        'Average precision (higher is better; chance = '
+        f'{r["chance_level"]:.2f}):'
+    )
     print(f'  gradient boosting (used)  {r["average_precision"]:.3f}')
-    print(f'  random forest             {r["average_precision_random_forest"]:.3f}')
-    print(f'  size-only rule            {r["average_precision_size_rule"]:.3f}')
-    print(f'\nFlag threshold {r["threshold"]:.3f}: finds '
-          f'{r["recall_at_threshold"]:.0%} of the wrong cells, '
-          f'{r["precision_at_threshold"]:.0%} of flagged cells are wrong, '
-          f'{r["flagged_share"]:.0%} of all cells flagged.')
+    print(
+        f'  random forest             {r["average_precision_random_forest"]:.3f}'
+    )
+    print(
+        f'  size-only rule            {r["average_precision_size_rule"]:.3f}'
+    )
+    print(
+        f'\nFlag threshold {r["threshold"]:.3f}: finds '
+        f'{r["recall_at_threshold"]:.0%} of the wrong cells, '
+        f'{r["precision_at_threshold"]:.0%} of flagged cells are wrong, '
+        f'{r["flagged_share"]:.0%} of all cells flagged.'
+    )
     print(f'\nSaved {args.out}')
 
 

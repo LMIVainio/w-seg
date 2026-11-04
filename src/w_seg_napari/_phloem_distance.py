@@ -87,7 +87,9 @@ def _class_key(v):
 def select_cells(df, class_col, classes):
     """Rows of df whose class is one of `classes` (list of ids or names)."""
     if class_col not in df.columns:
-        raise KeyError(f'Column {class_col!r} not found (have: {list(df.columns)})')
+        raise KeyError(
+            f'Column {class_col!r} not found (have: {list(df.columns)})'
+        )
     want = {_class_key(c) for c in classes}
     return df[df[class_col].map(_class_key).isin(want)]
 
@@ -181,7 +183,9 @@ def measure_image(
     flags = []
     for col in (y_col, x_col):
         if col not in df.columns:
-            raise KeyError(f'Column {col!r} not found (have: {list(df.columns)})')
+            raise KeyError(
+                f'Column {col!r} not found (have: {list(df.columns)})'
+            )
 
     ph = select_cells(df, class_col, phloem_classes)
     res['n_phloem_cells'] = len(ph)
@@ -218,10 +222,10 @@ def measure_image(
             if n > 0:
                 perp = np.array([-xaxis[1], xaxis[0]]) / n
                 res['distance_xylem_px'] = float(abs(axis @ perp))
-                cosang = abs(axis @ xaxis) / (
-                    np.linalg.norm(axis) * n + 1e-12
+                cosang = abs(axis @ xaxis) / (np.linalg.norm(axis) * n + 1e-12)
+                res['angle_deg'] = float(
+                    np.degrees(np.arccos(np.clip(cosang, 0, 1)))
                 )
-                res['angle_deg'] = float(np.degrees(np.arccos(np.clip(cosang, 0, 1))))
                 if abs(res['angle_deg'] - 90) > 20:
                     flags.append('axes not perpendicular')
             res.update(
@@ -256,7 +260,9 @@ def measure_all(tables, um_per_px=None, scales=None, **kw):
 
 
 # ------------------------------------------------- compare with manual
-def compare_with_manual(results, manual, image_col, value_col, use='distance_um'):
+def compare_with_manual(
+    results, manual, image_col, value_col, use='distance_um'
+):
     """
     Merge results with a manual table by image name and summarise the
     agreement. Returns (merged DataFrame, dict of statistics, unmatched names).
@@ -270,9 +276,14 @@ def compare_with_manual(results, manual, image_col, value_col, use='distance_um'
     r['_key'] = r['image'].map(image_key)
     merged = r.merge(m, on='_key', how='outer', indicator=True)
     unmatched = merged.loc[merged['_merge'] != 'both', '_key'].tolist()
-    merged = merged[merged['_merge'] == 'both'].drop(columns=['_merge', '_key'])
+    merged = merged[merged['_merge'] == 'both'].drop(
+        columns=['_merge', '_key']
+    )
     ok = merged[use].notna() & merged['manual'].notna()
-    a, b = merged.loc[ok, use].to_numpy(float), merged.loc[ok, 'manual'].to_numpy(float)
+    a, b = (
+        merged.loc[ok, use].to_numpy(float),
+        merged.loc[ok, 'manual'].to_numpy(float),
+    )
     merged['error'] = merged[use] - merged['manual']
     stats = {'n': int(ok.sum())}
     if stats['n'] >= 2:
@@ -300,8 +311,12 @@ def plot_image(name, res_row, details, path):
     if '_phloem_xy' in details:
         xy, lab = details['_phloem_xy'], details['_phloem_labels']
         for i, col in ((0, '#c0392b'), (1, '#e67e22')):
-            ax.scatter(*xy[lab == i].T, s=14, color=col, label=f'phloem pole {i + 1}')
-        ax.scatter(*xy[lab < 0].T, s=14, color='grey', marker='x', label='dropped')
+            ax.scatter(
+                *xy[lab == i].T, s=14, color=col, label=f'phloem pole {i + 1}'
+            )
+        ax.scatter(
+            *xy[lab < 0].T, s=14, color='grey', marker='x', label='dropped'
+        )
         ax.plot(
             [res_row['pole1_x'], res_row['pole2_x']],
             [res_row['pole1_y'], res_row['pole2_y']], 'k-', lw=1,
@@ -316,7 +331,10 @@ def plot_image(name, res_row, details, path):
             )  # fmt: skip
     ax.invert_yaxis()
     ax.set_aspect('equal')
-    ax.set_title(f'{name}\n{res_row["distance_px"]:.1f} px  {res_row["flags"]}', fontsize=7)
+    ax.set_title(
+        f'{name}\n{res_row["distance_px"]:.1f} px  {res_row["flags"]}',
+        fontsize=7,
+    )
     ax.legend(fontsize=6)
     fig.tight_layout()
     fig.savefig(path, dpi=130)
@@ -338,12 +356,19 @@ def plot_comparison(merged, stats, path, use='distance_um'):
     a.plot(lim, lim, 'k--', lw=0.8)
     a.set_xlabel('manual')
     a.set_ylabel(f'tool ({use})')
-    a.set_title(f'n={stats["n"]}  r={stats.get("pearson_r", float("nan")):.3f}')
+    a.set_title(
+        f'n={stats["n"]}  r={stats.get("pearson_r", float("nan")):.3f}'
+    )
     mean = (merged['manual'] + merged[use]) / 2
     b.scatter(mean, merged['error'], s=18)
     for y in (stats.get('bias'), stats.get('loa_low'), stats.get('loa_high')):
         if y is not None:
-            b.axhline(y, color='k', lw=0.8, ls='--' if y != stats.get('bias') else '-')
+            b.axhline(
+                y,
+                color='k',
+                lw=0.8,
+                ls='--' if y != stats.get('bias') else '-',
+            )
     b.set_xlabel('mean of tool and manual')
     b.set_ylabel('tool - manual')
     b.set_title('Bland-Altman (bias, 95% limits)')

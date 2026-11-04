@@ -32,11 +32,15 @@ def cell_scores(labels, values) -> pd.DataFrame:
             'do not have the same shape.'
         )
     rows = []
-    for i, sl in enumerate(ndi.find_objects(labels.astype(np.int64, copy=False))):
+    for i, sl in enumerate(
+        ndi.find_objects(labels.astype(np.int64, copy=False))
+    ):
         if sl is None:
             continue
         mask = labels[sl] == i + 1
-        rows.append((i + 1, float(np.median(values[sl][mask])), int(mask.sum())))
+        rows.append(
+            (i + 1, float(np.median(values[sl][mask])), int(mask.sum()))
+        )
     return pd.DataFrame(rows, columns=['label_id', 'p_error', 'area'])
 
 
@@ -48,8 +52,10 @@ def select_range(scores, lower, upper, min_area=0) -> pd.DataFrame:
         & (scores['area'] >= min_area)
         & (scores['label_id'] != 0)
     )
-    return scores[keep].sort_values('p_error', ascending=False).reset_index(
-        drop=True
+    return (
+        scores[keep]
+        .sort_values('p_error', ascending=False)
+        .reset_index(drop=True)
     )
 
 
@@ -89,7 +95,7 @@ def pair_error_layer(target_name, error_names):
     base = target_name
     for prefix in _LABEL_PREFIXES:
         if base.startswith(prefix):
-            base = base[len(prefix):]
+            base = base[len(prefix) :]
             break
     wanted = f'error_{base}'
     if wanted in error_names:

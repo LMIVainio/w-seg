@@ -40,8 +40,8 @@ from w_seg_napari._train_args import (
     safe_name,
 )
 from w_seg_napari._training_data_widget import TrainingDataWidget
-from w_seg_napari._yolo_train_widget import YoloTrainWidget
 from w_seg_napari._wsegutils import BUNDLE_DIR, list_local_bundles
+from w_seg_napari._yolo_train_widget import YoloTrainWidget
 
 MARKER = '@@'
 MAX_LOG_LINES = 400
@@ -183,7 +183,9 @@ class TrainWidget(QGroupBox):
             'blur and sharpening, so the model copes with slides that differ '
             'in acquisition. No cost at prediction time.'
         )
-        self.stem_cb = QCheckBox('Learnable input stem (new models, or adds it when continuing)')
+        self.stem_cb = QCheckBox(
+            'Learnable input stem (new models, or adds it when continuing)'
+        )
         self.stem_cb.setToolTip(
             'A few small layers in front of the network that learn their own '
             'input normalisation (about 1% extra cost). It starts as the '

@@ -43,7 +43,9 @@ class ReviewFlaggedWidget(QGroupBox):
         row = QHBoxLayout()
         row.addWidget(QLabel('Labels:'))
         self.combo_labels = QComboBox()
-        self.combo_labels.setToolTip('The labels layer to take the cells from.')
+        self.combo_labels.setToolTip(
+            'The labels layer to take the cells from.'
+        )
         row.addWidget(self.combo_labels, stretch=1)
         layout.addLayout(row)
 
@@ -126,7 +128,10 @@ class ReviewFlaggedWidget(QGroupBox):
             for la in self.viewer.layers
             if la._type_string == 'image' and la.name.startswith('error_')
         ]
-        before = (self.combo_labels.currentText(), self.combo_error.currentText())
+        before = (
+            self.combo_labels.currentText(),
+            self.combo_error.currentText(),
+        )
         for combo, items in (
             (self.combo_labels, labels),
             (self.combo_error, errors),
@@ -148,7 +153,8 @@ class ReviewFlaggedWidget(QGroupBox):
 
     def _pair(self):
         errors = [
-            self.combo_error.itemText(i) for i in range(self.combo_error.count())
+            self.combo_error.itemText(i)
+            for i in range(self.combo_error.count())
         ]
         match = fc.pair_error_layer(self.combo_labels.currentText(), errors)
         if match:
@@ -274,7 +280,10 @@ class ReviewFlaggedWidget(QGroupBox):
             layer.editable = False
         # move there and make the labels layer ready for editing this cell
         world = tuple(
-            c * s + t for c, s, t in zip(centre, labels.scale[-2:], labels.translate[-2:])
+            c * s + t
+            for c, s, t in zip(
+                centre, labels.scale[-2:], labels.translate[-2:]
+            )
         )
         try:
             v.camera.center = (0.0, *world)

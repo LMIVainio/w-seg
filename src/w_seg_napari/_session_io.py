@@ -56,9 +56,7 @@ def load_session(path) -> dict:
 
     with h5py.File(path, 'r') as f:
         return {
-            key: f[key][()]
-            for key in f
-            if isinstance(f[key], h5py.Dataset)
+            key: f[key][()] for key in f if isinstance(f[key], h5py.Dataset)
         }
 
 
@@ -405,7 +403,9 @@ def read_layers(group):
             'translate': _optional_list(a.get('translate')),
             'visible': bool(_plain(a.get('visible', True))),
             # old exports called it blending_mode
-            'blending': _plain(a.get('blending', a.get('blending_mode', 'translucent'))),
+            'blending': _plain(
+                a.get('blending', a.get('blending_mode', 'translucent'))
+            ),
         }
         if isinstance(item, h5py.Group) and ltype == 'shapes':
             p['shape_type'] = json.loads(_plain(a.get('shape_types', '[]')))

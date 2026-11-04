@@ -62,7 +62,7 @@ def test_same_settings_keep_the_file_different_ones_archive_the_old(tmp_path):
     bs.save_settings(out, changed)
     names = sorted(p.name for p in out.glob('*.json'))
     assert bs.FILENAME in names and len(names) == 2
-    archived = [p for p in out.glob('batch_settings_*.json')][0]
+    archived = next(iter(out.glob('batch_settings_*.json')))
     assert json.loads(archived.read_text())['stride'] == 128
     assert bs.load_settings(out / bs.FILENAME)['stride'] == 64
 
@@ -73,7 +73,9 @@ def test_apply_loaded_replaces_only_the_processing_settings():
     out = bs.apply_loaded(run, doc)
     assert out['stride'] == 64
     assert out['gasp_params'] == doc['gasp_params']
-    assert out['device'] == 'cuda' and out['skip_done'] is False  # not replaced
+    assert (
+        out['device'] == 'cuda' and out['skip_done'] is False
+    )  # not replaced
     out['gasp_params']['linkage'] = 'x'
     assert doc['gasp_params']['linkage'] == 'average'  # a copy
 
@@ -97,7 +99,9 @@ def test_bad_files_give_clear_errors(tmp_path, content, match):
 def test_model_differences():
     doc = bs.settings_document(_settings(), 'a')
     cfg = _settings()['model_cfg']
-    assert bs.model_differences(doc, 'a', cfg) == []  # tuples vs lists are fine
+    assert (
+        bs.model_differences(doc, 'a', cfg) == []
+    )  # tuples vs lists are fine
     assert 'weights' in bs.model_differences(doc, 'b', cfg)[0]
     other = {'outputs': {'wall': 'other'}, 'offsets': []}
     assert 'configuration' in bs.model_differences(doc, 'a', other)[0]

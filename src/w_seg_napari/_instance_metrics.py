@@ -19,7 +19,9 @@ import numpy as np
 import pandas as pd
 
 THRESHOLDS = (0.5, 0.75, 0.9)
-PIECE_FRACTION = 0.2  # a piece must cover this share of a cell to count as a split
+PIECE_FRACTION = (
+    0.2  # a piece must cover this share of a cell to count as a split
+)
 
 
 def overlaps(pred, ref):

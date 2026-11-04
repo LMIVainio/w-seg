@@ -134,7 +134,15 @@ def test_yolo_args_and_unique_bundle_dir(tmp_path):
     a = build_yolo_args(p)
     assert a[a.index('--epochs') + 1] == '50'
     assert '--attach-to' not in a and '--info-json' not in a
-    a = build_yolo_args({**p, 'workers': 0, 'info_json': 'I', 'attach_to': 'B', 'out_bundle': 'NB'})
+    a = build_yolo_args(
+        {
+            **p,
+            'workers': 0,
+            'info_json': 'I',
+            'attach_to': 'B',
+            'out_bundle': 'NB',
+        }
+    )
     assert a[a.index('--attach-to') + 1] == 'B'
     assert a[a.index('--out-bundle') + 1] == 'NB'
     assert a[a.index('--workers') + 1] == '0'

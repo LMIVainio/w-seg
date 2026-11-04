@@ -238,10 +238,15 @@ def attach_yolo(bundle_dir, weights, out_dir, info=None):
     """
     import shutil
 
-    bundle_dir, out_dir, weights = Path(bundle_dir), Path(out_dir), Path(weights)
-    if not (bundle_dir / 'model.keras').is_file() or not (
-        bundle_dir / 'config.json'
-    ).is_file():
+    bundle_dir, out_dir, weights = (
+        Path(bundle_dir),
+        Path(out_dir),
+        Path(weights),
+    )
+    if (
+        not (bundle_dir / 'model.keras').is_file()
+        or not (bundle_dir / 'config.json').is_file()
+    ):
         raise FileNotFoundError(
             f'{bundle_dir} is not a model bundle (needs model.keras and config.json)'
         )

@@ -101,7 +101,8 @@ def slide_stats(path, n_crops=12, crop=512, step=8, seed=0):
             continue
         g = _gray(
             np.moveaxis(
-                np.asarray(stack[0:3, y : y + ch, x : x + cw], np.float32) * scale,
+                np.asarray(stack[0:3, y : y + ch, x : x + cw], np.float32)
+                * scale,
                 0,
                 -1,
             )
@@ -176,7 +177,10 @@ def write_csv(rows, path):
         w.writerow(cols)
         for r in rows:
             w.writerow(
-                [f'{r[c]:.4g}' if isinstance(r[c], float) else r[c] for c in cols]
+                [
+                    f'{r[c]:.4g}' if isinstance(r[c], float) else r[c]
+                    for c in cols
+                ]
             )
 
 

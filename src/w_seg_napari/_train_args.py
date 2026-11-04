@@ -87,7 +87,12 @@ def build_yolo_args(p):
     if p.get('info_json'):
         args += ['--info-json', p['info_json']]
     if p.get('attach_to'):
-        args += ['--attach-to', p['attach_to'], '--out-bundle', p['out_bundle']]
+        args += [
+            '--attach-to',
+            p['attach_to'],
+            '--out-bundle',
+            p['out_bundle'],
+        ]
     return args
 
 

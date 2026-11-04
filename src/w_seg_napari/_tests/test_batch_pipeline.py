@@ -320,28 +320,50 @@ def test_describe_seed_source():
 
     base = {'algo_idx': 5, 'seed_threshold': 0.5}
     # other algorithms have no seed line
-    assert describe_seed_source({'algo_idx': 1}) == {'text': None, 'problem': None}
+    assert describe_seed_source({'algo_idx': 1}) == {
+        'text': None,
+        'problem': None,
+    }
 
-    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': 'geo_skel_a'}, True)
+    r = describe_seed_source(
+        {**base, 'seed_kind': 'skeleton', 'seed_layer': 'geo_skel_a'}, True
+    )
     assert r['problem'] is None
-    assert 'skeleton' in r['text'] and 'geo_skel_a' in r['text'] and 'every image' in r['text']
+    assert (
+        'skeleton' in r['text']
+        and 'geo_skel_a' in r['text']
+        and 'every image' in r['text']
+    )
 
-    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': 'geo_skel_a'}, False)
+    r = describe_seed_source(
+        {**base, 'seed_kind': 'skeleton', 'seed_layer': 'geo_skel_a'}, False
+    )
     assert 'geometry head' in r['problem']
     # unknown model: no complaint
-    assert describe_seed_source({**base, 'seed_kind': 'edge_distance', 'seed_layer': 'g'}, None)['problem'] is None
+    assert (
+        describe_seed_source(
+            {**base, 'seed_kind': 'edge_distance', 'seed_layer': 'g'}, None
+        )['problem']
+        is None
+    )
 
     # a wall-prediction seed does not need the geometry head
-    r = describe_seed_source({**base, 'seed_kind': 'prediction', 'seed_layer': 'pred_a'}, False)
+    r = describe_seed_source(
+        {**base, 'seed_kind': 'prediction', 'seed_layer': 'pred_a'}, False
+    )
     assert r['problem'] is None
 
     # ridge sources win over the layer and need the geometry head
-    r = describe_seed_source({**base, 'ridge_method': 'both', 'seed_kind': 'other'}, False)
+    r = describe_seed_source(
+        {**base, 'ridge_method': 'both', 'seed_kind': 'other'}, False
+    )
     assert 'Sato' in r['text'] and r['problem']
 
     # a layer that exists for one image only
     for kind in ('labels', 'other', None):
-        r = describe_seed_source({**base, 'seed_kind': kind, 'seed_layer': 'my_seeds'}, True)
+        r = describe_seed_source(
+            {**base, 'seed_kind': kind, 'seed_layer': 'my_seeds'}, True
+        )
         assert 'my_seeds' in r['problem'] and 'one image only' in r['problem']
 
 
@@ -349,7 +371,10 @@ def test_describe_matches_seed_arguments():
     # whatever describe_seed_source accepts, seed_arguments must also accept
     import numpy as np
 
-    from w_seg_napari._batch_pipeline import describe_seed_source, seed_arguments
+    from w_seg_napari._batch_pipeline import (
+        describe_seed_source,
+        seed_arguments,
+    )
 
     geo = np.zeros((4, 8, 8), np.float32)
     sem = np.zeros((8, 8), np.float32)
@@ -512,7 +537,10 @@ def test_skip_done_continues_where_the_last_run_stopped(tmp_path, monkeypatch):
     assert [e[1] for e in events if e[0] == 'skipped'] == ['a.tif', 'b.tif']
     assert n_ok == 1 and not failed
     assert [c[0] for c in CALLS] == [
-        'predict', 'superpixels', 'gasp', 'morphology'
+        'predict',
+        'superpixels',
+        'gasp',
+        'morphology',
     ]  # only c.tif was processed
 
 
@@ -536,8 +564,9 @@ def test_image_is_not_done_when_a_selected_stage_has_no_result(
         bp.run_batch(
             ['a.tif'],
             tmp_path,
-            _settings(superpixels=False, gasp=False, morphology=False,
-                      export=False),
+            _settings(
+                superpixels=False, gasp=False, morphology=False, export=False
+            ),
             lambda: False,
         )
     )
@@ -551,7 +580,9 @@ def test_image_is_not_done_when_a_selected_stage_has_no_result(
 # ------------------------------------------------------------ sessions as input
 def _session_run(tmp_path, monkeypatch, **stages):
     sessions = _install_fakes(monkeypatch)
-    monkeypatch.setattr(bp, 'read_attrs', lambda path: {'source_file': 'a.tif'})
+    monkeypatch.setattr(
+        bp, 'read_attrs', lambda path: {'source_file': 'a.tif'}
+    )
     return sessions
 
 
@@ -569,7 +600,9 @@ def test_session_names_stand_in_for_images(tmp_path):
 
 def test_sessions_mode_measures_without_the_image_file(tmp_path, monkeypatch):
     sessions = _install_fakes(monkeypatch)
-    monkeypatch.setattr(bp, 'read_attrs', lambda path: {'source_file': 'a.tif'})
+    monkeypatch.setattr(
+        bp, 'read_attrs', lambda path: {'source_file': 'a.tif'}
+    )
     _make_images(tmp_path, ['a.tif'])
     _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
     (tmp_path / 'a.tif').unlink()  # only the session is left
@@ -647,7 +680,9 @@ def test_settings_are_saved_before_the_first_image(tmp_path, monkeypatch):
     real = bp.process_image
 
     def spy(image_path, settings, is_cancelled):
-        seen['saved_first'] = (tmp_path / 'wseg_batch' / 'batch_settings.json').is_file()
+        seen['saved_first'] = (
+            tmp_path / 'wseg_batch' / 'batch_settings.json'
+        ).is_file()
         return (yield from real(image_path, settings, is_cancelled))
 
     monkeypatch.setattr(bp, 'process_image', spy)
@@ -673,10 +708,14 @@ def test_virtual_seed_choice_needs_no_layer():
 
     base = {'algo_idx': 5, 'seed_threshold': 0.5}
     # chosen in the Superpixel tab before any image was predicted
-    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': ''}, True)
+    r = describe_seed_source(
+        {**base, 'seed_kind': 'skeleton', 'seed_layer': ''}, True
+    )
     assert 'predicted skeleton' in r['text'] and 'from layer' not in r['text']
     assert r['problem'] is None
-    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': ''}, False)
+    r = describe_seed_source(
+        {**base, 'seed_kind': 'skeleton', 'seed_layer': ''}, False
+    )
     assert 'geometry head' in r['problem']
 
 

@@ -155,7 +155,7 @@ class YoloTrainWidget(QGroupBox):
         self.context_spin.setSingleStep(0.25)
         self.context_spin.setValue(DEFAULT_YOLO_CROP['context_factor'])
         self.context_spin.setToolTip(
-            'Crop side = this x the cell\'s minor axis: how much neighbouring '
+            "Crop side = this x the cell's minor axis: how much neighbouring "
             'tissue the classifier sees. Stored in the model and used at prediction.'
         )
         self.min_crop_spin = QSpinBox()
@@ -242,10 +242,14 @@ class YoloTrainWidget(QGroupBox):
         if self.viewer is None:
             return
         images = [
-            l for l in self.viewer.layers if isinstance(l, napari.layers.Image)
+            lay
+            for lay in self.viewer.layers
+            if isinstance(lay, napari.layers.Image)
         ]
         labels = [
-            l for l in self.viewer.layers if isinstance(l, napari.layers.Labels)
+            lay
+            for lay in self.viewer.layers
+            if isinstance(lay, napari.layers.Labels)
         ]
         for combo, layers in (
             (self.image_combo, images),
@@ -284,26 +288,32 @@ class YoloTrainWidget(QGroupBox):
         )
         if img is None or lab is None or cls is None:
             QMessageBox.warning(
-                self, 'YOLO', 'Pick an RGB image, a labels layer and a class layer.'
+                self,
+                'YOLO',
+                'Pick an RGB image, a labels layer and a class layer.',
             )
             return
         if lab is cls:
             QMessageBox.warning(
-                self, 'YOLO',
+                self,
+                'YOLO',
                 'The class layer must be a different layer from the cell labels.',
             )
             return
         labels, classes = layer_array(lab), layer_array(cls)
         if labels.shape != classes.shape:
             QMessageBox.warning(
-                self, 'YOLO',
+                self,
+                'YOLO',
                 f'The class layer {classes.shape} and the cell labels '
                 f'{labels.shape} must have the same shape.',
             )
             return
         ids = [int(i) for i in np.unique(classes) if i > 0]
         if not ids:
-            QMessageBox.warning(self, 'YOLO', 'The class layer has no annotated pixels.')
+            QMessageBox.warning(
+                self, 'YOLO', 'The class layer has no annotated pixels.'
+            )
             return
         name = img.name
         taken = {s['name'] for s in self.samples}
@@ -337,9 +347,7 @@ class YoloTrainWidget(QGroupBox):
     def _refresh_sample_views(self):
         self.sample_list.clear()
         for s in self.samples:
-            self.sample_list.addItem(
-                f'{s["name"]}   classes {s["class_ids"]}'
-            )
+            self.sample_list.addItem(f'{s["name"]}   classes {s["class_ids"]}')
         self._rebuild_class_table()
 
     def _rebuild_class_table(self):
@@ -369,7 +377,9 @@ class YoloTrainWidget(QGroupBox):
         for r in range(self.class_table.rowCount()):
             if self.class_table.item(r, 0).checkState() == Qt.Checked:
                 cid = int(self.class_table.item(r, 1).text())
-                out[cid] = self.class_table.item(r, 2).text().strip() or f'class{cid}'
+                out[cid] = (
+                    self.class_table.item(r, 2).text().strip() or f'class{cid}'
+                )
         return out
 
     # ------------------------------------------------------------- run
@@ -400,7 +410,7 @@ class YoloTrainWidget(QGroupBox):
             raise ValueError('There is no model to attach the classifier to.')
         if not self.name_edit.text().strip():
             raise ValueError('Give the new model a name.')
-        if len(set(n.lower() for n in names.values())) != len(names):
+        if len({n.lower() for n in names.values()}) != len(names):
             raise ValueError('Class names must be different.')
         if self.min_crop_spin.value() > self.max_crop_spin.value():
             raise ValueError('Min crop size must not exceed max crop size.')
@@ -566,7 +576,9 @@ class YoloTrainWidget(QGroupBox):
                 f'Training on {"GPU " + dev if dev != "cpu" else "CPU (slow)"}'
             )
         elif kind == 'progress':
-            self.bar.setValue(50 + int(50 * ev['epoch'] / max(ev['epochs'], 1)))
+            self.bar.setValue(
+                50 + int(50 * ev['epoch'] / max(ev['epochs'], 1))
+            )
             self.status.setText(
                 f'Epoch {ev["epoch"]}/{ev["epochs"]} | val accuracy '
                 f'{ev["top1"]:.3f} (best {ev["best_top1"]:.3f})'

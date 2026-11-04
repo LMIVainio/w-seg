@@ -38,7 +38,9 @@ def parse_args(argv=None):
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument('--dataset', required=True, help='folder with train/ and val/')
+    p.add_argument(
+        '--dataset', required=True, help='folder with train/ and val/'
+    )
     p.add_argument('--out-root', required=True)
     p.add_argument('--name', default='yolo_classifier')
     p.add_argument('--stop-file', default=None)
@@ -51,7 +53,9 @@ def parse_args(argv=None):
     p.add_argument('--epochs', type=int, default=100)
     p.add_argument('--imgsz', type=int, default=256)
     p.add_argument('--batch', type=int, default=32)
-    p.add_argument('--device', default='auto', help="'auto', 'cpu' or a GPU index")
+    p.add_argument(
+        '--device', default='auto', help="'auto', 'cpu' or a GPU index"
+    )
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--patience', type=int, default=15)
     p.add_argument('--lr0', type=float, default=1e-3)
@@ -73,7 +77,9 @@ def parse_args(argv=None):
         'class folders, counts); copied into yolo_result.json and the bundle',
     )
     p.add_argument('--attach-to', default=None, help='W-seg bundle folder')
-    p.add_argument('--out-bundle', default=None, help='folder of the new bundle')
+    p.add_argument(
+        '--out-bundle', default=None, help='folder of the new bundle'
+    )
     args = p.parse_args(argv)
     if args.attach_to and not args.out_bundle:
         p.error('--attach-to needs --out-bundle')
@@ -107,7 +113,9 @@ def main(argv=None):
     dataset = Path(args.dataset)
     for split in ('train', 'val'):
         if not (dataset / split).is_dir():
-            raise FileNotFoundError(f"{dataset} must contain '{split}/' folders")
+            raise FileNotFoundError(
+                f"{dataset} must contain '{split}/' folders"
+            )
 
     out_dir = Path(args.out_root) / args.name
     n = 2
@@ -171,7 +179,13 @@ def main(argv=None):
         'hyper_parameters': hyper,
         'dataset': {
             k: info[k]
-            for k in ('split_mode', 'val_images', 'counts', 'n_cells', 'folders')
+            for k in (
+                'split_mode',
+                'val_images',
+                'counts',
+                'n_cells',
+                'folders',
+            )
             if k in info
         },
         'crop': info.get('crop'),
