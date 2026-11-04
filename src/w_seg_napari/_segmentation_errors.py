@@ -44,6 +44,13 @@ from w_seg_napari._instance_metrics import match, overlaps
 BAD = ('merged', 'fragment', 'spurious')
 STATUSES = ('ok', *BAD, 'outline')
 MODEL_VERSION = 1
+CHANGE_WORDS = {
+    'ok': 'unchanged',
+    'merged': 'split into smaller cells',  # the tool had joined several cells
+    'fragment': 'merged into a larger cell',  # the tool had cut a cell apart
+    'spurious': 'deleted',
+    'outline': 'outline adjusted',
+}
 MIN_CONTACT_PX = 3  # shorter shared borders are corners, not neighbours
 
 FEATURES = (
@@ -261,6 +268,8 @@ def table_from_session(path, pred_key='gasp_labels'):
     status = label_predicted_cells(pred, store[CORRECTED])
     table = feats.merge(status, on='label_id')
     table['slide'] = Path(path).name.removesuffix('_session.h5')
+    # what you did to the cell, in plain words
+    table['change'] = table['status'].map(CHANGE_WORDS)
     return table
 
 

@@ -10,6 +10,9 @@ SESSIONS  *_session.h5 files or folders holding them (the batch's wseg_batch
           spurious) from features of the cell, its wall signal and its
           neighbours.
 
+With --table the cell-by-cell list of your changes is also written (deleted /
+split into smaller cells / merged into a larger cell / outline adjusted).
+
 The report shows how well the model ranks errors on slides it has not seen
 (whole slides are held out), next to a size-only rule and a random forest.
 Use the .joblib file in the Batch tab ("Flag likely segmentation errors").
@@ -48,7 +51,9 @@ def main(argv=None):
     ap.add_argument('--pred', choices=['gasp', 'sp'], default='gasp')
     ap.add_argument(
         '--table',
-        help='also write the training table (one row per cell) to this csv',
+        help='write one row per predicted cell (label_id, slide, change, '
+        'status, iou and all features) to this csv; the `change` column '
+        'says what you did to each cell',
     )
     args = ap.parse_args(argv)
 
@@ -60,7 +65,7 @@ def main(argv=None):
             print(f'skipped {path.name}: no corrected labels saved')
             continue
         tables.append(t)
-        counts = t['status'].value_counts().to_dict()
+        counts = t['change'].value_counts().to_dict()
         print(f'{t["slide"].iloc[0]}: {len(t)} cells {counts}')
     if not tables:
         sys.exit('No session with saved corrections found.')

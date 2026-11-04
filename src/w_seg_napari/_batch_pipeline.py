@@ -194,6 +194,40 @@ def seed_arguments(params, store, sem):
 
 
 # ---------------------------------------------------------------------
+# Resuming: which images are already done
+# ---------------------------------------------------------------------
+# the dataset of the session that each stage leaves behind
+STAGE_RESULTS = {
+    'predict': 'pred_sem',
+    'superpixels': 'sp_labels',
+    'gasp': 'gasp_labels',
+    'classification': 'class_labels',
+}
+
+
+def is_done(image_name, out_dir, stages: dict) -> bool:
+    """
+    True when the outputs of the selected stages already exist for this
+    image: the session holds every result those stages make, and the table is
+    there if the table is exported. (The session is written last, so a run
+    that was interrupted does not count as done.)
+    """
+    sess = session_path(out_dir, image_name)
+    if not sess.is_file():
+        return False
+    if stages.get('export') and not table_path(out_dir, image_name).is_file():
+        return False
+    try:
+        return all(
+            has_dataset(sess, key)
+            for stage, key in STAGE_RESULTS.items()
+            if stages.get(stage)
+        )
+    except OSError:  # unreadable file: process it again
+        return False
+
+
+# ---------------------------------------------------------------------
 # One image
 # ---------------------------------------------------------------------
 def process_image(image_path, settings: dict, is_cancelled):
@@ -456,6 +490,11 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
         if is_cancelled():
             break
         yield ('progress', int(100 * i / total), f'({i + 1}/{total}) {name}')
+        if settings.get('skip_done') and is_done(
+            name, out, settings['stages']
+        ):
+            yield ('skipped', name)
+            continue
 
         gen = process_image(Path(dirpath) / name, settings, is_cancelled)
         results = None

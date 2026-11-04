@@ -495,3 +495,54 @@ def test_errors_are_scored_on_the_labels_that_were_measured(
     s['error_bundle'] = object()
     _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
     assert (seen['labels'] == labels).all()
+
+
+# ------------------------------------------------------------------ resuming
+def test_skip_done_continues_where_the_last_run_stopped(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    names = ['a.tif', 'b.tif', 'c.tif']
+    _make_images(tmp_path, names)
+    _drain(bp.run_batch(names[:2], tmp_path, _settings(), lambda: False))
+    CALLS.clear()
+    s = _settings()
+    s['skip_done'] = True
+    events, (n_ok, failed) = _drain(
+        bp.run_batch(names, tmp_path, s, lambda: False)
+    )
+    assert [e[1] for e in events if e[0] == 'skipped'] == ['a.tif', 'b.tif']
+    assert n_ok == 1 and not failed
+    assert [c[0] for c in CALLS] == [
+        'predict', 'superpixels', 'gasp', 'morphology'
+    ]  # only c.tif was processed
+
+
+def test_skip_done_is_off_by_default(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    events, (n_ok, _) = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False)
+    )
+    assert n_ok == 1 and not [e for e in events if e[0] == 'skipped']
+
+
+def test_image_is_not_done_when_a_selected_stage_has_no_result(
+    tmp_path, monkeypatch
+):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    # an earlier run that only predicted
+    _drain(
+        bp.run_batch(
+            ['a.tif'],
+            tmp_path,
+            _settings(superpixels=False, gasp=False, morphology=False,
+                      export=False),
+            lambda: False,
+        )
+    )
+    out = tmp_path / 'wseg_batch'
+    assert bp.is_done('a.tif', out, {'predict': True})
+    assert not bp.is_done('a.tif', out, {'predict': True, 'gasp': True})
+    assert not bp.is_done('a.tif', out, {'predict': True, 'export': True})
+    assert not bp.is_done('b.tif', out, {'predict': True})

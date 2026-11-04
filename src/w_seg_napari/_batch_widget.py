@@ -21,7 +21,7 @@ from qtpy.QtWidgets import (
 
 from w_seg_napari._batch_io import list_input_files, output_dir
 from w_seg_napari import _session_io as sio
-from w_seg_napari._batch_pipeline import run_batch
+from w_seg_napari._batch_pipeline import is_done, run_batch
 
 
 class BatchTabWidget(QWidget):
@@ -41,6 +41,7 @@ class BatchTabWidget(QWidget):
         self.cancel_event = threading.Event()
         self.failed = []
         self.notes = []
+        self.n_skipped = 0
         self.session = None  # {'path': Path | None, 'base': str} once opened
 
         self._init_ui()
@@ -171,8 +172,31 @@ class BatchTabWidget(QWidget):
         self._toggle_error_options(False)
         self.chk_export_table = QCheckBox('6. Export Morphology Table (.csv)')
         self.chk_export_table.setChecked(True)
+        for chk in (
+            self.chk_predict,
+            self.chk_superpixels,
+            self.chk_gasp,
+            self.chk_morphology,
+            self.chk_classification,
+            self.chk_export_table,
+        ):
+            chk.toggled.connect(self._update_done_count)
+
+        self.chk_skip_done = QCheckBox('Skip images that are already processed')
+        self.chk_skip_done.setToolTip(
+            'Lets you continue a large batch later: an image is skipped when '
+            'its session (and table) from an earlier run already hold the '
+            'results of the selected stages.\n'
+            'Switch this off after changing the model or the settings, '
+            'otherwise old results are kept.'
+        )
+        self.chk_skip_done.toggled.connect(self._update_done_count)
+        self.lbl_done = QLabel('')
+        self.lbl_done.setContentsMargins(20, 0, 0, 0)
 
         stage_layout.addWidget(self.chk_render_viewer)
+        stage_layout.addWidget(self.chk_skip_done)
+        stage_layout.addWidget(self.lbl_done)
         stage_layout.addWidget(self.chk_predict)
         stage_layout.addWidget(self.chk_superpixels)
         stage_layout.addWidget(self.chk_gasp)
@@ -283,6 +307,20 @@ class BatchTabWidget(QWidget):
         self.lbl_output.setText(f'Results go to: {output_dir(dirpath)}')
         self.btn_start_batch.setEnabled(len(self.files) > 0)
         self.status_label.setText('Ready to start batch process.')
+        self._update_done_count()
+
+    def _update_done_count(self, *_):
+        """Shows how many files a run with the skip option would leave out."""
+        if not self.chk_skip_done.isChecked() or not self.files:
+            self.lbl_done.setText('')
+            return
+        stages = self._batch_ui_settings()['stages']
+        out = output_dir(self.selected_dir)
+        n = sum(is_done(f, out, stages) for f in self.files)
+        self.lbl_done.setText(
+            f'{n} of {len(self.files)} file(s) already processed '
+            f'(for the selected stages); {len(self.files) - n} to do.'
+        )
 
     def _toggle_morphology_options(self, enabled):
         self.morphology_labels.setEnabled(enabled)
@@ -513,6 +551,7 @@ class BatchTabWidget(QWidget):
                 and self.chk_morphology.isChecked(),
             },
             'render': self.chk_render_viewer.isChecked(),
+            'skip_done': self.chk_skip_done.isChecked(),
             'morph_labels': self.morphology_labels.currentData(),
             'morph_signal': self.morphology_signal.currentData(),
         }
@@ -551,6 +590,7 @@ class BatchTabWidget(QWidget):
         self.cancel_event.clear()
         self.failed = []
         self.notes = []
+        self.n_skipped = 0
         self.progress_bar.setValue(0)
         self._set_running(True)
 
@@ -579,6 +619,8 @@ class BatchTabWidget(QWidget):
         elif kind == 'render':
             _, name, results = event
             self.main_widget.render_batch_results(name, results)
+        elif kind == 'skipped':
+            self.n_skipped += 1
         elif kind == 'note':
             self.notes.append(event[1])
         elif kind == 'failed':
@@ -597,6 +639,8 @@ class BatchTabWidget(QWidget):
         self.failed = failed
         cancelled = self.cancel_event.is_set()
         msg = f'{"Batch cancelled" if cancelled else "Batch finished"}.\nProcessed: {n_ok} of {len(self.files)} file(s).'
+        if self.n_skipped:
+            msg += f'\nSkipped (already processed): {self.n_skipped}.'
         if failed:
             msg += f'\n\nFailed on {len(failed)} file(s):\n' + '\n'.join(
                 f'- {f}: {err}' for f, err in failed[:5]
