@@ -118,6 +118,65 @@ NO_GEOMETRY = (
 )
 
 
+_SEED_NAMES = {
+    'skeleton': 'predicted skeleton (geo_skel)',
+    'edge_distance': 'predicted edge distance (geo_dist)',
+    'prediction': 'predicted wall map (pred_)',
+}
+_RIDGE_NAMES = {
+    'convergence': 'ridges where the direction field converges',
+    'sato': 'Sato ridges of the edge distance',
+    'both': 'convergence x Sato ridges',
+}
+NEEDS_GEOMETRY_HEAD = (
+    'needs a model with a geometry head, and the loaded model has none'
+)
+
+
+def describe_seed_source(params, has_geometry=None):
+    """
+    What the batch will use as seeds, as shown in the Batch tab.
+
+    params         the Superpixel tab's snapshot_params()
+    has_geometry   True / False when the model is known, None when it is not
+    Returns {'text': str or None, 'problem': str or None}. text is None when
+    the algorithm has no seeds (only the seeded EDT watershed does); problem
+    is set when the batch could not run with these settings. It mirrors
+    seed_arguments, which does the real work for every image.
+    """
+    if params.get('algo_idx') != 5:
+        return {'text': None, 'problem': None}
+    ridge = params.get('ridge_method')
+    kind = params.get('seed_kind')
+    layer = params.get('seed_layer') or 'no layer'
+    if ridge:
+        what = _RIDGE_NAMES.get(ridge, ridge)
+        uses_geo = True
+    elif kind in ('skeleton', 'edge_distance'):
+        what = _SEED_NAMES[kind]
+        uses_geo = True
+    elif kind == 'prediction':
+        what = _SEED_NAMES[kind]
+        uses_geo = False
+    else:
+        return {
+            'text': f"layer '{layer}'",
+            'problem': (
+                f"The seed layer '{layer}' exists for one image only, so a "
+                'batch cannot use it. Choose a geo_skel_ or geo_dist_ layer, '
+                'a pred_ layer or a ridge source in the Superpixel tab.'
+            ),
+        }
+    detail = f'{what}, threshold {params.get("seed_threshold", 0.5):g}'
+    if not ridge and kind in _SEED_NAMES and layer != 'no layer':
+        detail += f" (from layer '{layer}')"
+    text = f'{detail}; computed for every image'
+    problem = None
+    if uses_geo and has_geometry is False:
+        problem = f'These seeds ({what}) {NEEDS_GEOMETRY_HEAD}.'
+    return {'text': text, 'problem': problem}
+
+
 def seed_arguments(params, store, sem):
     """
     Extra inputs of the seeded EDT watershed (algorithm 5) for one image, taken

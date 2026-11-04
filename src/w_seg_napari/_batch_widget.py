@@ -72,6 +72,9 @@ class BatchTabWidget(QWidget):
         self.superpixel_label = QLabel(
             '<b>Superpixels:</b> Default parameters'
         )
+        self.seed_label = QLabel('')
+        self.seed_label.setWordWrap(True)
+        self.seed_label.setVisible(False)
         self.gasp_linkage_label = QLabel(
             '<b>GASP linkage:</b> Default linkage'
         )
@@ -79,6 +82,7 @@ class BatchTabWidget(QWidget):
         for lbl in (
             self.predict_label,
             self.superpixel_label,
+            self.seed_label,
             self.gasp_linkage_label,
             self.classifier_label,
         ):
@@ -220,6 +224,21 @@ class BatchTabWidget(QWidget):
             self.superpixel_label.setText(
                 f'<b>Superpixels:</b> {info.get("sp_algo", "Default")}'
             )
+            seed = info.get('seed') or {}
+            if seed.get('text'):
+                color = '#c0392b' if seed.get('problem') else '#2e7d32'
+                note = (
+                    f'<br><span style="color:{color}">{seed["problem"]}</span>'
+                    if seed.get('problem')
+                    else ''
+                )
+                self.seed_label.setText(
+                    f'<b>Seeds</b> (from the Superpixel tab): '
+                    f'{seed["text"]}{note}'
+                )
+                self.seed_label.setVisible(True)
+            else:
+                self.seed_label.setVisible(False)
             self.gasp_linkage_label.setText(
                 f'<b>GASP linkage:</b> {info.get("gasp_linkage", "Default")}'
             )

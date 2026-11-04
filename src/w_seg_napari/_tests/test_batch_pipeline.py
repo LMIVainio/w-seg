@@ -308,3 +308,60 @@ def test_seeded_watershed_errors_are_clear_per_image(tmp_path, monkeypatch):
         bp.run_batch(['a.tif'], tmp_path, s, lambda: False)
     )
     assert n_ok == 1 and failed == []
+
+
+def test_describe_seed_source():
+    from w_seg_napari._batch_pipeline import describe_seed_source
+
+    base = {'algo_idx': 5, 'seed_threshold': 0.5}
+    # other algorithms have no seed line
+    assert describe_seed_source({'algo_idx': 1}) == {'text': None, 'problem': None}
+
+    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': 'geo_skel_a'}, True)
+    assert r['problem'] is None
+    assert 'skeleton' in r['text'] and 'geo_skel_a' in r['text'] and 'every image' in r['text']
+
+    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': 'geo_skel_a'}, False)
+    assert 'geometry head' in r['problem']
+    # unknown model: no complaint
+    assert describe_seed_source({**base, 'seed_kind': 'edge_distance', 'seed_layer': 'g'}, None)['problem'] is None
+
+    # a wall-prediction seed does not need the geometry head
+    r = describe_seed_source({**base, 'seed_kind': 'prediction', 'seed_layer': 'pred_a'}, False)
+    assert r['problem'] is None
+
+    # ridge sources win over the layer and need the geometry head
+    r = describe_seed_source({**base, 'ridge_method': 'both', 'seed_kind': 'other'}, False)
+    assert 'Sato' in r['text'] and r['problem']
+
+    # a layer that exists for one image only
+    for kind in ('labels', 'other', None):
+        r = describe_seed_source({**base, 'seed_kind': kind, 'seed_layer': 'my_seeds'}, True)
+        assert 'my_seeds' in r['problem'] and 'one image only' in r['problem']
+
+
+def test_describe_matches_seed_arguments():
+    # whatever describe_seed_source accepts, seed_arguments must also accept
+    import numpy as np
+
+    from w_seg_napari._batch_pipeline import describe_seed_source, seed_arguments
+
+    geo = np.zeros((4, 8, 8), np.float32)
+    sem = np.zeros((8, 8), np.float32)
+    for params in (
+        {'algo_idx': 5, 'seed_kind': 'skeleton'},
+        {'algo_idx': 5, 'seed_kind': 'edge_distance'},
+        {'algo_idx': 5, 'seed_kind': 'prediction'},
+        {'algo_idx': 5, 'ridge_method': 'sato'},
+    ):
+        assert describe_seed_source(params, True)['problem'] is None
+        assert seed_arguments(params, {'pred_geo': geo}, sem)
+    for kind in ('labels', 'other'):
+        params = {'algo_idx': 5, 'seed_kind': kind}
+        assert describe_seed_source(params, True)['problem']
+        try:
+            seed_arguments(params, {'pred_geo': geo}, sem)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('seed_arguments should refuse this')

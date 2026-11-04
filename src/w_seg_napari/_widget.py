@@ -18,6 +18,8 @@ from w_seg_napari._widget_tabs import (
     Tab4Analysis,
     Tab5Batch,
 )
+from w_seg_napari._batch_pipeline import describe_seed_source
+from w_seg_napari._model_config import has_geometry
 from w_seg_napari._wsegutils import get_model_config
 
 
@@ -276,12 +278,28 @@ class WSegMasterWidget(QWidget):
             classifier_str = (
                 self.tab4.cell_classifier._refresh_active_classifier()
             )
+        seed = {'text': None, 'problem': None}
+        if hasattr(self.tab1, 'superpixel_widget') and hasattr(
+            self.tab1.superpixel_widget, 'snapshot_params'
+        ):
+            seed = describe_seed_source(
+                self.tab1.superpixel_widget.snapshot_params(),
+                self._model_has_geometry(),
+            )
         return {
             'model_name': model_str,
             'sp_algo': sp_algo,
             'gasp_linkage': gasp_link,
             'classifier_type': classifier_str,
+            'seed': seed,
         }
+
+    def _model_has_geometry(self):
+        """True / False for the model loaded in tab 1, None if none is loaded."""
+        model = self.tab1.model_state.get('generator')
+        if model is None:
+            return None
+        return has_geometry(get_model_config(model))
 
     # =========================================================================
     # BATCH HOOKS (used by the batch tab)
@@ -306,6 +324,16 @@ class WSegMasterWidget(QWidget):
                 'the classification stage.'
             )
 
+        sp_params = self.tab1.superpixel_widget.snapshot_params()
+        if stages.get('superpixels'):
+            # tell the user now, not after the first image has been predicted
+            seed = describe_seed_source(
+                sp_params,
+                self._model_has_geometry() if stages.get('predict') else None,
+            )
+            if seed['problem']:
+                raise ValueError(seed['problem'])
+
         w_net = self.tab1.w_net_widget.get_settings()
         return {
             **batch_ui,
@@ -314,7 +342,7 @@ class WSegMasterWidget(QWidget):
             'device': self.tab1.device,
             'patch_size': w_net['patch_size'],
             'stride': w_net['stride'],
-            'sp_params': self.tab1.superpixel_widget.snapshot_params(),
+            'sp_params': sp_params,
             'gasp_params': self.tab1.gasp_widget.snapshot_params(),
             'morph_params': self.tab4.morphology_widget.snapshot_params(),
             'classifier': self.tab4.cell_classifier.clf_manager,
