@@ -1,6 +1,7 @@
 import threading
 from pathlib import Path
 
+import numpy as np
 from napari.qt.threading import thread_worker
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
@@ -517,12 +518,31 @@ class BatchTabWidget(QWidget):
                 payload = sio.layer_to_payload(v.layers[name], order=i)
                 if payload is not None:
                     payloads.append(payload)
+        if corrected is None and not payloads:
+            QMessageBox.information(
+                self,
+                'Nothing to save',
+                'Pick a Labels layer for the corrected labels or tick at '
+                'least one other layer. The session file was not changed.',
+            )
+            return
+        if corrected is not None and not np.any(corrected):
+            answer = QMessageBox.question(
+                self,
+                'Empty labels',
+                f'The layer "{label_name}" has no labels at all. Saving it '
+                'replaces the corrected labels in the session with an empty '
+                'image. Save anyway?',
+            )
+            if answer != QMessageBox.Yes:
+                return
         try:
             sio.save_edits(
                 path,
                 corrected=corrected,
                 corrected_layer=layer_name,
-                extras=payloads,
+                # no ticked layers: keep the ones already in the file
+                extras=payloads or None,
             )
         except Exception as e:
             QMessageBox.warning(self, 'Cannot save session', f'{type(e).__name__}: {e}')
