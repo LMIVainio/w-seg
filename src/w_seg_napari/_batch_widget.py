@@ -150,6 +150,25 @@ class BatchTabWidget(QWidget):
             '5. Run Cell Classification (classifier from tab 4)'
         )
         self.chk_classification.setChecked(False)
+        self.chk_errors = QCheckBox('Flag likely segmentation errors')
+        self.chk_errors.setToolTip(
+            'Adds p_error and error_type columns and an error_<image> layer '
+            '(needs an error model trained with scripts/error_model.py '
+            'from your corrected sessions).'
+        )
+        self.chk_errors.setChecked(False)
+        self.chk_errors.toggled.connect(self._toggle_error_options)
+        err_row = QHBoxLayout()
+        err_row.setContentsMargins(20, 0, 0, 0)
+        self.btn_error_model = QPushButton('Error model...')
+        self.btn_error_model.clicked.connect(self._select_error_model)
+        self.lbl_error_model = QLabel('No model selected.')
+        self.lbl_error_model.setWordWrap(True)
+        self.lbl_error_model.setStyleSheet('color: gray; font-style: italic;')
+        err_row.addWidget(self.btn_error_model)
+        err_row.addWidget(self.lbl_error_model, stretch=1)
+        self.error_model_path = ''
+        self._toggle_error_options(False)
         self.chk_export_table = QCheckBox('6. Export Morphology Table (.csv)')
         self.chk_export_table.setChecked(True)
 
@@ -160,6 +179,8 @@ class BatchTabWidget(QWidget):
         stage_layout.addWidget(self.chk_morphology)
         stage_layout.addLayout(morph_opts)
         stage_layout.addWidget(self.chk_classification)
+        stage_layout.addWidget(self.chk_errors)
+        stage_layout.addLayout(err_row)
         stage_layout.addWidget(self.chk_export_table)
         group_stages.setLayout(stage_layout)
         self.group_stages = group_stages
@@ -267,6 +288,18 @@ class BatchTabWidget(QWidget):
         self.morphology_labels.setEnabled(enabled)
         self.morphology_signal.setEnabled(enabled)
 
+    def _toggle_error_options(self, enabled):
+        self.btn_error_model.setEnabled(enabled)
+
+    def _select_error_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Error model', '', 'Error model (*.joblib)'
+        )
+        if path:
+            self.error_model_path = path
+            self.lbl_error_model.setText(Path(path).name)
+            self.lbl_error_model.setStyleSheet('font-style: normal;')
+
     def update_model_summary(self):
         """Call this whenever tabs are switched or new models/settings are loaded."""
         if hasattr(self.main_widget, 'get_active_models_info'):
@@ -354,7 +387,7 @@ class BatchTabWidget(QWidget):
     @staticmethod
     def _is_batch_layer(name):
         return name.startswith(
-            ('pred_', 'sp_', 'gasp_cells_', 'geo_', '[Predicted Classes]')
+            ('pred_', 'sp_', 'gasp_cells_', 'geo_', 'error_', '[Predicted Classes]')
         ) or name.startswith(('aff_', 'affinity'))
 
     def _on_open_session(self):
@@ -503,6 +536,14 @@ class BatchTabWidget(QWidget):
             settings = self.main_widget.collect_batch_settings(
                 self._batch_ui_settings()
             )
+            if self.chk_errors.isChecked() and self.chk_morphology.isChecked():
+                if not self.error_model_path:
+                    raise ValueError('Choose an error model, or switch the flagging off.')
+                from w_seg_napari._segmentation_errors import load_error_model
+
+                settings['error_bundle'] = load_error_model(
+                    self.error_model_path
+                )
         except ValueError as e:
             QMessageBox.warning(self, 'Cannot start batch', str(e))
             return

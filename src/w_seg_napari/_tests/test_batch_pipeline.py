@@ -436,3 +436,62 @@ def test_morphology_only_run_keeps_corrections(tmp_path, monkeypatch):
     key, _ = _with_correction(tmp_path, sessions)
     _drain(bp.run_batch(['a.tif'], tmp_path, _morph_only(), lambda: False))
     assert bp.CORRECTED in sessions[key]
+
+
+# ------------------------------------------------------------ error flagging
+def _fake_flagger(monkeypatch):
+    seen = {}
+
+    def flag_labels(labels, wall, bundle, pixel_size=1.0):
+        seen['labels'] = labels
+        scores = pd.DataFrame(
+            {
+                'label_id': [1, 2],
+                'p_error': [0.9, 0.1],
+                'error_type': ['merged', 'ok'],
+                'flagged': [True, False],
+            }
+        )
+        return scores, np.where(labels == 1, 0.9, 0.1).astype(np.float32)
+
+    mod = types.ModuleType('w_seg_napari._segmentation_errors')
+    mod.flag_labels = flag_labels
+    monkeypatch.setitem(sys.modules, 'w_seg_napari._segmentation_errors', mod)
+    return seen
+
+
+def test_error_model_adds_columns_map_and_note(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    _fake_flagger(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    s = _settings()
+    s['error_bundle'] = object()
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    table = pd.read_csv(tmp_path / 'wseg_batch' / 'a_morphology.csv')
+    assert list(table['error_type']) == ['merged', 'ok']
+    assert list(table['flagged']) == [True, False]
+    (sess,) = sessions.values()
+    assert sess['error_map'].shape == sess['gasp_labels'].shape
+    assert any('1 cell(s) flagged' in e[1] for e in events if e[0] == 'note')
+
+
+def test_no_error_model_no_columns(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    table = pd.read_csv(tmp_path / 'wseg_batch' / 'a_morphology.csv')
+    assert 'p_error' not in table.columns
+
+
+def test_errors_are_scored_on_the_labels_that_were_measured(
+    tmp_path, monkeypatch
+):
+    sessions = _install_fakes(monkeypatch)
+    seen = _fake_flagger(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, labels = _with_correction(tmp_path, sessions)
+    s = _morph_only()
+    s['error_bundle'] = object()
+    _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    assert (seen['labels'] == labels).all()

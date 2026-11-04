@@ -413,6 +413,15 @@ class WSegMasterWidget(QWidget):
                 results['gasp_labels'],
                 opacity=0.8,
             )
+        if 'error_map' in results:
+            put(
+                f'error_{base}',
+                'image',
+                results['error_map'],
+                colormap='magma',
+                contrast_limits=[0.0, 1.0],
+                opacity=0.5,
+            )
         if 'class_labels' in results:
             put(
                 f'[Predicted Classes] {base}',

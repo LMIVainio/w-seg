@@ -235,6 +235,7 @@ def process_image(image_path, settings: dict, is_cancelled):
         )
     if any(stages.get(s) for s in ('predict', 'superpixels', 'gasp')):
         store.pop(CORRECTED, None)
+        store.pop('error_map', None)  # belongs to the old labels
 
     rgb = load_image(image_path)
     results = {'raw': rgb}
@@ -395,6 +396,25 @@ def process_image(image_path, settings: dict, is_cancelled):
     if 'class_labels' in store and stages.get('classification'):
         results['class_labels'] = store['class_labels']
 
+    # 5b. Likely segmentation errors (optional model from "Train error model")
+    bundle = settings.get('error_bundle')
+    if stages.get('morphology'):
+        store.pop('error_map', None)
+    if bundle is not None and df is not None:
+        yield sub('Flagging likely segmentation errors')
+        from w_seg_napari._segmentation_errors import flag_labels
+
+        scores, emap = flag_labels(
+            store[key],
+            sem,
+            bundle,
+            settings['morph_params'].get('pixel_spacing') or 1.0,
+        )
+        df = df.merge(scores, on='label_id', how='left')
+        store['error_map'] = emap
+        results['error_map'] = emap
+        results['n_flagged'] = int(scores['flagged'].sum())
+
     # 6. Export ----------------------------------------------------------
     out_dir = settings['out_dir']
     if stages.get('export') and df is not None:
@@ -459,6 +479,12 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
         n_ok += 1
         for note in results.get('notes', []):
             yield ('note', note)
+        if 'n_flagged' in results:
+            yield (
+                'note',
+                f'{name}: {results["n_flagged"]} cell(s) flagged as likely '
+                'segmentation errors (columns p_error, error_type).',
+            )
         if settings.get('render'):
             yield ('render', name, results)
 
