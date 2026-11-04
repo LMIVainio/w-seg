@@ -55,7 +55,7 @@ def _install_fakes(monkeypatch):
             return sp
 
     def measure(labels_layer, worker=None, **kw):
-        CALLS.append(('morphology', worker.abort_requested))
+        CALLS.append(('morphology', worker.abort_requested, labels_layer))
         yield 1, 2, 'half way'
         df = pd.DataFrame({'label_id': [1, 2], 'area': [10.0, 20.0]})
         return df, labels_layer, {}
@@ -84,6 +84,11 @@ def _install_fakes(monkeypatch):
     monkeypatch.setattr(bp, 'save_session', fake_save)
     monkeypatch.setattr(
         bp, 'load_session', lambda path: dict(sessions[str(path)])
+    )
+    monkeypatch.setattr(
+        bp,
+        'has_dataset',
+        lambda path, key: key in sessions.get(str(path), {}),
     )
     return sessions
 
@@ -365,3 +370,69 @@ def test_describe_matches_seed_arguments():
             pass
         else:
             raise AssertionError('seed_arguments should refuse this')
+
+
+# --------------------------------------------------------------- corrections
+def _morph_only(**extra):
+    s = _settings(predict=False, superpixels=False, gasp=False, **extra)
+    s['morph_labels'] = 'corrected'
+    return s
+
+
+def _with_correction(tmp_path, sessions, name='a.tif'):
+    key = str(tmp_path / 'wseg_batch' / (name.split('.')[0] + '_session.h5'))
+    labels = np.full((16, 20), 7, np.int32)
+    sessions[key][bp.CORRECTED] = labels
+    return key, labels
+
+
+def test_morphology_uses_the_corrected_labels(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    _, labels = _with_correction(tmp_path, sessions)
+    CALLS.clear()
+    events, _ = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _morph_only(), lambda: False)
+    )
+    assert CALLS[0][0] == 'morphology'
+    assert (CALLS[0][2] == labels).all()  # the corrected labels were measured
+    table = pd.read_csv(tmp_path / 'wseg_batch' / 'a_morphology.csv')
+    assert list(table['labels_source'].unique()) == ['corrected']
+    assert not [e for e in events if e[0] == 'note']
+
+
+def test_image_without_corrections_falls_back_and_says_so(
+    tmp_path, monkeypatch
+):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    events, _ = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _morph_only(), lambda: False)
+    )
+    notes = [e[1] for e in events if e[0] == 'note']
+    assert len(notes) == 1 and 'a.tif' in notes[0]
+    table = pd.read_csv(tmp_path / 'wseg_batch' / 'a_morphology.csv')
+    assert list(table['labels_source'].unique()) == ['gasp']
+
+
+def test_recomputing_labels_discards_stale_corrections(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, _ = _with_correction(tmp_path, sessions)
+    events, _ = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False)
+    )
+    assert bp.CORRECTED not in sessions[key]
+    assert any('discarded' in e[1] for e in events if e[0] == 'note')
+
+
+def test_morphology_only_run_keeps_corrections(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, _ = _with_correction(tmp_path, sessions)
+    _drain(bp.run_batch(['a.tif'], tmp_path, _morph_only(), lambda: False))
+    assert bp.CORRECTED in sessions[key]

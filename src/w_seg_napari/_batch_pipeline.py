@@ -31,6 +31,12 @@ from w_seg_napari._batch_io import (
     to_model_input_range,
 )
 from w_seg_napari._geometry_fields import geometry_payloads, masked_direction
+from w_seg_napari._session_io import (
+    CORRECTED,
+    has_dataset,
+    load_session,
+    save_session,
+)
 
 STAGES = (
     'predict',
@@ -60,24 +66,7 @@ class _AbortShim:
         return bool(self._is_cancelled())
 
 
-# ---------------------------------------------------------------------
-# Session files (what a batch run leaves next to the tables)
-# ---------------------------------------------------------------------
-def save_session(path, arrays: dict, attrs: dict):
-    import h5py
-
-    with h5py.File(path, 'w') as f:
-        for key, val in arrays.items():
-            f.create_dataset(key, data=val, compression='gzip')
-        for key, val in attrs.items():
-            f.attrs[key] = val
-
-
-def load_session(path) -> dict:
-    import h5py
-
-    with h5py.File(path, 'r') as f:
-        return {key: f[key][:] for key in f}
+# Session files live in _session_io (save_session / load_session).
 
 
 def _require(store: dict, *keys, stage: str):
@@ -234,6 +223,18 @@ def process_image(image_path, settings: dict, is_cancelled):
         and sess_path.is_file()
     ):
         store = load_session(sess_path)  # earlier results of skipped stages
+    notes = []
+    if (
+        sess_path.is_file()
+        and any(stages.get(s) for s in ('predict', 'superpixels', 'gasp'))
+        and has_dataset(sess_path, CORRECTED)
+    ):
+        notes.append(
+            f'{name}: new labels were computed, so the corrected labels '
+            'saved earlier in its session were discarded.'
+        )
+    if any(stages.get(s) for s in ('predict', 'superpixels', 'gasp')):
+        store.pop(CORRECTED, None)
 
     rgb = load_image(image_path)
     results = {'raw': rgb}
@@ -322,13 +323,22 @@ def process_image(image_path, settings: dict, is_cancelled):
     df = None
     labels_measured = None
     if stages.get('morphology'):
-        key = (
-            'gasp_labels'
-            if settings['morph_labels'] == 'gasp'
-            else 'sp_labels'
-        )
+        wanted = settings['morph_labels']
+        if wanted == 'corrected':
+            if CORRECTED in store:
+                key = CORRECTED
+            else:
+                key = 'gasp_labels'
+                notes.append(
+                    f'{name}: no corrected labels saved, measured the GASP '
+                    'labels instead.'
+                )
+        else:
+            key = 'gasp_labels' if wanted == 'gasp' else 'sp_labels'
         _require(
-            store, key, stage='gasp' if key == 'gasp_labels' else 'superpixels'
+            store,
+            key,
+            stage='gasp' if key == 'gasp_labels' else 'superpixels',
         )
         wall_signal = (
             sem
@@ -363,6 +373,13 @@ def process_image(image_path, settings: dict, is_cancelled):
         done += 1
         df = df.copy()
         df.insert(0, 'source_file', name)
+        df.insert(
+            1,
+            'labels_source',
+            {CORRECTED: 'corrected', 'gasp_labels': 'gasp'}.get(
+                key, 'superpixels'
+            ),
+        )
 
     # 5. Classification ----------------------------------------------------
     if stages.get('classification') and df is not None:
@@ -399,6 +416,7 @@ def process_image(image_path, settings: dict, is_cancelled):
         },
     )
     results['table'] = df
+    results['notes'] = notes
     return results
 
 
@@ -439,6 +457,8 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
         if results is None:  # cancelled while working on this image
             break
         n_ok += 1
+        for note in results.get('notes', []):
+            yield ('note', note)
         if settings.get('render'):
             yield ('render', name, results)
 

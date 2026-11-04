@@ -1,8 +1,6 @@
-import json
 import os
 from typing import Any
 
-import h5py
 import joblib
 import napari
 import numpy as np
@@ -15,7 +13,6 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -572,13 +569,14 @@ class CellClassificationWidget(QWidget):
         self.btn_export_data.clicked.connect(self._on_export_analytics)
         export_layout.addWidget(self.btn_export_data)
 
-        self.btn_export_layers = QPushButton('📦 Export Napari Layers')
+        self.btn_export_layers = QPushButton('📦 Export Layers as TIFF')
+        self.btn_export_layers.setToolTip(
+            'Saves the image and labels layers as TIFF files.\n'
+            'To keep and reopen a whole working state, use Open/Save Session '
+            'in the Batch tab.'
+        )
         self.btn_export_layers.clicked.connect(self._on_export_napari_layers)
         export_layout.addWidget(self.btn_export_layers)
-
-        self.btn_import_layers = QPushButton('📂 Import Napari Layers')
-        self.btn_import_layers.clicked.connect(self._on_import_napari_layers)
-        export_layout.addWidget(self.btn_import_layers)
 
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
@@ -1086,73 +1084,6 @@ class CellClassificationWidget(QWidget):
                 self, 'Export Failed', f'Failed to save file:\n{str(e)}'
             )
 
-    def export_to_h5(self, save_path: str) -> int:
-        """Handler: Extracts current viewer layers into a payload and forwards it to the headless HDF5 exporter."""
-        if self.viewer is None or len(self.viewer.layers) == 0:
-            return 0
-
-        layers_payload = []
-
-        for layer in self.viewer.layers:
-            layer_type = layer._type_string
-            base_meta = {
-                'opacity': float(layer.opacity),
-                'scale': list(layer.scale),
-                'visible': bool(layer.visible),
-                'blending_mode': str(layer.blending),
-            }
-
-            if isinstance(layer, (napari.layers.Image, napari.layers.Labels)):
-                meta = base_meta.copy()
-                meta['colormap'] = getattr(
-                    layer.colormap, 'name', str(layer.colormap)
-                )
-
-                if layer_type == 'image':
-                    meta['rgb'] = bool(getattr(layer, 'rgb', False))
-
-                elif layer_type == 'labels':
-                    color_dict = None
-                    if (
-                        hasattr(layer.colormap, 'color_dict')
-                        and layer.colormap.color_dict
-                    ):
-                        color_dict = layer.colormap.color_dict
-                    elif (
-                        hasattr(layer, 'color')
-                        and isinstance(layer.color, dict)
-                        and layer.color
-                    ):
-                        color_dict = layer.color
-
-                    if color_dict is not None:
-                        meta['custom_label_colors'] = color_dict
-
-                layers_payload.append(
-                    {
-                        'name': layer.name,
-                        'type': layer_type,
-                        'data': layer.data,
-                        'metadata': meta,
-                    }
-                )
-
-            elif isinstance(layer, napari.layers.Shapes):
-                meta = base_meta.copy()
-                meta['shape_types'] = layer.shape_types
-
-                layers_payload.append(
-                    {
-                        'name': layer.name,
-                        'type': layer_type,
-                        'shapes_data': layer.data,
-                        'metadata': meta,
-                    }
-                )
-
-        # Delegate execution to headless utility
-        return w.export_layers_to_h5(layers_payload, save_path)
-
     def export_to_tiff_dir(self, dirpath: str) -> int:
         """Headless exporter: Saves all Image/Labels layers as individual TIFF files.
 
@@ -1224,272 +1155,37 @@ class CellClassificationWidget(QWidget):
         return exported_count
 
     def _on_export_napari_layers(self):
-        """Interactive GUI button callback."""
+        """Interactive GUI button callback: all image/labels layers to TIFF files."""
         if self.viewer is None or len(self.viewer.layers) == 0:
             QMessageBox.warning(
                 self, 'Export Error', 'No Napari viewer or layers available.'
             )
             return
 
-        shortest_name = min(
-            (layer.name for layer in self.viewer.layers),
-            key=len,
-            default='napari_layers_export',
-        )
-
-        items = ['HDF5 Single File (.h5)', 'Individual TIFF Files (.tif)']
-        item, ok = QInputDialog.getItem(
-            self, 'Export Format', 'Select export format:', items, 0, False
-        )
-        if not ok or not item:
-            return
-
         docs_dir = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DocumentsLocation
         )
         default_dir = os.path.join(docs_dir, 'napari_layers_export')
 
         try:
-            # OPTION A: HDF5 Export
-            if 'HDF5' in item:
-                save_path, _ = QFileDialog.getSaveFileName(
-                    self,
-                    'Save Napari Project Session',
-                    os.path.join(
-                        default_dir, f'{shortest_name}_segmentation_session.h5'
-                    ),
-                    'HDF5 Files (*.h5 *.hdf5)',
-                )
-                if not save_path:
-                    return
+            dirpath = QFileDialog.getExistingDirectory(
+                self,
+                'Select Directory to Export Napari Layers',
+                default_dir,
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+            )
+            if not dirpath:
+                return
 
-                count = self.export_to_h5(save_path)
-                QMessageBox.information(
-                    self,
-                    'Export Successful',
-                    f'Successfully saved {count} layer(s) to HDF5 file:<br/><code>{save_path}</code>',
-                )
-
-            # OPTION B: TIFF Directory Export
-            else:
-                dirpath = QFileDialog.getExistingDirectory(
-                    self,
-                    'Select Directory to Export Napari Layers',
-                    default_dir,
-                    QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
-                )
-                if not dirpath:
-                    return
-
-                exported_count = self.export_to_tiff_dir(dirpath)
-                QMessageBox.information(
-                    self,
-                    'Export Successful',
-                    f'{exported_count} layer(s) exported successfully to:<br/><code>{dirpath}</code>',
-                )
-
+            exported_count = self.export_to_tiff_dir(dirpath)
+            QMessageBox.information(
+                self,
+                'Export Successful',
+                f'{exported_count} layer(s) exported successfully to:<br/><code>{dirpath}</code>',
+            )
         except (RuntimeError, ValueError, TypeError, OSError) as e:
             QMessageBox.critical(
                 self, 'Export Failed', f'Failed to export layers:\n{str(e)}'
-            )
-
-    def import_h5_file(self, file_path: str) -> int:
-        """
-        Headless loader method: Reads an HDF5 session file and rebuilds napari layers.
-        Returns the number of imported layers.
-        """
-        if self.viewer is None or not os.path.isfile(file_path):
-            return 0
-
-        layers_to_import = []
-
-        with h5py.File(file_path, 'r') as h5f:
-            for key in h5f:
-                item = h5f[key]
-
-                # Retrieve layer metadata
-                order = int(item.attrs.get('order', 0))
-                layer_type = item.attrs.get('layer_type', 'image')
-                opacity = float(item.attrs.get('opacity', 1.0))
-                scale = item.attrs.get('scale', None)
-                visible = bool(item.attrs.get('visible', True))
-                blending = item.attrs.get('blending_mode', 'translucent')
-
-                if scale is not None:
-                    scale = tuple(scale)
-
-                # Load Shape layer Group
-                if layer_type == 'shapes' and isinstance(item, h5py.Group):
-                    shape_types = json.loads(
-                        item.attrs.get('shape_types', '[]')
-                    )
-                    shapes_data = []
-                    if 'shapes_data' in item:
-                        s_group = item['shapes_data']
-                        sorted_keys = sorted(
-                            s_group.keys(),
-                            key=lambda x: (
-                                int(x.split('_')[-1]) if '_' in x else 0
-                            ),
-                        )
-                        for s_key in sorted_keys:
-                            shapes_data.append(s_group[s_key][()])
-
-                    layers_to_import.append(
-                        {
-                            'order': order,
-                            'name': key,
-                            'data': shapes_data,
-                            'layer_type': 'shapes',
-                            'shape_type': shape_types,
-                            'opacity': opacity,
-                            'scale': scale,
-                            'visible': visible,
-                            'blending_mode': blending,
-                        }
-                    )
-
-                # Load Image or Labels Data
-                elif isinstance(item, h5py.Dataset):
-                    data = item[()]
-                    is_rgb = bool(item.attrs.get('rgb', False))
-                    colormap = item.attrs.get('colormap', 'gray')
-
-                    custom_label_colors = None
-                    if 'custom_label_colors' in item.attrs:
-                        try:
-                            raw_colors = json.loads(
-                                item.attrs['custom_label_colors']
-                            )
-                            custom_label_colors = {
-                                int(k): v for k, v in raw_colors.items()
-                            }
-                        except (json.JSONDecodeError, ValueError):
-                            custom_label_colors = None
-
-                    if (
-                        not is_rgb
-                        and data.ndim >= 3
-                        and data.shape[-1] in (3, 4)
-                        and data.dtype == np.uint8
-                    ):
-                        is_rgb = True
-
-                    layers_to_import.append(
-                        {
-                            'order': order,
-                            'name': key,
-                            'data': data,
-                            'layer_type': layer_type,
-                            'opacity': opacity,
-                            'blending_mode': blending,
-                            'colormap': colormap,
-                            'custom_label_colors': custom_label_colors,
-                            'scale': scale,
-                            'visible': visible,
-                            'is_rgb': is_rgb,
-                        }
-                    )
-
-        # Sort layers by saved order in ascending index
-        layers_to_import.sort(key=lambda x: x['order'])
-
-        # Add layers sequentially to the viewer
-        for item in layers_to_import:
-            ltype = item['layer_type']
-
-            if ltype == 'labels' or (
-                ltype != 'shapes'
-                and np.issubdtype(item['data'].dtype, np.integer)
-                and not item['is_rgb']
-            ):
-                labels_kwargs = {
-                    'name': item['name'],
-                    'opacity': item['opacity'],
-                    'scale': item['scale'],
-                    'visible': item['visible'],
-                    'blending': item['blending_mode'],
-                }
-
-                if item.get('custom_label_colors'):
-                    from napari.utils.colormaps import DirectLabelColormap
-
-                    labels_kwargs['colormap'] = DirectLabelColormap(
-                        color_dict=item['custom_label_colors'],
-                        default_color=(0.0, 0.0, 0.0, 0.0),
-                    )
-                elif item.get('colormap') and item['colormap'] not in (
-                    'label_colormap',
-                    'custom',
-                    'gray',
-                ):
-                    try:
-                        labels_kwargs['colormap'] = item['colormap']
-                    except Exception:
-                        pass
-
-                self.viewer.add_labels(item['data'], **labels_kwargs)
-
-            elif ltype == 'shapes':
-                self.viewer.add_shapes(
-                    item['data'],
-                    shape_type=item['shape_type'],
-                    name=item['name'],
-                    opacity=item['opacity'],
-                    scale=item['scale'],
-                    visible=item['visible'],
-                    blending=item['blending_mode'],
-                )
-
-            else:
-                self.viewer.add_image(
-                    item['data'],
-                    name=item['name'],
-                    opacity=item['opacity'],
-                    scale=item['scale'],
-                    visible=item['visible'],
-                    blending=item['blending_mode'],
-                    colormap=item['colormap'],
-                    rgb=item['is_rgb'],
-                )
-
-        return len(layers_to_import)
-
-    def _on_import_napari_layers(self):
-        """Interactive GUI button callback."""
-        if self.viewer is None:
-            QMessageBox.warning(
-                self, 'Import Error', 'No Napari viewer instance available.'
-            )
-            return
-
-        docs_dir = QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.DocumentsLocation
-        )
-        default_dir = os.path.join(docs_dir, 'napari_layers_export')
-
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            'Import Napari Session (HDF5)',
-            default_dir,
-            'HDF5 Files (*.h5 *.hdf5)',
-        )
-
-        if not file_path:
-            return
-
-        try:
-            count = self.import_h5_file(file_path)
-            QMessageBox.information(
-                self,
-                'Import Successful',
-                f'Successfully restored {count} layer(s) in original order from:<br/><code>{file_path}</code>',
-            )
-        except (RuntimeError, ValueError, TypeError, OSError) as e:
-            QMessageBox.critical(
-                self,
-                'Import Failed',
-                f'Failed to import session file:\n{str(e)}',
             )
 
     def _extract_classes_from_layer(

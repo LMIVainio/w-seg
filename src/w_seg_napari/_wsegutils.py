@@ -28,7 +28,6 @@ from urllib.error import HTTPError, URLError
 # =====================================================================
 # Loading and saving h5 payloads
 # =====================================================================
-import h5py
 import keras
 import kornia.color as K_color
 
@@ -2257,97 +2256,6 @@ def sanitize_feature_matrix(
         raise TypeError(
             f'Unsupported input type for sanitize_feature_matrix: {type(data)}'
         )
-
-
-# =====================================================================
-# Import/export functions
-# At some point migrate CellClassificationWidget functions here
-# =====================================================================
-
-
-def export_layers_to_h5(layers_payload: list[dict], save_path: str) -> int:
-    """Headless HDF5 exporter. Writes serialized layer payloads to an HDF5 file.
-
-    Parameters
-    ----------
-    layers_payload : list[dict]
-        List of dictionaries where each item represents a layer containing:
-        'name', 'type', 'data', 'metadata', and optional 'shapes_data'.
-    save_path : str
-        Target filepath for the output .h5 file.
-
-    Returns
-    -------
-    int
-        Count of successfully exported layers.
-    """
-    if not layers_payload:
-        return 0
-
-    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-
-    written_count = 0
-    with h5py.File(save_path, 'w') as h5f:
-        for index, layer_info in enumerate(layers_payload):
-            layer_name_safe = layer_info['name'].replace('/', '_')
-            layer_type = layer_info['type']
-            metadata = layer_info.get('metadata', {})
-
-            if layer_type in ('image', 'labels'):
-                data = np.ascontiguousarray(layer_info['data'])
-                dset = h5f.create_dataset(
-                    layer_name_safe,
-                    data=data,
-                    compression='gzip',
-                    compression_opts=4,
-                )
-
-                # Store order index and metadata attributes
-                dset.attrs['order'] = index
-                dset.attrs['layer_type'] = layer_type
-
-                for k, v in metadata.items():
-                    if k == 'custom_label_colors' and isinstance(v, dict):
-                        # Serialize color dictionary safely to JSON string
-                        clean_color_dict = {}
-                        for ck, cv in v.items():
-                            if isinstance(cv, np.ndarray):
-                                cv_clean = cv.tolist()
-                            elif hasattr(cv, '__iter__'):
-                                cv_clean = [float(x) for x in cv]
-                            else:
-                                cv_clean = float(cv)
-                            clean_color_dict[str(ck)] = cv_clean
-                        dset.attrs[k] = json.dumps(clean_color_dict)
-                    else:
-                        dset.attrs[k] = v
-
-                written_count += 1
-
-            elif layer_type == 'shapes':
-                group = h5f.create_group(layer_name_safe)
-                group.attrs['order'] = index
-                group.attrs['layer_type'] = layer_type
-
-                for k, v in metadata.items():
-                    if k == 'shape_types' and isinstance(v, (list, tuple)):
-                        group.attrs[k] = json.dumps([str(s) for s in v])
-                    else:
-                        group.attrs[k] = v
-
-                shapes_group = group.create_group('shapes_data')
-                shapes_data = layer_info.get('shapes_data', [])
-                for s_idx, shape_arr in enumerate(shapes_data):
-                    shapes_group.create_dataset(
-                        f'shape_{s_idx:04d}',
-                        data=np.ascontiguousarray(shape_arr),
-                        compression='gzip',
-                        compression_opts=4,
-                    )
-
-                written_count += 1
-
-    return written_count
 
 
 # =====================================================================

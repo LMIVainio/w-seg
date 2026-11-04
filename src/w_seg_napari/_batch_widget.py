@@ -2,6 +2,7 @@ import threading
 from pathlib import Path
 
 from napari.qt.threading import thread_worker
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -9,6 +10,8 @@ from qtpy.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -17,6 +20,7 @@ from qtpy.QtWidgets import (
 )
 
 from w_seg_napari._batch_io import list_input_files, output_dir
+from w_seg_napari import _session_io as sio
 from w_seg_napari._batch_pipeline import run_batch
 
 
@@ -36,6 +40,8 @@ class BatchTabWidget(QWidget):
         self.worker = None
         self.cancel_event = threading.Event()
         self.failed = []
+        self.notes = []
+        self.session = None  # {'path': Path | None, 'base': str} once opened
 
         self._init_ui()
 
@@ -123,6 +129,13 @@ class BatchTabWidget(QWidget):
         self.morphology_labels = QComboBox()
         self.morphology_labels.addItem('GASP labels', 'gasp')
         self.morphology_labels.addItem('Superpixel labels', 'sp')
+        self.morphology_labels.addItem(
+            'Corrected labels (saved sessions)', 'corrected'
+        )
+        self.morphology_labels.setToolTip(
+            'Corrected: the labels you saved with "Save session"; an image '
+            'without them is measured from its GASP labels (and reported).'
+        )
         lbl_layout.addWidget(self.morphology_labels)
         morph_opts.addLayout(lbl_layout)
         sig_layout = QHBoxLayout()
@@ -180,7 +193,47 @@ class BatchTabWidget(QWidget):
         exec_layout.addWidget(self.progress_bar)
         group_exec.setLayout(exec_layout)
 
+        # --- Section: sessions --------------------------------------------------
+        group_sess = QGroupBox('Sessions (open, correct, save)')
+        sess_layout = QVBoxLayout()
+        sess_btns = QHBoxLayout()
+        self.btn_open_session = QPushButton('Open Session...')
+        self.btn_open_session.setToolTip(
+            'Opens a *_session.h5 file in the viewer: image, predictions, '
+            'labels and an editable copy of the labels.\n'
+            'Old "Export Napari Layers" files open too (layers only).'
+        )
+        self.btn_open_session.clicked.connect(self._on_open_session)
+        self.btn_save_session = QPushButton('Save Session')
+        self.btn_save_session.clicked.connect(self._on_save_session)
+        sess_btns.addWidget(self.btn_open_session)
+        sess_btns.addWidget(self.btn_save_session)
+        self.lbl_session = QLabel('No session open.')
+        self.lbl_session.setWordWrap(True)
+        self.lbl_session.setStyleSheet('color: gray; font-style: italic;')
+        lab_row = QHBoxLayout()
+        lab_row.addWidget(QLabel('Corrected labels:'))
+        self.combo_save_labels = QComboBox()
+        self.combo_save_labels.setToolTip(
+            'The Labels layer saved as the corrected cell labels. The '
+            'original batch labels stay in the file.'
+        )
+        lab_row.addWidget(self.combo_save_labels, stretch=1)
+        self.list_extra = QListWidget()
+        self.list_extra.setMaximumHeight(110)
+        self.list_extra.setToolTip(
+            'Other layers to keep in the session (class layers, shapes, ...).'
+        )
+        sess_layout.addLayout(sess_btns)
+        sess_layout.addWidget(self.lbl_session)
+        sess_layout.addLayout(lab_row)
+        sess_layout.addWidget(QLabel('Also keep these layers:'))
+        sess_layout.addWidget(self.list_extra)
+        group_sess.setLayout(sess_layout)
+        self.group_sess = group_sess
+
         main_layout.addWidget(group_io)
+        main_layout.addWidget(group_sess)
         main_layout.addWidget(group_summary)
         main_layout.addWidget(group_stages)
         main_layout.addWidget(group_exec)
@@ -246,8 +299,170 @@ class BatchTabWidget(QWidget):
                 f'<b>Classifier:</b> {info.get("classifier_type", "None")}'
             )
 
+    # --------------------------------------------------------------------------
+    # Sessions
+    # --------------------------------------------------------------------------
+    @property
+    def viewer(self):
+        return self.main_widget.viewer
+
     def refresh_layer_choices(self):
-        """Nothing to refresh: the batch works on files, not on viewer layers."""
+        """Refills the layer choices of the Sessions box (the batch itself uses files)."""
+        v = self.viewer
+        labels = [la.name for la in v.layers if la._type_string == 'labels']
+        keep = self.combo_save_labels.currentText()
+        self.combo_save_labels.blockSignals(True)
+        self.combo_save_labels.clear()
+        self.combo_save_labels.addItem('(do not save labels)')
+        self.combo_save_labels.addItems(labels)
+        pick = keep if keep in labels else self._default_label_layer(labels)
+        if pick:
+            self.combo_save_labels.setCurrentText(pick)
+        self.combo_save_labels.blockSignals(False)
+
+        ticked = {
+            self.list_extra.item(i).text()
+            for i in range(self.list_extra.count())
+            if self.list_extra.item(i).checkState() == Qt.Checked
+        }
+        known = {
+            self.list_extra.item(i).text()
+            for i in range(self.list_extra.count())
+        }
+        self.list_extra.clear()
+        for la in v.layers:
+            if la._type_string not in ('image', 'labels', 'shapes'):
+                continue
+            item = QListWidgetItem(la.name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            on = (
+                la.name in ticked
+                if la.name in known
+                else not self._is_batch_layer(la.name)
+                and la.name != self.combo_save_labels.currentText()
+            )
+            item.setCheckState(Qt.Checked if on else Qt.Unchecked)
+            self.list_extra.addItem(item)
+
+    def _default_label_layer(self, labels):
+        if self.session:
+            name = f'corrected_{self.session["base"]}'
+            if name in labels:
+                return name
+        return None
+
+    @staticmethod
+    def _is_batch_layer(name):
+        return name.startswith(
+            ('pred_', 'sp_', 'gasp_cells_', 'geo_', '[Predicted Classes]')
+        ) or name.startswith(('aff_', 'affinity'))
+
+    def _on_open_session(self):
+        start = (
+            str(output_dir(self.selected_dir)) if self.selected_dir else ''
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Open session', start, 'HDF5 sessions (*.h5 *.hdf5)'
+        )
+        if not path:
+            return
+        try:
+            self._open_session(Path(path))
+        except Exception as e:  # unreadable file, missing h5py, ...
+            QMessageBox.warning(self, 'Cannot open session', f'{type(e).__name__}: {e}')
+
+    def _open_session(self, path: Path):
+        v = self.viewer
+        kind = sio.session_kind(path)
+        if kind == 'layers':
+            names = sio.add_layers_to_viewer(v, sio.read_layer_file(path))
+            self.session = None
+            self.lbl_session.setText(
+                f'Opened {path.name}: {len(names)} layer(s). This is an old '
+                'layers-only file; "Save Session" asks for a new file.'
+            )
+            self.refresh_layer_choices()
+            return
+        if kind != 'session':
+            raise ValueError('This file is not a w-seg session.')
+
+        results, _store, info = sio.session_results(path)
+        base = info['base']
+        if 'raw' in results and 'pred_sem' in results:
+            self.main_widget.render_batch_results(
+                info['source_file'], results
+            )
+        elif 'raw' in results:
+            v.add_image(results['raw'], name=base)
+        if info['editable'] is not None:
+            name = f'corrected_{base}'
+            if name in v.layers:
+                v.layers[name].data = info['editable']
+            else:
+                v.add_labels(info['editable'], name=name, opacity=0.8)
+        names = {la.name for la in v.layers}
+        extras = [p for p in info['extras'] if p['name'] not in names]
+        sio.add_layers_to_viewer(v, extras)
+        self.session = {'path': path, 'base': base}
+        origin = {
+            'corrected': 'your saved corrections',
+            'gasp': 'a copy of the GASP labels',
+            'superpixels': 'a copy of the superpixel labels',
+        }.get(info['origin'], 'no labels')
+        self.lbl_session.setText(
+            f'Session: {path.name}. Edit "corrected_{base}" ({origin}), '
+            'then Save Session.'
+        )
+        self.lbl_session.setStyleSheet('font-style: normal;')
+        self.refresh_layer_choices()
+
+    def _on_save_session(self):
+        v = self.viewer
+        path = self.session['path'] if self.session else None
+        if path is None:
+            start = (
+                str(output_dir(self.selected_dir)) if self.selected_dir else ''
+            )
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, 'Save session', start, 'HDF5 sessions (*.h5)'
+            )
+            if not chosen:
+                return
+            path = Path(chosen)
+        corrected, layer_name = None, None
+        label_name = self.combo_save_labels.currentText()
+        if label_name in v.layers:
+            corrected = v.layers[label_name].data
+            layer_name = label_name
+        payloads = []
+        for i in range(self.list_extra.count()):
+            item = self.list_extra.item(i)
+            name = item.text()
+            if (
+                item.checkState() == Qt.Checked
+                and name in v.layers
+                and name != label_name
+            ):
+                payload = sio.layer_to_payload(v.layers[name], order=i)
+                if payload is not None:
+                    payloads.append(payload)
+        try:
+            sio.save_edits(
+                path,
+                corrected=corrected,
+                corrected_layer=layer_name,
+                extras=payloads,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, 'Cannot save session', f'{type(e).__name__}: {e}')
+            return
+        if self.session is None:
+            self.session = {'path': path, 'base': Path(path).stem.removesuffix('_session')}
+        self.lbl_session.setText(
+            f'Saved to {path.name}: '
+            + (f'labels "{layer_name}"' if layer_name else 'no labels')
+            + f' and {len(payloads)} other layer(s).'
+        )
 
     # --------------------------------------------------------------------------
     # Running
@@ -273,6 +488,7 @@ class BatchTabWidget(QWidget):
         """Locks everything except the cancel button while a batch runs."""
         self.btn_select_dir.setEnabled(not running)
         self.group_stages.setEnabled(not running)
+        self.group_sess.setEnabled(not running)
         self.btn_start_batch.setEnabled(not running and bool(self.files))
         self.btn_cancel.setEnabled(running)
         if hasattr(self.main_widget, 'set_batch_running'):
@@ -293,6 +509,7 @@ class BatchTabWidget(QWidget):
 
         self.cancel_event.clear()
         self.failed = []
+        self.notes = []
         self.progress_bar.setValue(0)
         self._set_running(True)
 
@@ -321,6 +538,8 @@ class BatchTabWidget(QWidget):
         elif kind == 'render':
             _, name, results = event
             self.main_widget.render_batch_results(name, results)
+        elif kind == 'note':
+            self.notes.append(event[1])
         elif kind == 'failed':
             _, name, message = event
             print(f'[w-seg] Batch: {name} failed: {message}')
@@ -343,6 +562,12 @@ class BatchTabWidget(QWidget):
             )
             if len(failed) > 5:
                 msg += f'\n... and {len(failed) - 5} more (see the console)'
+        if self.notes:
+            msg += '\n\nNotes:\n' + '\n'.join(
+                f'- {n}' for n in self.notes[:8]
+            )
+            if len(self.notes) > 8:
+                msg += f'\n... and {len(self.notes) - 8} more'
         QMessageBox.information(self, 'Batch Execution', msg)
         self.status_label.setText(
             f'Results are in {Path(self.selected_dir) / "wseg_batch"}'
