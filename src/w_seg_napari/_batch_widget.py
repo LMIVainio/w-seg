@@ -57,6 +57,7 @@ class BatchTabWidget(QWidget):
         self.failed = []
         self.notes = []
         self.n_skipped = 0
+        self._rendered = []  # layers the batch added for the last image
         self.settings_file = None  # a settings file chosen with "Load..."
         self.session = None  # {'path': Path | None, 'base': str} once opened
 
@@ -139,6 +140,18 @@ class BatchTabWidget(QWidget):
             'Off is faster and uses less memory; results are saved to disk either way.'
         )
 
+        self.chk_only_latest = QCheckBox(
+            'Keep only the latest image in the viewer'
+        )
+        self.chk_only_latest.setChecked(True)
+        self.chk_only_latest.setToolTip(
+            'When an image is finished, its layers replace those of the '
+            'previous image. The previous image stays visible while the '
+            'next one is processed.\nLayers you made yourself are never '
+            'removed.'
+        )
+        self.chk_render_viewer.toggled.connect(self.chk_only_latest.setEnabled)
+        self.chk_only_latest.setEnabled(False)
         self.chk_predict = QCheckBox(
             '1. Run Model Prediction (walls + affinities)'
         )
@@ -225,6 +238,7 @@ class BatchTabWidget(QWidget):
         self.lbl_done.setContentsMargins(20, 0, 0, 0)
 
         stage_layout.addWidget(self.chk_render_viewer)
+        stage_layout.addWidget(self.chk_only_latest)
         stage_layout.addWidget(self.chk_skip_done)
         stage_layout.addWidget(self.lbl_done)
         stage_layout.addWidget(self.chk_predict)
@@ -886,6 +900,7 @@ class BatchTabWidget(QWidget):
         self.failed = []
         self.notes = []
         self.n_skipped = 0
+        self._rendered = []
         self.progress_bar.setValue(0)
         self._set_running(True)
 
@@ -913,7 +928,7 @@ class BatchTabWidget(QWidget):
             self.status_label.setText(message)
         elif kind == 'render':
             _, name, results = event
-            self.main_widget.render_batch_results(name, results)
+            self._render(name, results)
         elif kind == 'skipped':
             self.n_skipped += 1
         elif kind == 'note':
@@ -921,6 +936,20 @@ class BatchTabWidget(QWidget):
         elif kind == 'failed':
             _, name, message = event
             print(f'[w-seg] Batch: {name} failed: {message}')
+
+    def _render(self, name, results):
+        """Shows one finished image; the previous image's layers go afterwards."""
+        layers = self.viewer.layers
+        before = {id(la) for la in layers}
+        self.main_widget.render_batch_results(name, results)
+        added = [la for la in layers if id(la) not in before]
+        if self.chk_only_latest.isChecked():
+            for la in self._rendered:
+                if la in layers:
+                    layers.remove(la)
+            self._rendered = added
+        else:
+            self._rendered = []
 
     def _on_cancel_batch(self):
         self.cancel_event.set()
