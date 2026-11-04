@@ -9,6 +9,7 @@ The batch stores a map with every cell filled by its error probability
     select_range      the cells with p_error between a lower and an upper limit,
                       worst first
     extract           a labels image holding only those cells (same label ids)
+    changed_ids       which highlighted cells have been edited since
     find_cell         where a cell is now (None when it was merged or deleted)
     next_existing     the next cell of a list that still exists
     pair_error_layer  which error layer goes with a labels layer, by name
@@ -65,6 +66,22 @@ def extract(labels, ids):
     return np.where(np.isin(labels, np.asarray(list(ids))), labels, 0).astype(
         labels.dtype
     )
+
+
+def changed_ids(labels, areas):
+    """
+    The labels of `areas` ({label id: pixel count when it was highlighted})
+    whose pixel count in `labels` is different now: painted, merged into
+    another cell, grown by a merge, or deleted.
+    """
+    flat = np.asarray(labels).ravel().astype(np.int64, copy=False)
+    counts = np.bincount(flat) if flat.size else np.zeros(0, np.int64)
+    changed = []
+    for cell, area in areas.items():
+        now = int(counts[cell]) if cell < len(counts) else 0
+        if now != area:
+            changed.append(int(cell))
+    return changed
 
 
 def find_cell(labels, label_id):

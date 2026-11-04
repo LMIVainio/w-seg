@@ -82,3 +82,19 @@ def test_pairing_by_name():
 def test_shape_mismatch_is_an_error():
     with pytest.raises(ValueError):
         fc.cell_scores(np.zeros((3, 3), int), np.zeros((4, 4)))
+
+
+def test_changed_ids_finds_edited_cells_only():
+    labels, _ = _scene()
+    areas = {2: 50, 3: 50, 4: 25}
+    assert fc.changed_ids(labels, areas) == []  # untouched
+    labels[labels == 2] = 1  # 2 merged into 1: 2 is gone
+    assert fc.changed_ids(labels, areas) == [2]
+    labels[:, 10:12] = 4  # 4 grows, 3 shrinks
+    assert sorted(fc.changed_ids(labels, areas)) == [2, 3, 4]
+
+
+def test_changed_ids_handles_ids_beyond_the_image():
+    labels, _ = _scene()
+    assert fc.changed_ids(labels, {999: 10}) == [999]  # gone
+    assert fc.changed_ids(labels.astype(np.uint64), {1: 50}) == []

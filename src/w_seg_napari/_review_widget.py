@@ -1,6 +1,7 @@
 """Batch tab box: pull the cells the error model flagged out of a labels layer and visit them."""
 
 import numpy as np
+from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -17,14 +18,22 @@ FLAGGED_PREFIX = 'flagged_'
 CURRENT_LAYER = 'review_cell'
 
 
+DIM_OPACITY = 0.6  # the labels layer while cells are highlighted
+SETTLE_MS = 150  # wait after an edit, so a brush stroke counts as one edit
+
+
 class ReviewFlaggedWidget(QGroupBox):
     """
-    1. Extract: the cells of a labels layer whose error probability lies
-       between a lower and an upper limit go into a new flagged_<name> layer.
-    2. Visit: Next / Previous step through them, worst first. The viewer
-       moves to the cell, its outline is drawn in the review_cell layer, and
-       the cell's label is selected in the labels layer, so you can fix it
-       with the normal napari tools right there (pick / fill / erase).
+    1. Highlight: the cells of a labels layer whose error probability lies
+       between a lower and an upper limit are copied to a flagged_<name>
+       layer on top (opacity 1, same ids so the same colours), while the
+       labels layer itself is dimmed. A cell that you edit (painted, merged,
+       deleted, or the neighbour it was merged into) drops out of the
+       highlight at once and shows as normal again.
+    2. Visit: Next / Previous step through the cells that are still
+       highlighted, worst first. The viewer moves to the cell, its outline is
+       drawn in the review_cell layer, and the cell's label is selected in
+       the labels layer, so you can fix it with the normal napari tools.
     """
 
     def __init__(self, viewer, parent=None):
@@ -34,6 +43,12 @@ class ReviewFlaggedWidget(QGroupBox):
         self.queue = []  # label ids of the extracted cells, worst first
         self.pos = -1
         self._p = {}  # label id -> error probability of the extracted cells
+        self._areas = {}  # label id -> pixel count when it was highlighted
+        self._watched = None  # (labels layer, [(event, callback)])
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(SETTLE_MS)
+        self._timer.timeout.connect(self._sync_highlight)
         self._init_ui()
 
     # ------------------------------------------------------------------ UI
@@ -79,9 +94,18 @@ class ReviewFlaggedWidget(QGroupBox):
         self.lbl_count.setWordWrap(True)
         layout.addWidget(self.lbl_count)
 
-        self.btn_extract = QPushButton('Extract cells to a new layer')
+        btns = QHBoxLayout()
+        self.btn_extract = QPushButton('Highlight cells')
+        self.btn_extract.setToolTip(
+            'Highlights the cells in this range (again, from the current '
+            'labels): this also resets the highlight.'
+        )
         self.btn_extract.clicked.connect(self._on_extract)
-        layout.addWidget(self.btn_extract)
+        self.btn_clear = QPushButton('Clear highlight')
+        self.btn_clear.clicked.connect(self._on_clear)
+        btns.addWidget(self.btn_extract)
+        btns.addWidget(self.btn_clear)
+        layout.addLayout(btns)
 
         nav = QHBoxLayout()
         self.btn_prev = QPushButton('< Previous')
@@ -218,27 +242,107 @@ class ReviewFlaggedWidget(QGroupBox):
         )
         self.queue = [int(i) for i in chosen['label_id']]
         self.pos = -1
-        self._p = dict(zip(chosen['label_id'].astype(int), chosen['p_error']))
+        self._p = dict(
+            zip(chosen['label_id'].astype(int), chosen['p_error'], strict=True)
+        )
+        self._areas = dict(
+            zip(
+                chosen['label_id'].astype(int),
+                chosen['area'].astype(int),
+                strict=True,
+            )
+        )
         data = fc.extract(labels.data, self.queue)
         name = f'{FLAGGED_PREFIX}{labels.name}'
         if name in self.viewer.layers:
-            self.viewer.layers[name].data = data
+            overlay = self.viewer.layers[name]
+            overlay.data = data
         else:
-            self.viewer.add_labels(
+            overlay = self.viewer.add_labels(
                 data,
                 name=name,
-                opacity=0.8,
                 scale=labels.scale,
                 translate=labels.translate,
             )
-        self.lbl_count.setText(
-            f'{len(self.queue)} cells extracted to "{name}". '
-            'Use Next / Previous to visit them, worst first.'
-        )
+        overlay.opacity = 1.0
+        overlay.editable = False
+        try:
+            overlay.colormap = (
+                labels.colormap
+            )  # the same colours as the labels
+        except (AttributeError, ValueError, TypeError):
+            pass
+        if labels.opacity > DIM_OPACITY:
+            labels.opacity = DIM_OPACITY
+        self._watch(labels)
+        self._report()
         self.lbl_cell.setText('')
         self._enable_nav(bool(self.queue))
         if self.queue:
             self._step(+1)
+
+    def _on_clear(self):
+        self._unwatch()
+        for layer in list(self.viewer.layers):
+            if layer.name.startswith((FLAGGED_PREFIX, CURRENT_LAYER)):
+                self.viewer.layers.remove(layer)
+        self.queue, self.pos, self._areas = [], -1, {}
+        self.lbl_cell.setText('')
+        self._enable_nav(False)
+        self.lbl_count.setText('Highlight cleared.')
+
+    # --------------------------------------------- edits drop out of the highlight
+    def _watch(self, labels):
+        """Call _on_target_edited whenever the labels layer is edited."""
+        self._unwatch()
+        hooks = []
+        for name in ('labels_update', 'set_data'):
+            event = getattr(labels.events, name, None)
+            if event is not None:
+                event.connect(self._on_target_edited)
+                hooks.append((event, self._on_target_edited))
+        self._watched = (labels, hooks)
+
+    def _unwatch(self):
+        if self._watched is not None:
+            for event, callback in self._watched[1]:
+                try:
+                    event.disconnect(callback)
+                except (ValueError, TypeError, RuntimeError):
+                    pass
+        self._watched = None
+
+    def _on_target_edited(self, *_):
+        self._timer.start()  # restarts: waits until the editing pauses
+
+    def _overlay(self, labels=None):
+        labels = labels if labels is not None else self._layers()[0]
+        if labels is None:
+            return None
+        name = f'{FLAGGED_PREFIX}{labels.name}'
+        return self.viewer.layers[name] if name in self.viewer.layers else None
+
+    def _sync_highlight(self):
+        """Takes the cells that were edited since out of the highlight."""
+        if self._watched is None:
+            return
+        labels = self._watched[0]  # the layer that was highlighted
+        overlay = self._overlay(labels)
+        if overlay is None or not self._areas:
+            return
+        edited = fc.changed_ids(labels.data, self._areas)
+        if not edited:
+            return
+        for cell in edited:
+            self._areas.pop(cell, None)
+        overlay.data[np.isin(overlay.data, edited)] = 0
+        overlay.refresh()
+        self._report()
+
+    def _report(self):
+        self.lbl_count.setText(
+            f'{len(self._areas)} of {len(self.queue)} cells still highlighted.'
+        )
 
     # ------------------------------------------------------------ visiting
     def _step(self, direction):
@@ -246,11 +350,13 @@ class ReviewFlaggedWidget(QGroupBox):
         if labels is None or not self.queue:
             return
         start = self.pos + direction if self.pos >= 0 else 0
-        idx = fc.next_existing(self.queue, labels.data, start, direction)
+        overlay = self._overlay()
+        still = overlay.data if overlay is not None else labels.data
+        idx = fc.next_existing(self.queue, still, start, direction)
         if idx is None:
             self.lbl_cell.setText(
-                'No more cells in that direction (merged or deleted cells '
-                'are skipped).'
+                'No more highlighted cells in that direction (cells you '
+                'have edited are skipped).'
             )
             return
         self.pos = idx
