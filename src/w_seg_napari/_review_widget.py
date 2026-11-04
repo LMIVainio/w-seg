@@ -320,7 +320,9 @@ class ReviewFlaggedWidget(QGroupBox):
         if labels is None:
             return None
         name = f'{FLAGGED_PREFIX}{labels.name}'
-        return self.viewer.layers[name] if name in self.viewer.layers else None
+        if name in self.viewer.layers:
+            return self.viewer.layers[name]
+        return None
 
     def _sync_highlight(self):
         """Takes the cells that were edited since out of the highlight."""
