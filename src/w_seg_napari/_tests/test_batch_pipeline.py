@@ -666,3 +666,22 @@ def test_settings_are_not_saved_unless_asked(tmp_path, monkeypatch):
     s['settings_doc'] = {'format_version': 1}
     _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
     assert not (tmp_path / 'wseg_batch' / 'batch_settings.json').exists()
+
+
+def test_virtual_seed_choice_needs_no_layer():
+    from w_seg_napari._batch_pipeline import describe_seed_source
+
+    base = {'algo_idx': 5, 'seed_threshold': 0.5}
+    # chosen in the Superpixel tab before any image was predicted
+    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': ''}, True)
+    assert 'predicted skeleton' in r['text'] and 'from layer' not in r['text']
+    assert r['problem'] is None
+    r = describe_seed_source({**base, 'seed_kind': 'skeleton', 'seed_layer': ''}, False)
+    assert 'geometry head' in r['problem']
+
+
+def test_virtual_seed_names_the_layer_of_one_image():
+    from w_seg_napari._batch_io import virtual_seed_layer_name
+
+    assert virtual_seed_layer_name('skeleton', 'a') == 'geo_skel_a'
+    assert virtual_seed_layer_name('prediction', 'a') == 'pred_a'

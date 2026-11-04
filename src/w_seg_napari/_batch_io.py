@@ -10,6 +10,24 @@ VALID_EXTS = ('.tif', '.tiff', '.h5', '.hdf5', '.png', '.jpg', '.jpeg')
 OUTPUT_DIRNAME = 'wseg_batch'
 
 
+# Seed choices that do not need a layer: they stand for "the same map of
+# every image", so the batch can be set up before any image is predicted.
+# kind -> (label in the combo box, name prefix of the layer in the viewer)
+VIRTUAL_SEEDS = {
+    'skeleton': ('Predicted skeleton (geo_skel) - every image', 'geo_skel_'),
+    'edge_distance': (
+        'Predicted edge distance (geo_dist) - every image',
+        'geo_dist_',
+    ),
+    'prediction': ('Wall prediction (pred) - every image', 'pred_'),
+}
+
+
+def virtual_seed_layer_name(kind, source):
+    """Name of the viewer layer that a virtual seed choice means for one image."""
+    return f'{VIRTUAL_SEEDS[kind][1]}{source}'
+
+
 def list_input_files(dirpath) -> list[str]:
     """Names of the image files in a folder (sorted, results of earlier runs excluded)."""
     folder = Path(dirpath)

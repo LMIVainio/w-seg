@@ -24,6 +24,7 @@ from w_seg_napari._affinity import (
     gather,
     mutex_inputs,
 )
+from w_seg_napari._batch_io import VIRTUAL_SEEDS, virtual_seed_layer_name
 from w_seg_napari._geometry_fields import rgb_to_direction
 from w_seg_napari._seeded_watershed import seeded_edt_watershed
 
@@ -114,8 +115,11 @@ class SuperpixelWidget(QGroupBox):
         self.combo_seed = QComboBox()
         self.combo_seed.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.combo_seed.setToolTip(
+            'The "every image" choices need no layer: they use the map of '
+            'the image being processed, so a batch can be set up before any '
+            'image is predicted.\n'
             'Image layers are thresholded (connected pieces become seeds); '
-            'Labels layers are used as seeds directly.'
+            'Labels layers are used as seeds directly (one image only).'
         )
         form_layout.addRow('Seed layer:', self.combo_seed)
 
@@ -506,12 +510,35 @@ class SuperpixelWidget(QGroupBox):
         )
         self.combo_seed.blockSignals(True)
         self.combo_seed.clear()
+        for kind, (label, _prefix) in VIRTUAL_SEEDS.items():
+            self.combo_seed.addItem(label, userData=kind)
         for layer in layers:
             self.combo_seed.addItem(layer.name, userData=layer)
         index = self.combo_seed.findText(current)
         if index != -1:
             self.combo_seed.setCurrentIndex(index)
         self.combo_seed.blockSignals(False)
+
+    def _seed_choice(self):
+        """The kind of a virtual seed choice ('skeleton', ...), None for a layer."""
+        data = self.combo_seed.currentData()
+        return data if isinstance(data, str) else None
+
+    def _seed_data(self, source_name):
+        """Array of the chosen seed layer; a virtual choice is resolved for this image."""
+        data = self.combo_seed.currentData()
+        if data is None:
+            return None
+        if not isinstance(data, str):
+            return data.data
+        name = virtual_seed_layer_name(data, source_name)
+        if source_name is None or name not in self.viewer.layers:
+            raise ValueError(
+                f'There is no layer {name!r} for this image: predict it '
+                'with a geometry-head model first (the batch makes it '
+                'for every image by itself).'
+            )
+        return self.viewer.layers[name].data
 
     def snapshot_params(self) -> dict:
         """Every value the algorithms read from the UI, as one plain dict.
@@ -565,8 +592,10 @@ class SuperpixelWidget(QGroupBox):
             ],
             'ridge_min_distance': self.spin_ridge_min_dist.value(),
             'ridge_sigma': self.spin_ridge_sigma.value(),
-            'seed_kind': seed_kind(self.combo_seed.currentData()),
-            'seed_layer': self.combo_seed.currentText(),
+            'seed_kind': self._seed_choice() or seed_kind(self.combo_seed.currentData()),
+            'seed_layer': (
+                '' if self._seed_choice() else self.combo_seed.currentText()
+            ),
             'seed_is_labels': isinstance(
                 self.combo_seed.currentData(), napari.layers.Labels
             ),
@@ -765,6 +794,11 @@ class SuperpixelWidget(QGroupBox):
             }
 
         try:
+            image_name = (
+                sem_layer.name.replace('pred_', '', 1)
+                if sem_layer is not None
+                else (aset.source if aset is not None else None)
+            )
             superpixels = self.run_algorithm(
                 params,
                 sem_data=sem_layer.data if sem_layer is not None else None,
@@ -772,7 +806,7 @@ class SuperpixelWidget(QGroupBox):
                 felz_signal=_data(self.felz_signal),
                 smutex_sem=_data(self.smutex_signal),
                 mutex_sem=_data(self.mutex_signal),
-                seed_data=_data(self.combo_seed),
+                seed_data=self._seed_data(image_name),
                 **geo_args,
             )
         except ValueError as e:
