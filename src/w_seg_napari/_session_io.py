@@ -45,6 +45,7 @@ MANAGED = (
     'gasp_labels',
     'class_labels',
     'error_map',
+    'error_type_map',
 )
 OWNED = (*MANAGED, CORRECTED)
 
@@ -279,7 +280,13 @@ def session_results(path):
         )
     if 'pred_geo' in store:
         results['geometry_layers'] = geometry_payloads(store['pred_geo'], base)
-    for key in ('sp_labels', 'gasp_labels', 'class_labels', 'error_map'):
+    for key in (
+        'sp_labels',
+        'gasp_labels',
+        'class_labels',
+        'error_map',
+        'error_type_map',
+    ):
         if key in store:
             results[key] = store[key]
     labels, origin = editable_labels(store)

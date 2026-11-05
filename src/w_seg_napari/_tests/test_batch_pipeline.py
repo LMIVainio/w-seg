@@ -481,6 +481,9 @@ def _fake_flagger(monkeypatch):
 
     mod = types.ModuleType('w_seg_napari._segmentation_errors')
     mod.flag_labels = flag_labels
+    mod.error_type_map = lambda labels, scores: np.where(
+        labels == 1, 1, 0
+    ).astype(np.int8)
     monkeypatch.setitem(sys.modules, 'w_seg_napari._segmentation_errors', mod)
     return seen
 
@@ -497,6 +500,7 @@ def test_error_model_adds_columns_map_and_note(tmp_path, monkeypatch):
     assert list(table['flagged']) == [True, False]
     (sess,) = sessions.values()
     assert sess['error_map'].shape == sess['gasp_labels'].shape
+    assert sess['error_type_map'].dtype == np.int8
     assert any('1 cell(s) flagged' in e[1] for e in events if e[0] == 'note')
 
 

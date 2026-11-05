@@ -28,6 +28,7 @@ from w_seg_napari._combine_layers_widget import (
 )
 from w_seg_napari._gasp_widget import GaspWidget
 from w_seg_napari._morphology_widget import MorphologyWidget
+from w_seg_napari._review_widget import ReviewFlaggedWidget
 from w_seg_napari._ROI_selection_widget import (
     LineLabelSelectionWidget,
     ROISelectionWidget,
@@ -362,6 +363,8 @@ class Tab3Curation(QScrollArea):
         self.border_merge_widget = create_border_merge_widget(self.viewer)
 
         layout.addWidget(self.curation_panel)
+        self.review = ReviewFlaggedWidget(self.viewer)
+        layout.addWidget(self.review)
         for title, tool in (
             ('Combine / threshold images', self.blend_widget),
             ('Remove unconnected noise', self.cleanup_widget),
@@ -381,6 +384,7 @@ class Tab3Curation(QScrollArea):
 
     def refresh_layer_choices(self):
         """Refreshes the layer dropdowns of all tools in this tab."""
+        self.review.refresh_layer_choices()
         for tool in (
             self.blend_widget,
             self.cleanup_widget,

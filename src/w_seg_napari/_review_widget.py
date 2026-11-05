@@ -1,4 +1,4 @@
-"""Batch tab box: pull the cells the error model flagged out of a labels layer and visit them."""
+"""Curation tab box: pull the cells the error model flagged out of a labels layer, visit them and fix them."""
 
 import numpy as np
 from qtpy.QtCore import QTimer
@@ -8,6 +8,7 @@ from qtpy.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
@@ -18,6 +19,8 @@ FLAGGED_PREFIX = 'flagged_'
 CURRENT_LAYER = 'review_cell'
 
 
+TYPE_PREFIX = 'errortype_'
+GAP = 2  # cells this close (a one-pixel wall between) count as touching
 DIM_OPACITY = 0.6  # the labels layer while cells are highlighted
 SETTLE_MS = 150  # wait after an edit, so a brush stroke counts as one edit
 
@@ -34,6 +37,11 @@ class ReviewFlaggedWidget(QGroupBox):
        highlighted, worst first. The viewer moves to the cell, its outline is
        drawn in the review_cell layer, and the cell's label is selected in
        the labels layer, so you can fix it with the normal napari tools.
+    3. Fix: Delete / Merge buttons act on the selected cell (the one you
+       visited, or any cell you picked in the labels layer), and "Delete
+       highlighted cells" removes every cell that is still highlighted,
+       optionally only one kind of error. All of it goes through napari's
+       edit history, so Ctrl+Z undoes it.
     """
 
     def __init__(self, viewer, parent=None):
@@ -90,6 +98,17 @@ class ReviewFlaggedWidget(QGroupBox):
             'you handle separately.'
         )
 
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Error type:'))
+        self.combo_kind = QComboBox()
+        self.combo_kind.addItems(list(fc.KIND_CHOICES))
+        self.combo_kind.setToolTip(
+            'What the error model thinks is wrong with the cell. Needs the '
+            'errortype_<image> layer from the batch run (hidden by default).'
+        )
+        row.addWidget(self.combo_kind, stretch=1)
+        layout.addLayout(row)
+
         self.lbl_count = QLabel('')
         self.lbl_count.setWordWrap(True)
         layout.addWidget(self.lbl_count)
@@ -120,10 +139,43 @@ class ReviewFlaggedWidget(QGroupBox):
         layout.addWidget(self.lbl_cell)
         self._enable_nav(False)
 
+        fix = QHBoxLayout()
+        self.btn_delete = QPushButton('Delete cell')
+        self.btn_delete.setToolTip('Removes the selected cell (label 0).')
+        self.btn_delete.clicked.connect(self._on_delete_cell)
+        self.btn_merge_one = QPushButton('Merge with neighbour')
+        self.btn_merge_one.setToolTip(
+            'Merges the selected cell into the touching cell it shares the '
+            'longest border with. The selected label id is kept.'
+        )
+        self.btn_merge_one.clicked.connect(
+            lambda: self._on_merge(all_touching=False)
+        )
+        self.btn_merge_all = QPushButton('Merge with all touching')
+        self.btn_merge_all.setToolTip(
+            'Merges the selected cell with every cell touching it. Use for '
+            'a cell that was cut into several pieces.'
+        )
+        self.btn_merge_all.clicked.connect(
+            lambda: self._on_merge(all_touching=True)
+        )
+        for b in (self.btn_delete, self.btn_merge_one, self.btn_merge_all):
+            fix.addWidget(b)
+        layout.addLayout(fix)
+
+        self.btn_delete_all = QPushButton('Delete highlighted cells')
+        self.btn_delete_all.setToolTip(
+            'Deletes every cell that is still highlighted (the error range '
+            'and error type above decide which). Asks first.'
+        )
+        self.btn_delete_all.clicked.connect(self._on_delete_highlighted)
+        layout.addWidget(self.btn_delete_all)
+
         self.combo_labels.currentIndexChanged.connect(self._on_labels_changed)
         self.combo_error.currentIndexChanged.connect(self._rescore)
         self.spin_lower.valueChanged.connect(self._update_count)
         self.spin_upper.valueChanged.connect(self._update_count)
+        self.combo_kind.currentIndexChanged.connect(self._update_count)
 
     @staticmethod
     def _spin(value):
@@ -198,6 +250,19 @@ class ReviewFlaggedWidget(QGroupBox):
             return v.layers[a], v.layers[b]
         return None, None
 
+    def _type_layer(self, labels):
+        """The errortype_<image> layer that goes with the labels layer."""
+        names = [
+            la.name
+            for la in self.viewer.layers
+            if la._type_string == 'image' and la.name.startswith(TYPE_PREFIX)
+        ]
+        match = fc.pair_layer(labels.name, names, TYPE_PREFIX)
+        return self.viewer.layers[match] if match else None
+
+    def _kinds(self):
+        return fc.KIND_CHOICES[self.combo_kind.currentText()]
+
     # ------------------------------------------------------------- scoring
     def _rescore(self, *_):
         labels, err = self._layers()
@@ -208,8 +273,13 @@ class ReviewFlaggedWidget(QGroupBox):
                 'batch with "Flag likely segmentation errors").'
             )
             return
+        kinds = self._type_layer(labels)
         try:
-            self.scores = fc.cell_scores(labels.data, err.data)
+            self.scores = fc.cell_scores(
+                labels.data,
+                err.data,
+                kinds.data if kinds is not None else None,
+            )
         except ValueError as e:
             self.lbl_count.setText(str(e))
             return
@@ -219,13 +289,26 @@ class ReviewFlaggedWidget(QGroupBox):
         if self.scores is None:
             self._rescore()  # (calls this again once it has scores)
             return
-        n = len(
-            fc.select_range(
-                self.scores, self.spin_lower.value(), self.spin_upper.value()
+        if (
+            self._kinds() is not None
+            and (self.scores['error_type'] == 'unknown').all()
+        ):
+            self.lbl_count.setText(
+                'No errortype_<image> layer for these labels: run the batch '
+                'again with error flagging, or choose "Any kind".'
             )
-        )
+            return
+        n = len(self._chosen())
         self.lbl_count.setText(
             f'{n} of {len(self.scores)} cells in this range.'
+        )
+
+    def _chosen(self):
+        return fc.select_range(
+            self.scores,
+            self.spin_lower.value(),
+            self.spin_upper.value(),
+            kinds=self._kinds(),
         )
 
     # ------------------------------------------------------------- extract
@@ -237,9 +320,7 @@ class ReviewFlaggedWidget(QGroupBox):
         self._rescore()  # the labels may have been edited since
         if self.scores is None:
             return
-        chosen = fc.select_range(
-            self.scores, self.spin_lower.value(), self.spin_upper.value()
-        )
+        chosen = self._chosen()
         self.queue = [int(i) for i in chosen['label_id']]
         self.pos = -1
         self._p = dict(
@@ -404,3 +485,86 @@ class ReviewFlaggedWidget(QGroupBox):
             f'Cell {idx + 1} of {len(self.queue)}: label {cell_id}'
             + (f', error {p:.2f}' if p is not None else '')
         )
+
+    # -------------------------------------------------------------- fixing
+    def _selected_cell(self):
+        """(labels layer, selected label id) or (None, None) with a message."""
+        labels, _err = self._layers()
+        if labels is None:
+            self.lbl_cell.setText('Choose a labels layer first.')
+            return None, None
+        if labels.data.ndim != 2:
+            self.lbl_cell.setText('Only 2D labels can be edited here.')
+            return None, None
+        cell = int(labels.selected_label)
+        if cell == 0 or not (labels.data == cell).any():
+            self.lbl_cell.setText(
+                'No cell selected: pick one in the labels layer (or use '
+                'Next / Previous).'
+            )
+            return None, None
+        return labels, cell
+
+    def _edit(self, labels, indices, values):
+        """Write to the labels through napari's edit history (Ctrl+Z)."""
+        try:
+            labels.data_setitem(indices, values)
+        except (AttributeError, TypeError):
+            labels.data[indices] = values
+            labels.refresh()
+        self._on_target_edited()  # drop the edited cells from the highlight
+
+    def _after_fix(self, cell):
+        """Move on to the next highlighted cell once the highlight caught up."""
+        if cell in self.queue:
+            self.pos = self.queue.index(cell)
+        if self.queue and self.pos >= 0:
+            QTimer.singleShot(SETTLE_MS + 60, lambda: self._step(+1))
+
+    def _on_delete_cell(self):
+        labels, cell = self._selected_cell()
+        if labels is None:
+            return
+        idx = np.nonzero(labels.data == cell)
+        self._edit(labels, idx, 0)
+        self.lbl_cell.setText(f'Deleted cell {cell}.')
+        self._after_fix(cell)
+
+    def _on_merge(self, all_touching):
+        labels, cell = self._selected_cell()
+        if labels is None:
+            return
+        partners = fc.merge_partners(labels.data, cell, gap=GAP)
+        if not partners:
+            self.lbl_cell.setText(f'Cell {cell} touches no other cell.')
+            return
+        others = (
+            [p for p, _b in partners] if all_touching else [partners[0][0]]
+        )
+        rows, cols, values = fc.merge_cells(labels.data, cell, others, GAP)
+        self._edit(labels, (rows, cols), values)
+        self.lbl_cell.setText(
+            f'Merged {", ".join(str(o) for o in others)} into cell {cell}.'
+        )
+        self._after_fix(cell)
+
+    def _on_delete_highlighted(self):
+        labels, _err = self._layers()
+        if labels is None or self._watched is None or not self._areas:
+            self.lbl_cell.setText('Nothing is highlighted: press Highlight.')
+            return
+        ids = [int(i) for i in self._areas]
+        kind = self.combo_kind.currentText()
+        answer = QMessageBox.question(
+            self,
+            'Delete highlighted cells',
+            f'Delete {len(ids)} highlighted cells from "{labels.name}"?\n\n'
+            f'Error between {self.spin_lower.value():.2f} and '
+            f'{self.spin_upper.value():.2f}, type: {kind}.\n'
+            'You can undo this with Ctrl+Z.',
+        )
+        if answer != QMessageBox.Yes:
+            return
+        idx = np.nonzero(np.isin(labels.data, ids))
+        self._edit(labels, idx, 0)
+        self.lbl_cell.setText(f'Deleted {len(ids)} cells.')

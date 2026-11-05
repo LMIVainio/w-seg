@@ -225,3 +225,24 @@ def test_error_features_are_appended_to_a_morphology_table():
     )  # recomputed, not duplicated
     assert not out.columns.duplicated().any()
     assert all(f'err_{f}' in out.columns for f in se.FEATURES)
+
+
+def test_error_type_map_marks_only_flagged_cells():
+    from w_seg_napari import _flagged_cells as fc
+
+    assert fc.KIND_NAMES == se.ERROR_NAMES
+    labels = np.zeros((6, 9), np.int32)
+    labels[:, :3], labels[:, 3:6], labels[:, 6:] = 1, 2, 3
+    scores = pd.DataFrame(
+        {
+            'label_id': [1, 2, 3],
+            'p_error': [0.1, 0.9, 0.8],
+            'error_type': ['ok', 'fragment', 'spurious'],
+            'flagged': [False, True, True],
+        }
+    )
+    tmap = se.error_type_map(labels, scores)
+    assert tmap.dtype == np.int8
+    assert set(np.unique(tmap[labels == 1])) == {0}
+    assert set(np.unique(tmap[labels == 2])) == {se.ERROR_CODES['fragment']}
+    assert set(np.unique(tmap[labels == 3])) == {se.ERROR_CODES['spurious']}

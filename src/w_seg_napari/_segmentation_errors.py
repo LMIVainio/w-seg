@@ -585,6 +585,22 @@ def error_map(labels, scores):
     return lut[labels]
 
 
+ERROR_CODES = {'ok': 0, 'merged': 1, 'fragment': 2, 'spurious': 3}
+ERROR_NAMES = {v: k for k, v in ERROR_CODES.items()}
+
+
+def error_type_map(labels, scores):
+    """int8 image: every flagged cell filled with its kind of error
+    (ERROR_CODES: 1 merged, 2 fragment, 3 spurious), 0 elsewhere."""
+    labels = np.asarray(labels)
+    lut = np.zeros(int(labels.max()) + 1, np.int8)
+    flagged = scores[scores['flagged'].astype(bool)]
+    lut[flagged['label_id'].to_numpy().astype(int)] = [
+        ERROR_CODES.get(t, 0) for t in flagged['error_type']
+    ]
+    return lut[labels]
+
+
 def flag_labels(labels, wall, bundle, pixel_size=1.0):
     """features -> scores -> (scores DataFrame, error map) in one call."""
     feats = cell_features(labels, wall, pixel_size)

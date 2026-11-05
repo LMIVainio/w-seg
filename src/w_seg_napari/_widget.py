@@ -422,6 +422,17 @@ class WSegMasterWidget(QWidget):
                 contrast_limits=[0.0, 1.0],
                 opacity=0.5,
             )
+        if 'error_type_map' in results:
+            # 1 merged, 2 fragment, 3 spurious; read by the review box
+            put(
+                f'errortype_{base}',
+                'image',
+                results['error_type_map'],
+                colormap='turbo',
+                contrast_limits=[0, 3],
+                opacity=0.5,
+                visible=False,
+            )
         if 'class_labels' in results:
             put(
                 f'[Predicted Classes] {base}',

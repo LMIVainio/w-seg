@@ -275,6 +275,7 @@ def process_image(image_path, settings: dict, is_cancelled):
         store.pop(CORRECTED, None)
     if any(stages.get(s) for s in ('predict', 'superpixels', 'gasp')):
         store.pop('error_map', None)  # belongs to the old labels
+        store.pop('error_type_map', None)
 
     source_name = name
     if sessions_mode:
@@ -452,9 +453,13 @@ def process_image(image_path, settings: dict, is_cancelled):
     bundle = settings.get('error_bundle')
     if stages.get('morphology'):
         store.pop('error_map', None)
+        store.pop('error_type_map', None)
     if bundle is not None and df is not None:
         yield sub('Flagging likely segmentation errors')
-        from w_seg_napari._segmentation_errors import flag_labels
+        from w_seg_napari._segmentation_errors import (
+            error_type_map,
+            flag_labels,
+        )
 
         scores, emap = flag_labels(
             store[key],
@@ -463,8 +468,11 @@ def process_image(image_path, settings: dict, is_cancelled):
             settings['morph_params'].get('pixel_spacing') or 1.0,
         )
         df = df.merge(scores, on='label_id', how='left')
+        tmap = error_type_map(store[key], scores)
         store['error_map'] = emap
+        store['error_type_map'] = tmap
         results['error_map'] = emap
+        results['error_type_map'] = tmap
         results['n_flagged'] = int(scores['flagged'].sum())
 
     # 6. Export ----------------------------------------------------------

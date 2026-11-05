@@ -38,7 +38,6 @@ from w_seg_napari._batch_settings import (
     model_differences,
     settings_document,
 )
-from w_seg_napari._review_widget import ReviewFlaggedWidget
 from w_seg_napari._session_io import CORRECTED, has_dataset
 
 
@@ -370,11 +369,8 @@ class BatchTabWidget(QWidget):
         group_sess.setLayout(sess_layout)
         self.group_sess = group_sess
 
-        self.review = ReviewFlaggedWidget(self.main_widget.viewer)
-
         main_layout.addWidget(group_io)
         main_layout.addWidget(group_sess)
-        main_layout.addWidget(self.review)
         main_layout.addWidget(group_summary)
         main_layout.addWidget(group_stages)
         main_layout.addWidget(group_exec)
@@ -576,7 +572,6 @@ class BatchTabWidget(QWidget):
     def refresh_layer_choices(self):
         """Refills the layer choices of the Sessions box (the batch itself uses files)."""
         v = self.viewer
-        self.review.refresh_layer_choices()
         labels = [la.name for la in v.layers if la._type_string == 'labels']
         keep = self.combo_save_labels.currentText()
         self.combo_save_labels.blockSignals(True)
@@ -644,6 +639,7 @@ class BatchTabWidget(QWidget):
                 'gasp_cells_',
                 'geo_',
                 'error_',
+                'errortype_',
                 'flagged_',
                 'review_cell',
                 '[Predicted Classes]',
