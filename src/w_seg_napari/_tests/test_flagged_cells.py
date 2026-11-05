@@ -148,3 +148,32 @@ def test_pair_layer_by_prefix():
     assert fc.pair_layer('corrected_b', names, 'errortype_') == 'errortype_b'
     assert fc.pair_layer('x', names, 'errortype_') is None
     assert fc.pair_layer('x', ['errortype_a'], 'errortype_') == 'errortype_a'
+
+
+def test_merge_many_handles_cells_one_after_another():
+    lab = _grid()
+    # 1 | 2 | 3 side by side; 2 and 3 selected: 2 goes into its best
+    # neighbour, 3 is then part of that cell (or absorbed) and skipped
+    rows, cols, values, merges, alone = fc.merge_many(lab, [2, 3], gap=2)
+    out = lab.copy()
+    out[rows, cols] = values
+    assert merges and not alone
+    assert len(np.unique(out)) == len(np.unique(lab)) - 1  # one merge made
+    assert out.shape == lab.shape
+
+
+def test_merge_many_reports_cells_without_neighbours():
+    lab = np.zeros((10, 10), np.int32)
+    lab[1:3, 1:3] = 1
+    lab[7:9, 7:9] = 2
+    rows, cols, values, merges, alone = fc.merge_many(lab, [1, 2])
+    assert alone == [1, 2] and merges == {} and rows.size == 0
+
+
+def test_merge_many_all_touching():
+    lab = _grid()
+    rows, cols, values, merges, _ = fc.merge_many(lab, [2], True, gap=2)
+    out = lab.copy()
+    out[rows, cols] = values
+    assert set(merges[2]) == {1, 3}
+    assert set(np.unique(out)) == {0, 2}

@@ -51,6 +51,8 @@ class ReviewFlaggedWidget(QGroupBox):
         self.scores = None  # DataFrame from cell_scores for the chosen pair
         self.queue = []  # label ids of the extracted cells, worst first
         self.pos = -1
+        self.selected = []  # label ids selected with clicks or Next / Previous
+        self._anchor = 0  # the label we set as selected_label ourselves
         self._p = {}  # label id -> error probability of the extracted cells
         self._areas = {}  # label id -> pixel count when it was highlighted
         self._watched = None  # (labels layer, [(event, callback)])
@@ -140,7 +142,8 @@ class ReviewFlaggedWidget(QGroupBox):
         self.btn_pick.setToolTip(
             'While this is pressed, a click on a cell in the image selects '
             'it (yellow outline), highlighted or not, instead of painting. '
-            'Press again to stop.'
+            'Shift+click adds or removes cells; Delete, Merge and Mark as '
+            'correct then act on all of them. Press again to stop.'
         )
         self.btn_pick.toggled.connect(self._on_pick_toggled)
         layout.addWidget(self.btn_pick)
@@ -150,12 +153,12 @@ class ReviewFlaggedWidget(QGroupBox):
         self._enable_nav(False)
 
         fix = QHBoxLayout()
-        self.btn_delete = QPushButton('Delete cell')
-        self.btn_delete.setToolTip('Removes the selected cell (label 0).')
+        self.btn_delete = QPushButton('Delete cell(s)')
+        self.btn_delete.setToolTip('Removes the selected cells (label 0).')
         self.btn_delete.clicked.connect(self._on_delete_cell)
         self.btn_merge_one = QPushButton('Merge with neighbour')
         self.btn_merge_one.setToolTip(
-            'Merges the selected cell into the touching cell it shares the '
+            'Merges each selected cell into the touching cell it shares the '
             'longest border with. The selected label id is kept.'
         )
         self.btn_merge_one.clicked.connect(
@@ -163,7 +166,7 @@ class ReviewFlaggedWidget(QGroupBox):
         )
         self.btn_merge_all = QPushButton('Merge with all touching')
         self.btn_merge_all.setToolTip(
-            'Merges the selected cell with every cell touching it. Use for '
+            'Merges each selected cell with every cell touching it. Use for '
             'a cell that was cut into several pieces.'
         )
         self.btn_merge_all.clicked.connect(
@@ -172,6 +175,14 @@ class ReviewFlaggedWidget(QGroupBox):
         for b in (self.btn_delete, self.btn_merge_one, self.btn_merge_all):
             fix.addWidget(b)
         layout.addLayout(fix)
+
+        self.btn_correct = QPushButton('Mark as correct (no action needed)')
+        self.btn_correct.setToolTip(
+            'Takes the selected cells out of the highlight without changing '
+            'them, so Next skips them. Shift+click selects several cells.'
+        )
+        self.btn_correct.clicked.connect(self._on_mark_correct)
+        layout.addWidget(self.btn_correct)
 
         self.btn_delete_all = QPushButton('Delete highlighted cells')
         self.btn_delete_all.setToolTip(
@@ -456,12 +467,34 @@ class ReviewFlaggedWidget(QGroupBox):
         self._show_cell(labels, self.queue[idx], idx)
 
     def _show_cell(self, labels, cell_id, idx, recenter=True):
-        v = self.viewer
+        """Select one cell (the others are deselected) and outline it."""
         centre = fc.find_cell(labels.data, cell_id)
         if centre is None:
             return
-        # outline of the current cell: always label 1, so always one colour
-        outline = (np.asarray(labels.data) == cell_id).astype(np.uint8)
+        self._select(labels, [cell_id])
+        if recenter:
+            world = tuple(
+                c * s + t
+                for c, s, t in zip(
+                    centre, labels.scale[-2:], labels.translate[-2:]
+                )
+            )
+            try:
+                self.viewer.camera.center = (0.0, *world)
+            except (AttributeError, ValueError, TypeError):
+                pass
+        p = self._p.get(int(cell_id))
+        where = f'Cell {idx + 1} of {len(self.queue)}: ' if idx >= 0 else ''
+        self.lbl_cell.setText(
+            f'{where}label {cell_id}'
+            + (f', error {p:.2f}' if p is not None else '')
+        )
+
+    def _select(self, labels, ids):
+        """The selection is `ids`: outlined in the review_cell layer."""
+        v = self.viewer
+        self.selected = [int(i) for i in dict.fromkeys(ids)]
+        outline = np.isin(labels.data, self.selected).astype(np.uint8)
         if CURRENT_LAYER in v.layers:
             layer = v.layers[CURRENT_LAYER]
             layer.data = outline
@@ -475,45 +508,35 @@ class ReviewFlaggedWidget(QGroupBox):
             )
             self._style_outline(layer)
         layer.scale, layer.translate = labels.scale, labels.translate
-        # move there and make the labels layer ready for editing this cell
-        if recenter:
-            world = tuple(
-                c * s + t
-                for c, s, t in zip(
-                    centre, labels.scale[-2:], labels.translate[-2:]
-                )
-            )
-            try:
-                v.camera.center = (0.0, *world)
-            except (AttributeError, ValueError, TypeError):
-                pass
-        labels.selected_label = int(cell_id)
+        if self.selected:
+            self._anchor = self.selected[-1]
+            labels.selected_label = self._anchor
         v.layers.selection.active = labels
-        p = self._p.get(int(cell_id))
-        where = f'Cell {idx + 1} of {len(self.queue)}: ' if idx >= 0 else ''
-        self.lbl_cell.setText(
-            f'{where}label {cell_id}'
-            + (f', error {p:.2f}' if p is not None else '')
-        )
 
     # -------------------------------------------------------------- fixing
-    def _selected_cell(self):
-        """(labels layer, selected label id) or (None, None) with a message."""
+    def _targets(self):
+        """(labels layer, ids of the selected cells that exist) or (None, [])
+        with a message. Without a selection of its own the label picked in
+        the labels layer is used."""
         labels, _err = self._layers()
         if labels is None:
             self.lbl_cell.setText('Choose a labels layer first.')
-            return None, None
+            return None, []
         if labels.data.ndim != 2:
             self.lbl_cell.setText('Only 2D labels can be edited here.')
-            return None, None
-        cell = int(labels.selected_label)
-        if cell == 0 or not (labels.data == cell).any():
+            return None, []
+        ids = list(self.selected)
+        if int(labels.selected_label) != self._anchor:
+            ids = [int(labels.selected_label)]  # picked with napari's picker
+        present = set(np.unique(labels.data).tolist())
+        ids = [i for i in ids if i != 0 and i in present]
+        if not ids:
             self.lbl_cell.setText(
-                'No cell selected: pick one in the labels layer (or use '
-                'Next / Previous).'
+                'No cell selected: click one (Shift+click adds more) after '
+                'pressing "Select cell by clicking", or use Next / Previous.'
             )
-            return None, None
-        return labels, cell
+            return None, []
+        return labels, ids
 
     def _edit(self, labels, indices, values):
         """Write to the labels through napari's edit history (Ctrl+Z)."""
@@ -524,39 +547,61 @@ class ReviewFlaggedWidget(QGroupBox):
             labels.refresh()
         self._on_target_edited()  # drop the edited cells from the highlight
 
-    def _after_fix(self, cell):
-        """Move on to the next highlighted cell once the highlight caught up."""
-        if cell in self.queue:
-            self.pos = self.queue.index(cell)
-        if self.queue and self.pos >= 0:
-            QTimer.singleShot(SETTLE_MS + 60, lambda: self._step(+1))
-
     def _on_delete_cell(self):
-        labels, cell = self._selected_cell()
+        labels, ids = self._targets()
         if labels is None:
             return
-        idx = np.nonzero(labels.data == cell)
-        self._edit(labels, idx, 0)
-        self.lbl_cell.setText(f'Deleted cell {cell}.')
-        self._after_fix(cell)
+        self._edit(labels, np.nonzero(np.isin(labels.data, ids)), 0)
+        self._select(labels, [])
+        self.lbl_cell.setText(
+            f'Deleted {len(ids)} cell(s): {self._listing(ids)}.'
+        )
 
     def _on_merge(self, all_touching):
-        labels, cell = self._selected_cell()
+        labels, ids = self._targets()
         if labels is None:
             return
-        partners = fc.merge_partners(labels.data, cell, gap=GAP)
-        if not partners:
-            self.lbl_cell.setText(f'Cell {cell} touches no other cell.')
+        rows, cols, values, merges, alone = fc.merge_many(
+            labels.data, ids, all_touching, GAP
+        )
+        if merges:
+            self._edit(labels, (rows, cols), values)
+        keep = [c for c in ids if c in merges]
+        self._select(labels, keep)
+        text = ' '.join(
+            f'{o_list_str} into {c}.'
+            for c, o_list_str in (
+                (c, self._listing(o)) for c, o in merges.items()
+            )
+        )
+        if alone:
+            text += f' No neighbour for {self._listing(alone)}.'
+        self.lbl_cell.setText(f'Merged {text}' if merges else text)
+
+    def _on_mark_correct(self):
+        """The selected cells need no action: take them out of the highlight."""
+        labels, ids = self._targets()
+        if labels is None:
             return
-        others = (
-            [p for p, _b in partners] if all_touching else [partners[0][0]]
-        )
-        rows, cols, values = fc.merge_cells(labels.data, cell, others, GAP)
-        self._edit(labels, (rows, cols), values)
+        overlay = self._overlay(labels)
+        done = [i for i in ids if i in self._areas]
+        if overlay is None or not done:
+            self.lbl_cell.setText('None of the selected cells is highlighted.')
+            return
+        for cell in done:
+            self._areas.pop(cell, None)
+        overlay.data[np.isin(overlay.data, done)] = 0
+        overlay.refresh()
+        self._report()
+        self._select(labels, [])
         self.lbl_cell.setText(
-            f'Merged {", ".join(str(o) for o in others)} into cell {cell}.'
+            f'Marked {len(done)} cell(s) as correct: {self._listing(done)}.'
         )
-        self._after_fix(cell)
+
+    @staticmethod
+    def _listing(ids, limit=8):
+        ids = [str(i) for i in ids]
+        return ', '.join(ids[:limit]) + (' ...' if len(ids) > limit else '')
 
     def _on_delete_highlighted(self):
         labels, _err = self._layers()
@@ -630,6 +675,15 @@ class ReviewFlaggedWidget(QGroupBox):
         cell = int(labels.data[row, col])
         if cell == 0:
             self.lbl_cell.setText('That is background: click on a cell.')
+            return
+        if 'Shift' in event.modifiers:  # add to / remove from the selection
+            now = [c for c in self.selected if c != cell]
+            if len(now) == len(self.selected):
+                now.append(cell)
+            self._select(labels, now)
+            self.lbl_cell.setText(
+                f'{len(now)} cell(s) selected: {self._listing(now)}.'
+            )
             return
         idx = self.queue.index(cell) if cell in self.queue else -1
         if idx >= 0:

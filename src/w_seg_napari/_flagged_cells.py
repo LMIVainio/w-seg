@@ -16,6 +16,7 @@ The batch stores a map with every cell filled by its error probability
     pair_layer        the same for any prefix (errortype_<image>)
     merge_partners    the touching cells of one cell, longest border first
     merge_cells       merge a cell with chosen neighbours (returns the edit)
+    merge_many        the same for several selected cells at once
 """
 
 import numpy as np
@@ -226,3 +227,34 @@ def merge_cells(labels, cell, others, gap=2):
         cols + box[1].start,
         after[rows, cols],
     )
+
+
+def merge_many(labels, cells, all_touching=False, gap=2):
+    """
+    Merge every cell of `cells` into its best neighbour (the touching cell
+    with the longest border) or, with all_touching, into all touching cells.
+    The cells are handled one after the other on a working copy, so cells that
+    touch each other end up together; a cell that was absorbed by an earlier
+    merge is skipped. Returns (rows, cols, values, merges, alone): the pixels
+    that change with their new labels (labels itself is not changed), the
+    {cell: [absorbed ids]} that happened, and the cells with no neighbour.
+    """
+    labels = np.asarray(labels)
+    work = labels.copy()
+    merges, alone = {}, []
+    for cell in cells:
+        cell = int(cell)
+        if not (work == cell).any():
+            continue
+        partners = merge_partners(work, cell, gap=gap)
+        if not partners:
+            alone.append(cell)
+            continue
+        others = (
+            [p for p, _b in partners] if all_touching else [partners[0][0]]
+        )
+        rows, cols, values = merge_cells(work, cell, others, gap)
+        work[rows, cols] = values
+        merges[cell] = others
+    rows, cols = np.nonzero(work != labels)
+    return rows, cols, work[rows, cols], merges, alone
