@@ -1,13 +1,11 @@
 import napari
 import numpy as np
 import torch
-from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -29,7 +27,9 @@ class WNetWidget(QGroupBox):
         super().__init__('W-Net Model Inference', parent)
         self.viewer = viewer
         self.generator = generator
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or (
+            'cuda' if torch.cuda.is_available() else 'cpu'
+        )
 
         self.live_update_layer = None
         self.output_layer = None
@@ -132,7 +132,9 @@ class WNetWidget(QGroupBox):
         if image_layer is None:
             print('[w-seg] Error: Please select an Image layer.')
             if self.viewer:
-                self.viewer.status = '[w-seg] Error: Please select an Image layer.'
+                self.viewer.status = (
+                    '[w-seg] Error: Please select an Image layer.'
+                )
             return
 
         if self.generator is None:
@@ -147,7 +149,9 @@ class WNetWidget(QGroupBox):
 
         print(f'[w-seg] Running prediction with model on {self.device}...')
         if self.viewer:
-            self.viewer.status = f'[w-seg] Running prediction on {self.device}...'
+            self.viewer.status = (
+                f'[w-seg] Running prediction on {self.device}...'
+            )
 
         raw_data = image_layer.data
         H, W = raw_data.shape[0], raw_data.shape[1]
@@ -238,6 +242,8 @@ class WNetWidget(QGroupBox):
         sem_idx = self.viewer.layers.index(final_layer)
         self.viewer.layers.move(sem_idx, -1)
 
-        print('[w-seg] Processing complete! Final canvas layers blended successfully.')
+        print(
+            '[w-seg] Processing complete! Final canvas layers blended successfully.'
+        )
         if self.viewer:
             self.viewer.status = '[w-seg] Prediction complete!'

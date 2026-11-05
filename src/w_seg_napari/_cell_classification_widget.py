@@ -21,23 +21,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 from scipy.ndimage import binary_dilation, generate_binary_structure
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.svm import SVC
 
 import w_seg_napari._wsegutils as w
-
-# Optional imports for advanced classifiers
-try:
-    from xgboost import XGBClassifier
-except ImportError:
-    XGBClassifier = None
-
-try:
-    from lightgbm import LGBMClassifier
-except ImportError:
-    LGBMClassifier = None
+from w_seg_napari._classifiers import SUPPORTED_CLASSIFIERS
 
 # Version of the classifier file written by CellClassifierManager.save_model
 CLASSIFIER_SCHEMA_VERSION = 2
@@ -46,42 +34,6 @@ CLASSIFIER_SCHEMA_VERSION = 2
 def _clean_extraction_config(config) -> dict:
     """Copy of a feature extraction config without non-measurement entries."""
     return {k: v for k, v in (config or {}).items() if k != 'classifier_type'}
-
-
-# Factory Registry for extensible estimator instantiation
-SUPPORTED_CLASSIFIERS = {
-    'Random Forest': lambda hp: RandomForestClassifier(
-        n_estimators=hp.get('n_estimators', 100),
-        max_depth=hp.get('max_depth', 15),
-        random_state=42,
-        n_jobs=-1,
-    ),
-    'SVM': lambda hp: SVC(
-        C=hp.get('C', 1.0),
-        kernel=hp.get('kernel', 'rbf'),
-        probability=True,
-        random_state=42,
-    ),
-}
-
-if XGBClassifier is not None:
-    SUPPORTED_CLASSIFIERS['XGBoost'] = lambda hp: XGBClassifier(
-        n_estimators=hp.get('n_estimators', 100),
-        max_depth=hp.get('max_depth', 6),
-        learning_rate=hp.get('learning_rate', 0.1),
-        random_state=42,
-        n_jobs=-1,
-        eval_metric='logloss',
-    )
-
-if LGBMClassifier is not None:
-    SUPPORTED_CLASSIFIERS['LightGBM'] = lambda hp: LGBMClassifier(
-        n_estimators=hp.get('n_estimators', 100),
-        max_depth=hp.get('max_depth', -1),
-        random_state=42,
-        n_jobs=-1,
-        verbose=-1,
-    )
 
 
 class CellClassifierManager:

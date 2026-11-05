@@ -298,16 +298,13 @@ def table_from_session(path, pred_key='gasp_labels'):
 
 
 # ------------------------------------------------------------ the model
-def _hgb(seed=0):
-    from sklearn.ensemble import HistGradientBoostingClassifier
+def _make_model(classifier, seed=0, hyperparameters=None):
+    """The chosen classifier from the shared list, class-balanced."""
+    from w_seg_napari._classifiers import TextLabelClassifier
 
-    return HistGradientBoostingClassifier(
-        max_depth=4,
-        learning_rate=0.06,
-        max_iter=200,
-        class_weight='balanced',
-        random_state=seed,
-    )
+    hp = {'balanced': True, 'seed': seed}
+    hp.update(hyperparameters or {})
+    return TextLabelClassifier(classifier, hp)
 
 
 def _p_error(model, X):
@@ -325,7 +322,13 @@ def _threshold_for_recall(y_bad, score, recall=0.9):
     return float(bad_scores[k])
 
 
-def train_error_model(table, n_splits=5, seed=0):
+def train_error_model(
+    table,
+    n_splits=5,
+    seed=0,
+    classifier='Gradient Boosting',
+    hyperparameters=None,
+):
     """
     Fit the error model on a table from table_from_session (several slides).
     Returns (bundle, report): bundle goes to save_error_model; report holds
@@ -362,7 +365,9 @@ def train_error_model(table, n_splits=5, seed=0):
     for tr, te in folds:
         if y_bad[tr].sum() == 0 or y_bad[tr].sum() == len(tr):
             continue
-        m = _hgb(seed).fit(X.iloc[tr], y[tr])
+        m = _make_model(classifier, seed, hyperparameters).fit(
+            X.iloc[tr], y[tr]
+        )
         oof[te] = _p_error(m, X.iloc[te])
         rf = RandomForestClassifier(
             300,
@@ -392,6 +397,7 @@ def train_error_model(table, n_splits=5, seed=0):
         'average_precision_size_rule': float(
             average_precision_score(y_bad[seen], rule[seen])
         ),
+        'classifier': classifier,
         'chance_level': float(y_bad[seen].mean()),
         'threshold': thr,
         'recall_at_threshold': float(flagged[y_bad[seen] == 1].mean()),
@@ -400,7 +406,7 @@ def train_error_model(table, n_splits=5, seed=0):
         else 0.0,
         'flagged_share': float(flagged.mean()),
     }
-    final = _hgb(seed).fit(X, y)
+    final = _make_model(classifier, seed, hyperparameters).fit(X, y)
     bundle = {
         'version': MODEL_VERSION,
         'model': final,
@@ -411,6 +417,102 @@ def train_error_model(table, n_splits=5, seed=0):
         'created': datetime.now().isoformat(timespec='seconds'),
     }
     return bundle, report
+
+
+def read_morphology(table, session_paths, pred_key='gasp_labels'):
+    """
+    Attach the batch's morphology columns (prefix `morph_`) to a training
+    table, matched on slide and label_id. Slides without a morphology csv
+    next to their session, or whose csv was measured on other labels than
+    the predicted ones, are left out. Returns (table, slides_used).
+    """
+    want = {'gasp_labels': 'gasp', 'sp_labels': 'sp'}[pred_key]
+    parts, used = [], []
+    for path in session_paths:
+        path = Path(path)
+        slide = path.name.removesuffix('_session.h5')
+        csv = path.with_name(f'{slide}_morphology.csv')
+        if not csv.exists():
+            continue
+        m = pd.read_csv(csv)
+        if 'label_id' not in m.columns:
+            continue
+        if 'labels_source' in m.columns and set(m['labels_source']) != {want}:
+            continue
+        keep = m.select_dtypes('number').drop(
+            columns=[c for c in m.columns if c in _NOT_MORPH], errors='ignore'
+        )
+        keep = keep.add_prefix('morph_').rename(
+            columns={'morph_label_id': 'label_id'}
+        )
+        keep['label_id'] = m['label_id'].to_numpy()
+        keep['slide'] = slide
+        parts.append(keep)
+        used.append(slide)
+    if not parts:
+        return table.iloc[0:0].copy(), []
+    morph = pd.concat(parts, ignore_index=True)
+    joined = table.merge(morph, on=['slide', 'label_id'], how='inner')
+    return joined, used
+
+
+_NOT_MORPH = {
+    'id',
+    'label_id',
+    'centroid-0',
+    'centroid-1',
+    'centroid-2',
+    'class',
+    'class_id',
+    'class_name',
+    'predicted_class',
+}
+
+
+def morphology_gain(
+    table,
+    classifier='Gradient Boosting',
+    hyperparameters=None,
+    n_splits=5,
+    seed=0,
+):
+    """
+    Does adding morphology columns (those starting with `morph_`) to the
+    error features help on slides the model has not seen?
+    Returns the held-out average precision with and without them.
+    """
+    from sklearn.metrics import average_precision_score
+    from sklearn.model_selection import GroupKFold
+
+    t = table[table['status'] != 'outline'].reset_index(drop=True)
+    y = t['status'].to_numpy()
+    y_bad = np.isin(y, BAD).astype(int)
+    slides = t['slide'].to_numpy()
+    if len(np.unique(slides)) < 2 or y_bad.sum() < 10:
+        raise ValueError(
+            'Need at least 2 slides with morphology tables and 10 wrong cells.'
+        )
+    extra = [c for c in t.columns if c.startswith('morph_')]
+    out = {'n_cells': int(len(t)), 'n_morphology_columns': len(extra)}
+    for key, cols in (
+        ('without', list(FEATURES)),
+        ('with', list(FEATURES) + extra),
+    ):
+        oof = np.full(len(t), np.nan)
+        folds = GroupKFold(n_splits=min(n_splits, len(set(slides)))).split(
+            t[cols], y_bad, slides
+        )
+        for tr, te in folds:
+            if y_bad[tr].sum() == 0:
+                continue
+            m = _make_model(classifier, seed, hyperparameters).fit(
+                t.iloc[tr][cols], y[tr]
+            )
+            oof[te] = _p_error(m, t.iloc[te][cols])
+        seen = ~np.isnan(oof)
+        out[key] = float(average_precision_score(y_bad[seen], oof[seen]))
+    out['chance_level'] = float(y_bad.mean())
+    return out
 
 
 def save_error_model(bundle, path):

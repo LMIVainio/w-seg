@@ -167,3 +167,45 @@ def test_foreign_file_is_refused(tmp_path):
     joblib.dump({'hello': 1}, tmp_path / 'x.joblib')
     with pytest.raises(ValueError):
         se.load_error_model(tmp_path / 'x.joblib')
+
+
+@pytest.mark.parametrize('name', ['Random Forest', 'SVM', 'Gradient Boosting'])
+def test_every_listed_classifier_trains_the_error_model(name):
+    table = _table(range(30, 35))
+    bundle, report = se.train_error_model(
+        table,
+        n_splits=3,
+        classifier=name,
+        hyperparameters={'n_estimators': 30},
+    )
+    assert report['classifier'] == name
+    assert report['average_precision'] > report['chance_level']
+    assert 'ok' in bundle['classes']
+
+
+def test_morphology_columns_are_joined_and_compared(tmp_path):
+    table = _table(range(40, 45))
+    paths = []
+    for slide, t in table.groupby('slide'):
+        path = tmp_path / f'{slide}_session.h5'
+        paths.append(path)
+        pd.DataFrame(
+            {
+                'label_id': t['label_id'],
+                'area': t['area_rel_image'],
+                'labels_source': 'gasp',
+            }
+        ).to_csv(tmp_path / f'{slide}_morphology.csv', index=False)
+    joined, used = se.read_morphology(table, paths)
+    assert len(used) == 5 and 'morph_area' in joined.columns
+    gain = se.morphology_gain(
+        joined, hyperparameters={'n_estimators': 30}, n_splits=3
+    )
+    assert gain['n_morphology_columns'] == 1
+    assert gain['with'] > 0 and gain['without'] > 0
+
+    # a table measured on other labels is not used
+    pd.DataFrame(
+        {'label_id': [1], 'area': [1], 'labels_source': 'corrected'}
+    ).to_csv(tmp_path / 'slide40_morphology.csv', index=False)
+    assert 'slide40' not in se.read_morphology(table, paths)[1]
