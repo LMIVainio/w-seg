@@ -21,6 +21,7 @@ CURRENT_LAYER = 'review_cell'
 
 TYPE_PREFIX = 'errortype_'
 GAP = 2  # cells this close (a one-pixel wall between) count as touching
+CURRENT_COLOR = (1.0, 0.85, 0.0, 1.0)  # outline of the selected cell
 DIM_OPACITY = 0.6  # the labels layer while cells are highlighted
 SETTLE_MS = 150  # wait after an edit, so a brush stroke counts as one edit
 
@@ -134,6 +135,15 @@ class ReviewFlaggedWidget(QGroupBox):
         nav.addWidget(self.btn_prev)
         nav.addWidget(self.btn_next)
         layout.addLayout(nav)
+        self.btn_pick = QPushButton('Select cell by clicking')
+        self.btn_pick.setCheckable(True)
+        self.btn_pick.setToolTip(
+            'While this is pressed, a click on a cell in the image selects '
+            'it (yellow outline), highlighted or not, instead of painting. '
+            'Press again to stop.'
+        )
+        self.btn_pick.toggled.connect(self._on_pick_toggled)
+        layout.addWidget(self.btn_pick)
         self.lbl_cell = QLabel('')
         self.lbl_cell.setWordWrap(True)
         layout.addWidget(self.lbl_cell)
@@ -445,15 +455,16 @@ class ReviewFlaggedWidget(QGroupBox):
         self.pos = idx
         self._show_cell(labels, self.queue[idx], idx)
 
-    def _show_cell(self, labels, cell_id, idx):
+    def _show_cell(self, labels, cell_id, idx, recenter=True):
         v = self.viewer
         centre = fc.find_cell(labels.data, cell_id)
         if centre is None:
             return
-        # outline of the current cell
-        outline = (np.asarray(labels.data) == cell_id) * cell_id
+        # outline of the current cell: always label 1, so always one colour
+        outline = (np.asarray(labels.data) == cell_id).astype(np.uint8)
         if CURRENT_LAYER in v.layers:
-            v.layers[CURRENT_LAYER].data = outline
+            layer = v.layers[CURRENT_LAYER]
+            layer.data = outline
         else:
             layer = v.add_labels(
                 outline,
@@ -462,27 +473,26 @@ class ReviewFlaggedWidget(QGroupBox):
                 scale=labels.scale,
                 translate=labels.translate,
             )
-            try:
-                layer.contour = 3
-            except (AttributeError, ValueError):
-                pass
-            layer.editable = False
+            self._style_outline(layer)
+        layer.scale, layer.translate = labels.scale, labels.translate
         # move there and make the labels layer ready for editing this cell
-        world = tuple(
-            c * s + t
-            for c, s, t in zip(
-                centre, labels.scale[-2:], labels.translate[-2:]
+        if recenter:
+            world = tuple(
+                c * s + t
+                for c, s, t in zip(
+                    centre, labels.scale[-2:], labels.translate[-2:]
+                )
             )
-        )
-        try:
-            v.camera.center = (0.0, *world)
-        except (AttributeError, ValueError, TypeError):
-            pass
+            try:
+                v.camera.center = (0.0, *world)
+            except (AttributeError, ValueError, TypeError):
+                pass
         labels.selected_label = int(cell_id)
         v.layers.selection.active = labels
         p = self._p.get(int(cell_id))
+        where = f'Cell {idx + 1} of {len(self.queue)}: ' if idx >= 0 else ''
         self.lbl_cell.setText(
-            f'Cell {idx + 1} of {len(self.queue)}: label {cell_id}'
+            f'{where}label {cell_id}'
             + (f', error {p:.2f}' if p is not None else '')
         )
 
@@ -568,3 +578,68 @@ class ReviewFlaggedWidget(QGroupBox):
         idx = np.nonzero(np.isin(labels.data, ids))
         self._edit(labels, idx, 0)
         self.lbl_cell.setText(f'Deleted {len(ids)} cells.')
+
+    # ------------------------------------------------------ selecting by click
+    @staticmethod
+    def _style_outline(layer):
+        """A fixed colour and a contour, so the selected cell always looks the same."""
+        try:
+            layer.contour = 3
+        except (AttributeError, ValueError):
+            pass
+        try:
+            from napari.utils.colormaps import DirectLabelColormap
+
+            layer.colormap = DirectLabelColormap(
+                color_dict={None: (0, 0, 0, 0), 1: CURRENT_COLOR}
+            )
+        except (ImportError, AttributeError, ValueError, TypeError):
+            pass  # the default colour of label 1 is also constant
+        layer.editable = False
+
+    def _on_pick_toggled(self, on):
+        callbacks = self.viewer.mouse_drag_callbacks
+        if on:
+            labels, _err = self._layers()
+            if labels is None:
+                self.btn_pick.setChecked(False)
+                self.lbl_cell.setText('Choose a labels layer first.')
+                return
+            try:
+                labels.mode = 'pan_zoom'  # so the click does not paint
+            except (AttributeError, ValueError):
+                pass
+            if self._on_click not in callbacks:
+                callbacks.append(self._on_click)
+            self.lbl_cell.setText('Click a cell to select it.')
+        elif self._on_click in callbacks:
+            callbacks.remove(self._on_click)
+
+    def _on_click(self, viewer, event):
+        if event.type != 'mouse_press' or event.button != 1:
+            return
+        labels, _err = self._layers()
+        if labels is None or labels.data.ndim != 2:
+            return
+        row, col = (
+            int(round(x)) for x in labels.world_to_data(event.position)[-2:]
+        )
+        h, w = labels.data.shape
+        if not (0 <= row < h and 0 <= col < w):
+            return
+        cell = int(labels.data[row, col])
+        if cell == 0:
+            self.lbl_cell.setText('That is background: click on a cell.')
+            return
+        idx = self.queue.index(cell) if cell in self.queue else -1
+        if idx >= 0:
+            self.pos = idx  # Next / Previous continue from here
+        self._show_cell(labels, cell, idx, recenter=False)
+        if idx >= 0 and cell not in self._areas:
+            self.lbl_cell.setText(
+                self.lbl_cell.text() + ' (edited since it was highlighted)'
+            )
+
+    def closeEvent(self, event):
+        self.btn_pick.setChecked(False)
+        super().closeEvent(event)
