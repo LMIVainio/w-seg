@@ -209,3 +209,19 @@ def test_morphology_columns_are_joined_and_compared(tmp_path):
         {'label_id': [1], 'area': [1], 'labels_source': 'corrected'}
     ).to_csv(tmp_path / 'slide40_morphology.csv', index=False)
     assert 'slide40' not in se.read_morphology(table, paths)[1]
+
+
+def test_error_features_are_appended_to_a_morphology_table():
+    ref, pred, wall = _slide(50)
+    ids = np.unique(pred)[1:]
+    df = pd.DataFrame(
+        {'label_id': ids, 'area': 1.0, 'err_inner_wall_mean': 9.0}
+    )
+    out = se.add_error_features(df, pred, wall)
+    assert len(out) == len(ids) and list(out['label_id']) == list(ids)
+    assert 'area' in out.columns
+    assert (
+        out['err_inner_wall_mean'].ne(9.0).any()
+    )  # recomputed, not duplicated
+    assert not out.columns.duplicated().any()
+    assert all(f'err_{f}' in out.columns for f in se.FEATURES)

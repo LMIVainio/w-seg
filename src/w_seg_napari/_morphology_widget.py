@@ -969,9 +969,14 @@ def measure_cell_morphology(
     labels_translate=None,
     worker=None,
     verbose: bool = True,
+    error_features: bool = False,
 ) -> pd.DataFrame:
     """
     Multithreaded batch computation of cell wall metrics for all cell labels.
+
+    error_features adds the columns of the segmentation error model
+    (`err_*`: inner wall, shared-border wall, distance-transform peaks, ...),
+    computed from the processed wall signal (walls high).
     """
     # Take a copy of labels
     labels_layer = labels_layer.copy()
@@ -1225,6 +1230,12 @@ def measure_cell_morphology(
     df_final = extract_spatial_feature_matrix(
         labels_layer, df_combined, search_radius=max_search_radius
     )
+    if error_features and len(df_final):
+        from w_seg_napari._segmentation_errors import add_error_features
+
+        df_final = add_error_features(
+            df_final, labels_layer, cell_wall_signal, pixel_spacing
+        )
 
     return df_final, labels_layer, class_map
 
@@ -1356,6 +1367,15 @@ class MorphologyWidget(QWidget):
         params_layout.addRow(self.invert_signal_cb)
         params_layout.addRow(self.show_processed_signal_cb)
         params_layout.addRow(self.radial_symmetry_cb)
+        self.error_features_cb = QCheckBox(
+            'Add segmentation-error features (err_* columns)'
+        )
+        self.error_features_cb.setToolTip(
+            'Inner wall signal, wall on the shared border, distance-transform '
+            'peaks and more: the same measurements the error model uses. '
+            'They can help the cell classifier find merged or split cells.'
+        )
+        params_layout.addRow(self.error_features_cb)
 
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
@@ -2092,6 +2112,7 @@ class MorphologyWidget(QWidget):
             'max_rays': int(self.max_rays_spin.value()),
             'offset': float(self.offset_spin.value()),
             'radial_sym': bool(self.radial_symmetry_cb.isChecked()),
+            'error_features': bool(self.error_features_cb.isChecked()),
         }
         # print(f"[DEBUG] Feature extraction config: {fe_config}")
         return fe_config
@@ -2116,6 +2137,7 @@ class MorphologyWidget(QWidget):
             QSignalBlocker(self.max_rays_spin),
             QSignalBlocker(self.offset_spin),
             QSignalBlocker(self.radial_symmetry_cb),
+            QSignalBlocker(self.error_features_cb),
         ]
 
         if 'pixel_spacing' in config:
@@ -2136,6 +2158,8 @@ class MorphologyWidget(QWidget):
             self.max_rays_spin.setValue(int(config['max_rays']))
         if 'offset' in config:
             self.offset_spin.setValue(float(config['offset']))
+        if 'error_features' in config:
+            self.error_features_cb.setChecked(bool(config['error_features']))
         if 'radial_sym' in config:
             enabled = bool(config['radial_sym'])
             self.radial_symmetry_cb.setChecked(enabled)

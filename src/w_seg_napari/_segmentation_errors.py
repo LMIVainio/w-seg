@@ -298,6 +298,17 @@ def table_from_session(path, pred_key='gasp_labels'):
 
 
 # ------------------------------------------------------------ the model
+def add_error_features(df, labels, wall, pixel_spacing=1.0):
+    """Append the segmentation error features to a morphology table as
+    `err_<name>` columns, matched on label_id. Columns that already exist
+    are overwritten, so re-measuring never duplicates them."""
+    wall = np.clip(np.asarray(wall, np.float32), 0.0, 1.0)
+    feats = cell_features(labels, wall, pixel_spacing).set_index('label_id')
+    feats = feats.add_prefix('err_')
+    df = df.drop(columns=[c for c in feats.columns if c in df.columns])
+    return df.merge(feats, left_on='label_id', right_index=True, how='left')
+
+
 def _make_model(classifier, seed=0, hyperparameters=None):
     """The chosen classifier from the shared list, class-balanced."""
     from w_seg_napari._classifiers import TextLabelClassifier
