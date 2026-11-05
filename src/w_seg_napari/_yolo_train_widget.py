@@ -15,6 +15,7 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -40,6 +41,7 @@ from w_seg_napari._train_args import (
     unique_bundle_dir,
 )
 from w_seg_napari._wsegutils import BUNDLE_DIR, list_local_bundles
+from w_seg_napari._yolo_data import YOLO_CLASS_LAYER, session_sample
 
 MARKER = '@@'
 MAX_LOG_LINES = 400
@@ -81,7 +83,8 @@ class YoloTrainWidget(QGroupBox):
             'stores the classifier inside a copy of one of your models. '
             'Open the image, the cell labels and a class layer (class id '
             'painted on the cells, 0 = not annotated) in napari, add them as '
-            'a sample, and repeat for every image. With two or more images, '
+            'a sample, and repeat for every image, or add batch session files that '
+            'hold a "yolo_class" layer. With two or more images, '
             'whole images are held out to measure the accuracy.'
         )
         info.setWordWrap(True)
@@ -100,10 +103,20 @@ class YoloTrainWidget(QGroupBox):
         form.addRow('RGB image:', self.image_combo)
         form.addRow('Cell labels:', self.labels_combo)
         form.addRow('Class layer:', self.class_combo)
+        self.btn_sessions = QPushButton('Add from session files...')
+        self.btn_sessions.setToolTip(
+            'Adds the images of batch session files (*_session.h5) that hold '
+            f'a "{YOLO_CLASS_LAYER}" layer: the image, the corrected labels '
+            'and the class ids. Save the sessions with that layer ticked '
+            'under "Also keep these layers". Use the same class numbers in '
+            'every image; the names are set in the table below.'
+        )
+        self.btn_sessions.clicked.connect(self._on_add_sessions)
         row = QHBoxLayout()
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_remove)
         form.addRow(row)
+        form.addRow(self.btn_sessions)
         form.addRow('Samples:', self.sample_list)
         lay.addLayout(form)
 
@@ -337,6 +350,40 @@ class YoloTrainWidget(QGroupBox):
         self._refresh_sample_views()
         if not self.name_edit.text() and self.attach_combo.currentText():
             self.name_edit.setText(f'{self.attach_combo.currentText()}_yolo')
+
+    def _on_add_sessions(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            'Session files',
+            '',
+            'Session files (*_session.h5);;HDF5 (*.h5)',
+        )
+        added, skipped = [], []
+        taken = {s['name'] for s in self.samples}
+        for f in files:
+            sample, why = session_sample(f)
+            if sample is None:
+                skipped.append(f'{Path(f).name}: {why}')
+            elif sample['name'] in taken:
+                skipped.append(f'{Path(f).name}: already added')
+            else:
+                taken.add(sample['name'])
+                self.samples.append(sample)
+                added.append(sample['name'])
+        self._refresh_sample_views()
+        if (
+            added
+            and not self.name_edit.text()
+            and self.attach_combo.currentText()
+        ):
+            self.name_edit.setText(f'{self.attach_combo.currentText()}_yolo')
+        if skipped or not added:
+            QMessageBox.information(
+                self,
+                'YOLO',
+                f'Added {len(added)} of {len(files)} sessions.'
+                + ('\n\nSkipped:\n' + '\n'.join(skipped) if skipped else ''),
+            )
 
     def _on_remove_sample(self):
         row = self.sample_list.currentRow()

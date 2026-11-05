@@ -147,3 +147,39 @@ def test_hand_made_session_holds_image_and_labels(tmp_path):
             corrected=np.ones((3, 3), np.int32),
             raw=img,
         )
+
+
+def _yolo_session(tmp_path, name='a', classes=True, shape=(12, 16)):
+    path = tmp_path / f'{name}_session.h5'
+    sio.save_session(path, _batch_arrays(), {'source_file': f'{name}.tif'})
+    fixed = np.full((12, 16), 5, np.int32)
+    fixed[:, 8:] = 6
+    extras = []
+    if classes:
+        painted = np.zeros(shape, np.int32)
+        painted[:, :8] = 2
+        extras = [
+            sio.layer_to_payload(FakeLayer('labels', 'yolo_class', painted))
+        ]
+    sio.save_edits(path, corrected=fixed, extras=extras)
+    return path
+
+
+def test_yolo_sample_from_a_session(tmp_path):
+    from w_seg_napari._yolo_data import session_sample
+
+    sample, why = session_sample(_yolo_session(tmp_path))
+    assert why is None and sample['name'] == 'a'
+    assert sample['class_ids'] == [2]
+    assert sample['image'].shape == (12, 16, 3)
+    assert sample['labels_origin'] == 'corrected'
+    assert set(np.unique(sample['labels'])) == {5, 6}
+
+
+def test_yolo_sample_says_why_a_session_is_unusable(tmp_path):
+    from w_seg_napari._yolo_data import session_sample
+
+    sample, why = session_sample(_yolo_session(tmp_path, classes=False))
+    assert sample is None and 'yolo_class' in why
+    sample, why = session_sample(_yolo_session(tmp_path, 'b', shape=(5, 5)))
+    assert sample is None and 'shape' in why

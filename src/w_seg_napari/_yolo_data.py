@@ -158,6 +158,68 @@ def _to_uint8_rgb(crop):
     return np.clip(np.rint(a * 255.0), 0, 255).astype(np.uint8)
 
 
+YOLO_CLASS_LAYER = 'yolo_class'  # name of the class layer kept in a session
+
+
+def session_sample(path):
+    """
+    A training sample (see build_dataset) from a batch session file: the
+    image from `raw`, the cells from the corrected labels (else the GASP or
+    superpixel labels) and the class ids from the layer named `yolo_class`
+    in the session's extra layers (tick it under "Also keep these layers"
+    when saving the session). The names of the classes are given where the
+    training is set up, not in the session.
+
+    Returns (sample, None), or (None, reason) when the session cannot be used.
+    """
+    import h5py
+
+    from w_seg_napari._batch_io import to_rgb
+    from w_seg_napari._session_io import (
+        SESSION_SUFFIX,
+        editable_labels,
+        read_extras,
+    )
+
+    path = Path(path)
+    name = path.name.removesuffix(SESSION_SUFFIX)
+    try:
+        layers = {p['name']: p for p in read_extras(path)}
+        with h5py.File(path, 'r') as f:
+            raw = f['raw'][()] if 'raw' in f else None
+            store = {
+                k: f[k]
+                for k in ('labels_corrected', 'gasp_labels', 'sp_labels')
+                if k in f
+            }
+            labels, origin = editable_labels(store)
+    except (OSError, KeyError, ValueError) as e:
+        return None, f'cannot read the session ({e})'
+    if YOLO_CLASS_LAYER not in layers:
+        return None, f'no "{YOLO_CLASS_LAYER}" layer saved in it'
+    if raw is None:
+        return None, 'it holds no image (raw)'
+    if labels is None:
+        return None, 'it holds no cell labels'
+    classes = np.squeeze(np.asarray(layers[YOLO_CLASS_LAYER]['data']))
+    if classes.shape != labels.shape:
+        return None, (
+            f'the {YOLO_CLASS_LAYER} layer {classes.shape} and the cell '
+            f'labels {labels.shape} differ in shape'
+        )
+    ids = sorted(int(i) for i in np.unique(classes) if i > 0)
+    if not ids:
+        return None, f'the {YOLO_CLASS_LAYER} layer has no annotated pixels'
+    return {
+        'name': name,
+        'image': to_rgb(raw),
+        'labels': labels,
+        'classes': classes.astype(np.int32),
+        'class_ids': ids,
+        'labels_origin': origin,
+    }, None
+
+
 def build_dataset(
     samples,
     class_names,
