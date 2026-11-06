@@ -183,3 +183,24 @@ def test_yolo_sample_says_why_a_session_is_unusable(tmp_path):
     assert sample is None and 'yolo_class' in why
     sample, why = session_sample(_yolo_session(tmp_path, 'b', shape=(5, 5)))
     assert sample is None and 'shape' in why
+
+
+def test_yolo_sample_can_require_corrected_labels(tmp_path):
+    from w_seg_napari._yolo_data import session_sample
+
+    path = _yolo_session(tmp_path)
+    assert session_sample(path, require_corrected=True)[1] is None
+    # a session with a class layer but no saved corrections
+    other = tmp_path / 'b_session.h5'
+    sio.save_session(other, _batch_arrays(), {'source_file': 'b.tif'})
+    painted = np.ones((12, 16), np.int32)
+    sio.save_edits(
+        other,
+        extras=[
+            sio.layer_to_payload(FakeLayer('labels', 'yolo_class', painted))
+        ],
+    )
+    sample, why = session_sample(other, require_corrected=True)
+    assert sample is None and 'corrected' in why
+    sample, why = session_sample(other)
+    assert why is None and sample['labels_origin'] == 'gasp'

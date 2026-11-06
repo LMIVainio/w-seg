@@ -161,7 +161,7 @@ def _to_uint8_rgb(crop):
 YOLO_CLASS_LAYER = 'yolo_class'  # name of the class layer kept in a session
 
 
-def session_sample(path):
+def session_sample(path, require_corrected=False):
     """
     A training sample (see build_dataset) from a batch session file: the
     image from `raw`, the cells from the corrected labels (else the GASP or
@@ -169,6 +169,10 @@ def session_sample(path):
     in the session's extra layers (tick it under "Also keep these layers"
     when saving the session). The names of the classes are given where the
     training is set up, not in the session.
+
+    require_corrected: refuse sessions without saved corrected labels instead
+    of silently cutting the crops around the GASP or superpixel cells.
+    The sample's `labels_origin` says which labels were used.
 
     Returns (sample, None), or (None, reason) when the session cannot be used.
     """
@@ -201,6 +205,10 @@ def session_sample(path):
         return None, 'it holds no image (raw)'
     if labels is None:
         return None, 'it holds no cell labels'
+    if require_corrected and origin != 'corrected':
+        return None, (
+            f'no corrected labels saved (it only has the {origin} labels)'
+        )
     classes = np.squeeze(np.asarray(layers[YOLO_CLASS_LAYER]['data']))
     if classes.shape != labels.shape:
         return None, (

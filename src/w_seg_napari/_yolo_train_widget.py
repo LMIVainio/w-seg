@@ -112,11 +112,19 @@ class YoloTrainWidget(QGroupBox):
             'every image; the names are set in the table below.'
         )
         self.btn_sessions.clicked.connect(self._on_add_sessions)
+        self.cb_corrected = QCheckBox('Only sessions with corrected labels')
+        self.cb_corrected.setChecked(True)
+        self.cb_corrected.setToolTip(
+            'The crops are cut around the cells of the corrected labels. '
+            'Without this, a session that has no saved corrections is used '
+            'with its uncorrected GASP labels (and listed in the message).'
+        )
         row = QHBoxLayout()
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_remove)
         form.addRow(row)
         form.addRow(self.btn_sessions)
+        form.addRow(self.cb_corrected)
         form.addRow('Samples:', self.sample_list)
         lay.addLayout(form)
 
@@ -358,10 +366,10 @@ class YoloTrainWidget(QGroupBox):
             '',
             'Session files (*_session.h5);;HDF5 (*.h5)',
         )
-        added, skipped = [], []
+        added, skipped, uncorrected = [], [], []
         taken = {s['name'] for s in self.samples}
         for f in files:
-            sample, why = session_sample(f)
+            sample, why = session_sample(f, self.cb_corrected.isChecked())
             if sample is None:
                 skipped.append(f'{Path(f).name}: {why}')
             elif sample['name'] in taken:
@@ -370,6 +378,10 @@ class YoloTrainWidget(QGroupBox):
                 taken.add(sample['name'])
                 self.samples.append(sample)
                 added.append(sample['name'])
+                if sample['labels_origin'] != 'corrected':
+                    uncorrected.append(
+                        f'{sample["name"]} ({sample["labels_origin"]})'
+                    )
         self._refresh_sample_views()
         if (
             added
@@ -377,12 +389,17 @@ class YoloTrainWidget(QGroupBox):
             and self.attach_combo.currentText()
         ):
             self.name_edit.setText(f'{self.attach_combo.currentText()}_yolo')
-        if skipped or not added:
+        if skipped or uncorrected or not added:
             QMessageBox.information(
                 self,
                 'YOLO',
                 f'Added {len(added)} of {len(files)} sessions.'
-                + ('\n\nSkipped:\n' + '\n'.join(skipped) if skipped else ''),
+                + ('\n\nSkipped:\n' + '\n'.join(skipped) if skipped else '')
+                + (
+                    '\n\nUsed UNCORRECTED labels:\n' + '\n'.join(uncorrected)
+                    if uncorrected
+                    else ''
+                ),
             )
 
     def _on_remove_sample(self):
