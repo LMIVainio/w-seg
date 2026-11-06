@@ -218,7 +218,9 @@ class ReviewFlaggedWidget(QGroupBox):
             la.name
             for la in self.viewer.layers
             if la._type_string == 'labels'
-            and not la.name.startswith((FLAGGED_PREFIX, CURRENT_LAYER))
+            and not la.name.startswith(
+                (FLAGGED_PREFIX, CURRENT_LAYER, 'label_selection')
+            )
         ]
         errors = [
             la.name
