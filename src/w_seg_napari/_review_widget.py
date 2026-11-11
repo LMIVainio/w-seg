@@ -20,6 +20,7 @@ CURRENT_LAYER = 'review_cell'
 
 
 TYPE_PREFIX = 'errortype_'
+NO_TYPE_LAYER = '(none)'
 GAP = 2  # cells this close (a one-pixel wall between) count as touching
 CURRENT_COLOR = (1.0, 0.85, 0.0, 1.0)  # outline of the selected cell
 DIM_OPACITY = 0.6  # the labels layer while cells are highlighted
@@ -83,6 +84,17 @@ class ReviewFlaggedWidget(QGroupBox):
             '(each cell filled with its error probability).'
         )
         row.addWidget(self.combo_error, stretch=1)
+        layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Error type layer:'))
+        self.combo_type = QComboBox()
+        self.combo_type.setToolTip(
+            'The errortype_<image> layer made by a batch run with error '
+            'flagging (1 too large, 2 too small, 3 not a cell). Needed for '
+            'the Error type filter below.'
+        )
+        row.addWidget(self.combo_type, stretch=1)
         layout.addLayout(row)
 
         row = QHBoxLayout()
@@ -194,6 +206,7 @@ class ReviewFlaggedWidget(QGroupBox):
 
         self.combo_labels.currentIndexChanged.connect(self._on_labels_changed)
         self.combo_error.currentIndexChanged.connect(self._rescore)
+        self.combo_type.currentIndexChanged.connect(self._rescore)
         self.spin_lower.valueChanged.connect(self._update_count)
         self.spin_upper.valueChanged.connect(self._update_count)
         self.combo_kind.currentIndexChanged.connect(self._update_count)
@@ -227,13 +240,20 @@ class ReviewFlaggedWidget(QGroupBox):
             for la in self.viewer.layers
             if la._type_string == 'image' and la.name.startswith('error_')
         ]
+        types = [NO_TYPE_LAYER] + [
+            la.name
+            for la in self.viewer.layers
+            if la._type_string == 'image' and la.name.startswith(TYPE_PREFIX)
+        ]
         before = (
             self.combo_labels.currentText(),
             self.combo_error.currentText(),
+            self.combo_type.currentText(),
         )
         for combo, items in (
             (self.combo_labels, labels),
             (self.combo_error, errors),
+            (self.combo_type, types),
         ):
             keep = combo.currentText()
             combo.blockSignals(True)
@@ -242,11 +262,16 @@ class ReviewFlaggedWidget(QGroupBox):
             if keep in items:
                 combo.setCurrentText(keep)
             combo.blockSignals(False)
-        if self.combo_error.currentText() != before[1] or not before[1]:
+        if (
+            self.combo_error.currentText() != before[1]
+            or self.combo_type.currentText() != before[2]
+            or not before[1]
+        ):
             self._pair()
         if (
             self.combo_labels.currentText(),
             self.combo_error.currentText(),
+            self.combo_type.currentText(),
         ) != before:
             self.scores = None  # scored again when needed
 
@@ -260,6 +285,17 @@ class ReviewFlaggedWidget(QGroupBox):
             self.combo_error.blockSignals(True)
             self.combo_error.setCurrentText(match)
             self.combo_error.blockSignals(False)
+        types = [
+            self.combo_type.itemText(i)
+            for i in range(1, self.combo_type.count())
+        ]
+        match = fc.pair_layer(
+            self.combo_labels.currentText(), types, TYPE_PREFIX
+        )
+        if match:
+            self.combo_type.blockSignals(True)
+            self.combo_type.setCurrentText(match)
+            self.combo_type.blockSignals(False)
 
     def _on_labels_changed(self, *_):
         self._pair()
@@ -273,15 +309,12 @@ class ReviewFlaggedWidget(QGroupBox):
             return v.layers[a], v.layers[b]
         return None, None
 
-    def _type_layer(self, labels):
-        """The errortype_<image> layer that goes with the labels layer."""
-        names = [
-            la.name
-            for la in self.viewer.layers
-            if la._type_string == 'image' and la.name.startswith(TYPE_PREFIX)
-        ]
-        match = fc.pair_layer(labels.name, names, TYPE_PREFIX)
-        return self.viewer.layers[match] if match else None
+    def _type_layer(self, labels=None):
+        """The layer chosen in the Error type layer box (None if none)."""
+        name = self.combo_type.currentText()
+        if name and name != NO_TYPE_LAYER and name in self.viewer.layers:
+            return self.viewer.layers[name]
+        return None
 
     def _kinds(self):
         return fc.KIND_CHOICES[self.combo_kind.currentText()]
@@ -317,8 +350,9 @@ class ReviewFlaggedWidget(QGroupBox):
             and (self.scores['error_type'] == 'unknown').all()
         ):
             self.lbl_count.setText(
-                'No errortype_<image> layer for these labels: run the batch '
-                'again with error flagging, or choose "Any kind".'
+                'No errortype_<image> layer chosen: pick one in "Error type '
+                'layer" (made by a batch run with error flagging), or choose '
+                '"Any kind".'
             )
             return
         n = len(self._chosen())

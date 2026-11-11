@@ -787,7 +787,7 @@ def test_a_changed_region_makes_the_image_not_done(tmp_path, monkeypatch):
 def test_border_cells_setting_reaches_the_measurement(tmp_path, monkeypatch):
     import sys
 
-    _install_fakes(monkeypatch)
+    sessions = _install_fakes(monkeypatch)
     seen = {}
 
     def measure(labels_layer, worker=None, **kw):
@@ -811,3 +811,7 @@ def test_border_cells_setting_reaches_the_measurement(tmp_path, monkeypatch):
     assert seen['clear_borders'] is True
     notes = [e[1] for e in events if e[0] == 'note']
     assert any('1 cells touching the image border' in n for n in notes)
+    # the labels you edit afterwards no longer hold the border cell
+    saved = next(iter(sessions.values()))
+    assert 1 not in np.unique(saved['gasp_labels'])
+    assert 2 in np.unique(saved['gasp_labels'])

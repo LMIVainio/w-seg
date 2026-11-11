@@ -469,6 +469,12 @@ def process_image(image_path, settings: dict, is_cancelled):
                 f'{name}: {n_before - n_after} cells touching the image '
                 'border left out of the measurements.'
             )
+            # the labels you will edit lose them too (superpixels are not
+            # cells, so those stay as they are)
+            if key in (CORRECTED, 'gasp_labels') and n_before != n_after:
+                store[key] = labels_measured
+                if key == 'gasp_labels':
+                    results['gasp_labels'] = labels_measured
         df = df.copy()
         df.insert(0, 'source_file', source_name)
         df.insert(
