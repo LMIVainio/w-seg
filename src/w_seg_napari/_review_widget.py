@@ -21,6 +21,8 @@ CURRENT_LAYER = 'review_cell'
 
 TYPE_PREFIX = 'errortype_'
 NO_TYPE_LAYER = '(none)'
+SCOPE_SELECTED = 'Selected cells'
+SCOPE_ALL = 'All highlighted cells'
 GAP = 2  # cells this close (a one-pixel wall between) count as touching
 CURRENT_COLOR = (1.0, 0.85, 0.0, 1.0)  # outline of the selected cell
 DIM_OPACITY = 0.6  # the labels layer while cells are highlighted
@@ -40,9 +42,11 @@ class ReviewFlaggedWidget(QGroupBox):
        drawn in the review_cell layer, and the cell's label is selected in
        the labels layer, so you can fix it with the normal napari tools.
     3. Fix: Delete / Merge buttons act on the selected cell (the one you
-       visited, or any cell you picked in the labels layer), and "Delete
-       highlighted cells" removes every cell that is still highlighted,
-       optionally only one kind of error. All of it goes through napari's
+       visited, or any cell you picked in the labels layer), or, with
+       "Apply to: All highlighted cells", on every cell that is still
+       highlighted (optionally only one kind of error). Delete, both Merge
+       buttons and Mark as correct all follow that choice. All of it goes
+       through napari's
        edit history, so Ctrl+Z undoes it.
     """
 
@@ -164,22 +168,41 @@ class ReviewFlaggedWidget(QGroupBox):
         layout.addWidget(self.lbl_cell)
         self._enable_nav(False)
 
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Apply to:'))
+        self.combo_scope = QComboBox()
+        self.combo_scope.addItems([SCOPE_SELECTED, SCOPE_ALL])
+        self.combo_scope.setToolTip(
+            'The four buttons below (Delete, Merge with neighbour, Merge '
+            'with all touching, Mark as correct) act on either the cells '
+            'you selected, or on every cell that is still highlighted '
+            '(the error range and error type above decide which). With all '
+            'highlighted cells you are asked first; Ctrl+Z undoes edits.'
+        )
+        row.addWidget(self.combo_scope, stretch=1)
+        layout.addLayout(row)
+
         fix = QHBoxLayout()
         self.btn_delete = QPushButton('Delete cell(s)')
-        self.btn_delete.setToolTip('Removes the selected cells (label 0).')
+        self.btn_delete.setToolTip(
+            'Removes the cells (label 0): the selected ones, or all '
+            'highlighted ones, as chosen in "Apply to".'
+        )
         self.btn_delete.clicked.connect(self._on_delete_cell)
         self.btn_merge_one = QPushButton('Merge with neighbour')
         self.btn_merge_one.setToolTip(
-            'Merges each selected cell into the touching cell it shares the '
-            'longest border with. The selected label id is kept.'
+            'Merges each cell (selected or all highlighted, see "Apply to") '
+            'into the touching cell it shares the longest border with. The '
+            'label id of the cell is kept.'
         )
         self.btn_merge_one.clicked.connect(
             lambda: self._on_merge(all_touching=False)
         )
         self.btn_merge_all = QPushButton('Merge with all touching')
         self.btn_merge_all.setToolTip(
-            'Merges each selected cell with every cell touching it. Use for '
-            'a cell that was cut into several pieces.'
+            'Merges each cell (selected or all highlighted, see "Apply to") '
+            'with every cell touching it. Use for a cell that was cut into '
+            'several pieces.'
         )
         self.btn_merge_all.clicked.connect(
             lambda: self._on_merge(all_touching=True)
@@ -190,19 +213,12 @@ class ReviewFlaggedWidget(QGroupBox):
 
         self.btn_correct = QPushButton('Mark as correct (no action needed)')
         self.btn_correct.setToolTip(
-            'Takes the selected cells out of the highlight without changing '
-            'them, so Next skips them. Shift+click selects several cells.'
+            'Takes the cells (selected or all highlighted, see "Apply to") '
+            'out of the highlight without changing them, so Next skips '
+            'them. Shift+click selects several cells.'
         )
         self.btn_correct.clicked.connect(self._on_mark_correct)
         layout.addWidget(self.btn_correct)
-
-        self.btn_delete_all = QPushButton('Delete highlighted cells')
-        self.btn_delete_all.setToolTip(
-            'Deletes every cell that is still highlighted (the error range '
-            'and error type above decide which). Asks first.'
-        )
-        self.btn_delete_all.clicked.connect(self._on_delete_highlighted)
-        layout.addWidget(self.btn_delete_all)
 
         self.combo_labels.currentIndexChanged.connect(self._on_labels_changed)
         self.combo_error.currentIndexChanged.connect(self._rescore)
@@ -561,6 +577,8 @@ class ReviewFlaggedWidget(QGroupBox):
         if labels.data.ndim != 2:
             self.lbl_cell.setText('Only 2D labels can be edited here.')
             return None, []
+        if self._all_mode():
+            return self._highlighted_targets(labels)
         ids = list(self.selected)
         if int(labels.selected_label) != self._anchor:
             ids = [int(labels.selected_label)]  # picked with napari's picker
@@ -571,6 +589,30 @@ class ReviewFlaggedWidget(QGroupBox):
                 'No cell selected: click one (Shift+click adds more) after '
                 'pressing "Select cell by clicking", or use Next / Previous.'
             )
+            return None, []
+        return labels, ids
+
+    def _all_mode(self):
+        return self.combo_scope.currentText() == SCOPE_ALL
+
+    def _highlighted_targets(self, labels):
+        """(labels, ids of the cells still highlighted), after asking."""
+        present = set(np.unique(labels.data).tolist())
+        ids = sorted(int(i) for i in self._areas if int(i) in present)
+        if self._watched is None or not ids:
+            self.lbl_cell.setText('Nothing is highlighted: press Highlight.')
+            return None, []
+        answer = QMessageBox.question(
+            self,
+            'All highlighted cells',
+            f'Apply this to all {len(ids)} highlighted cells of '
+            f'"{labels.name}"?\n\n'
+            f'Error between {self.spin_lower.value():.2f} and '
+            f'{self.spin_upper.value():.2f}, type: '
+            f'{self.combo_kind.currentText()}.\n'
+            'Edits can be undone with Ctrl+Z.',
+        )
+        if answer != QMessageBox.Yes:
             return None, []
         return labels, ids
 
@@ -603,7 +645,7 @@ class ReviewFlaggedWidget(QGroupBox):
         if merges:
             self._edit(labels, (rows, cols), values)
         keep = [c for c in ids if c in merges]
-        self._select(labels, keep)
+        self._select(labels, [] if self._all_mode() else keep)
         text = ' '.join(
             f'{o_list_str} into {c}.'
             for c, o_list_str in (
@@ -638,27 +680,6 @@ class ReviewFlaggedWidget(QGroupBox):
     def _listing(ids, limit=8):
         ids = [str(i) for i in ids]
         return ', '.join(ids[:limit]) + (' ...' if len(ids) > limit else '')
-
-    def _on_delete_highlighted(self):
-        labels, _err = self._layers()
-        if labels is None or self._watched is None or not self._areas:
-            self.lbl_cell.setText('Nothing is highlighted: press Highlight.')
-            return
-        ids = [int(i) for i in self._areas]
-        kind = self.combo_kind.currentText()
-        answer = QMessageBox.question(
-            self,
-            'Delete highlighted cells',
-            f'Delete {len(ids)} highlighted cells from "{labels.name}"?\n\n'
-            f'Error between {self.spin_lower.value():.2f} and '
-            f'{self.spin_upper.value():.2f}, type: {kind}.\n'
-            'You can undo this with Ctrl+Z.',
-        )
-        if answer != QMessageBox.Yes:
-            return
-        idx = np.nonzero(np.isin(labels.data, ids))
-        self._edit(labels, idx, 0)
-        self.lbl_cell.setText(f'Deleted {len(ids)} cells.')
 
     # ------------------------------------------------------ selecting by click
     @staticmethod
