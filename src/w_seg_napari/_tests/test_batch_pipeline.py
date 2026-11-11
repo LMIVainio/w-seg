@@ -782,3 +782,32 @@ def test_a_changed_region_makes_the_image_not_done(tmp_path, monkeypatch):
     assert bp.is_done('a.tif', out, stages, None)  # sessions as input
     br.save_rois(out, {'a.tif': [0, 0, 16, 16]})
     assert not bp.is_done('a.tif', out, stages, True)
+
+
+def test_border_cells_setting_reaches_the_measurement(tmp_path, monkeypatch):
+    import sys
+
+    _install_fakes(monkeypatch)
+    seen = {}
+
+    def measure(labels_layer, worker=None, **kw):
+        seen['clear_borders'] = kw.get('clear_borders')
+        labels = labels_layer.copy()
+        if kw.get('clear_borders'):
+            labels[labels == 1] = 0  # the cell that touches the border
+        yield 1, 1, 'done'
+        df = pd.DataFrame({'label_id': [2], 'area': [20.0]})
+        return df, labels, {}
+
+    monkeypatch.setattr(
+        sys.modules['w_seg_napari._morphology_widget'],
+        'measure_cell_morphology',
+        measure,
+    )
+    _make_images(tmp_path, ['a.tif'])
+    s = _settings()
+    s['morph_params'] = {'pixel_spacing': 1.0, 'clear_borders': True}
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    assert seen['clear_borders'] is True
+    notes = [e[1] for e in events if e[0] == 'note']
+    assert any('1 cells touching the image border' in n for n in notes)

@@ -396,6 +396,11 @@ class WSegMasterWidget(QWidget):
                 payload['data'],
                 **kwargs,
             )
+        # the geometry maps go under everything, so that on top of the
+        # original image only the predicted cell wall is drawn
+        for payload in results.get('geometry_layers', []):
+            if payload['name'] in v.layers:
+                v.layers.move(v.layers.index(payload['name']), 0)
         put(
             f'pred_{base}',
             'image',

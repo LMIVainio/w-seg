@@ -155,6 +155,70 @@ def base_name(source) -> str:
     return p.stem if p.suffix.lower() in VALID_EXTS else p.name
 
 
+LAYER_STATE_ATTR = 'layer_state_json'
+# layers that come and go while reviewing; they are not part of a session
+TRANSIENT_LAYERS = (
+    'flagged_',
+    'review_cell',
+    'label_selection',
+    'region',
+    'region_image',
+)
+
+
+def _is_transient(name):
+    return any(str(name).startswith(t) for t in TRANSIENT_LAYERS)
+
+
+def layer_state_of(viewer):
+    """Bottom to top: name, visible and opacity of every layer worth keeping."""
+    return [
+        {
+            'name': la.name,
+            'visible': bool(la.visible),
+            'opacity': float(la.opacity),
+        }
+        for la in viewer.layers
+        if not _is_transient(la.name)
+    ]
+
+
+def parse_layer_state(text):
+    """The list stored by save_edits; [] when absent or unreadable."""
+    if not text:
+        return []
+    try:
+        state = json.loads(text)
+    except (TypeError, ValueError):
+        return []
+    return [
+        s
+        for s in state
+        if isinstance(s, dict) and isinstance(s.get('name'), str)
+    ]
+
+
+def apply_layer_state(viewer, state):
+    """
+    Restore visibility, opacity and order for the saved layers that are in the
+    viewer. Returns how many saved layers were found.
+    """
+    found = [s for s in state if s['name'] in viewer.layers]
+    for s in found:
+        layer = viewer.layers[s['name']]
+        if 'visible' in s:
+            layer.visible = bool(s['visible'])
+        if 'opacity' in s:
+            layer.opacity = float(s['opacity'])
+    for i, s in enumerate(
+        found
+    ):  # saved layers keep their order, at the bottom
+        cur = viewer.layers.index(s['name'])
+        if cur != i:
+            viewer.layers.move(cur, i)
+    return len(found)
+
+
 def save_edits(
     path,
     corrected=None,
@@ -162,6 +226,7 @@ def save_edits(
     extras=None,
     raw=None,
     source_name=None,
+    layer_state=None,
 ):
     """
     Add what you did in napari to a session file.
@@ -173,10 +238,14 @@ def save_edits(
     raw         the image, for a session that is made by hand (no batch run
                 behind it); stored as `raw`, with source_name as source_file
                 so the batch can open it later
+    layer_state list from layer_state_of(viewer): visibility, opacity and
+                order of the viewer's layers, restored by apply_layer_state
     Raises ValueError when the labels do not fit the image in the file.
     """
     arrays = {}
     attrs = {'edited': datetime.now().isoformat(timespec='seconds')}
+    if layer_state is not None:
+        attrs[LAYER_STATE_ATTR] = json.dumps(layer_state)
     if raw is not None:
         arrays['raw'] = np.ascontiguousarray(raw)
         if source_name:
@@ -305,6 +374,7 @@ def session_results(path):
         'has_corrected': CORRECTED in store,
         'extras': extras,
         'editable': labels,
+        'layer_state': parse_layer_state(attrs.get(LAYER_STATE_ATTR)),
     }
     return results, store, info
 

@@ -460,6 +460,15 @@ def process_image(image_path, settings: dict, is_cancelled):
         if is_cancelled():
             return None
         done += 1
+        if params.get('clear_borders'):
+            n_before = len(np.unique(store[key])) - int(0 in store[key])
+            n_after = len(np.unique(labels_measured)) - int(
+                0 in labels_measured
+            )
+            notes.append(
+                f'{name}: {n_before - n_after} cells touching the image '
+                'border left out of the measurements.'
+            )
         df = df.copy()
         df.insert(0, 'source_file', source_name)
         df.insert(

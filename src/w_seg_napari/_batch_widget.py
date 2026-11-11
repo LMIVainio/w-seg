@@ -745,6 +745,7 @@ class BatchTabWidget(QWidget):
         names = {la.name for la in v.layers}
         extras = [p for p in info['extras'] if p['name'] not in names]
         sio.add_layers_to_viewer(v, extras)
+        sio.apply_layer_state(v, info.get('layer_state') or [])
         self.session = {'path': path, 'base': base}
         origin = {
             'corrected': 'your saved corrections',
@@ -824,6 +825,7 @@ class BatchTabWidget(QWidget):
                 extras=payloads or None,
                 raw=raw,
                 source_name=source_name,
+                layer_state=sio.layer_state_of(v),
             )
         except Exception as e:
             QMessageBox.warning(

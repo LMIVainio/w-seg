@@ -413,6 +413,11 @@ class WNetWidget(QGroupBox):
                 self.viewer.add_image(data, rgb=True, **kwargs)
             else:
                 self.viewer.add_image(data, **kwargs)
+        # under everything, so that on top of the original image only the
+        # predicted cell wall is drawn
+        for p in geometry_payloads(geo, source):
+            if p['name'] in self.viewer.layers:
+                self.viewer.layers.move(self.viewer.layers.index(p['name']), 0)
 
     def get_settings(self):
         return {
