@@ -44,6 +44,7 @@ MANAGED = (
     'sp_labels',
     'gasp_labels',
     'class_labels',
+    'yolo_labels',
     'error_map',
     'error_type_map',
 )
@@ -284,11 +285,17 @@ def session_results(path):
         'sp_labels',
         'gasp_labels',
         'class_labels',
+        'yolo_labels',
         'error_map',
         'error_type_map',
     ):
         if key in store:
             results[key] = store[key]
+    if 'yolo_labels' in store and attrs.get('yolo_classes_json'):
+        results['yolo_classes'] = {
+            int(k): v
+            for k, v in json.loads(attrs['yolo_classes_json']).items()
+        }
     labels, origin = editable_labels(store)
     extras = read_extras(path)
     info = {

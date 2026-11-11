@@ -643,6 +643,7 @@ class BatchTabWidget(QWidget):
                 'flagged_',
                 'review_cell',
                 '[Predicted Classes]',
+                '[YOLO Cell Types]',
                 'aff_',
                 'affinity',
             )

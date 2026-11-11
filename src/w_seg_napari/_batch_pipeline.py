@@ -421,7 +421,7 @@ def process_image(image_path, settings: dict, is_cancelled):
                     (done + completed / max(total, 1)) / n_stages,
                 )
         except StopIteration as stop:
-            df, labels_measured, _class_names = stop.value
+            df, labels_measured, class_names = stop.value
         if is_cancelled():
             return None
         done += 1
@@ -434,6 +434,19 @@ def process_image(image_path, settings: dict, is_cancelled):
                 key, 'superpixels'
             ),
         )
+
+    # YOLO cell types as a labels image, with their names
+    yolo_names = {}
+    if stages.get('morphology'):
+        store.pop('yolo_labels', None)  # belongs to the old measurement
+    if stages.get('morphology') and df is not None:
+        from w_seg_napari._yolo_labels import yolo_label_map
+
+        ymap, yolo_names = yolo_label_map(labels_measured, df, class_names)
+        if ymap is not None:
+            store['yolo_labels'] = ymap
+            results['yolo_labels'] = ymap
+            results['yolo_classes'] = yolo_names
 
     # 5. Classification ----------------------------------------------------
     if stages.get('classification') and df is not None:
@@ -493,6 +506,9 @@ def process_image(image_path, settings: dict, is_cancelled):
             'fe_config_json': json.dumps(
                 settings['morph_params'], default=str
             ),
+            'yolo_classes_json': json.dumps(yolo_names)
+            if 'yolo_labels' in store
+            else '',
         },
     )
     results['table'] = df

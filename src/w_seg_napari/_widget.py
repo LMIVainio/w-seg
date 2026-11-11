@@ -433,6 +433,18 @@ class WSegMasterWidget(QWidget):
                 opacity=0.5,
                 visible=False,
             )
+        if 'yolo_labels' in results:
+            names = results.get('yolo_classes', {})
+            put(
+                f'[YOLO Cell Types] {base}',
+                'labels',
+                results['yolo_labels'],
+                opacity=0.7,
+                properties={
+                    'class_id': [0, *names],
+                    'class_name': ['background', *names.values()],
+                },
+            )
         if 'class_labels' in results:
             put(
                 f'[Predicted Classes] {base}',
