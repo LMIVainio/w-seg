@@ -28,6 +28,8 @@ from w_seg_napari._batch_io import (
     output_dir,
 )
 from w_seg_napari._batch_pipeline import is_done, run_batch
+from w_seg_napari._batch_roi_selector import RegionSelectorWidget
+from w_seg_napari._batch_rois import load_rois
 from w_seg_napari._batch_settings import (
     FILENAME as SETTINGS_FILENAME,
 )
@@ -245,6 +247,29 @@ class BatchTabWidget(QWidget):
         stage_layout.addWidget(self.chk_only_latest)
         stage_layout.addWidget(self.chk_skip_done)
         stage_layout.addWidget(self.lbl_done)
+
+        self.chk_crop = QCheckBox('Crop to saved regions')
+        self.chk_crop.setToolTip(
+            'Each image is cut to the rectangle saved for it (see "Select '
+            'regions") before anything is calculated, so only that part is '
+            'predicted, segmented and measured. Images without a rectangle '
+            'are processed whole. The sessions hold the cropped image. Not '
+            'used when sessions are the input.'
+        )
+        self.chk_crop.toggled.connect(self._update_done_count)
+        self.btn_regions = QPushButton('Select regions...')
+        self.btn_regions.setToolTip(
+            'Step through the images and draw the region to analyse on each. '
+            'Saved in batch_rois.json in the results folder.'
+        )
+        self.btn_regions.clicked.connect(self._on_select_regions)
+        self.lbl_regions = QLabel('')
+        self.regions = RegionSelectorWidget(self.main_widget.viewer)
+        self.regions.closed.connect(self._update_regions_label)
+        stage_layout.addWidget(self.chk_crop)
+        stage_layout.addWidget(self.btn_regions)
+        stage_layout.addWidget(self.lbl_regions)
+        stage_layout.addWidget(self.regions)
         stage_layout.addWidget(self.chk_predict)
         stage_layout.addWidget(self.chk_superpixels)
         stage_layout.addWidget(self.chk_gasp)
@@ -419,7 +444,7 @@ class BatchTabWidget(QWidget):
         self.lbl_output.setText(f'Results go to: {self._out_dir()}')
         self.btn_start_batch.setEnabled(len(self.files) > 0)
         self.status_label.setText('Ready to start batch process.')
-        self._update_done_count()
+        self._update_regions_label()
         self._update_settings_label()
 
     # --------------------------------------------------------------------------
@@ -501,6 +526,28 @@ class BatchTabWidget(QWidget):
             Path(path).name if path else 'No model selected.'
         )
 
+    def _on_select_regions(self):
+        if self._sessions_mode() or not self.files:
+            QMessageBox.information(
+                self,
+                'Select regions',
+                'Choose a folder of image files first (regions are not used '
+                'with sessions as input).',
+            )
+            return
+        self.regions.start(self.files, self.selected_dir, self._out_dir())
+        self._update_regions_label()
+
+    def _update_regions_label(self):
+        if not self.selected_dir or self._sessions_mode():
+            self.lbl_regions.setText('')
+            return
+        n = len(load_rois(self._out_dir()))
+        self.lbl_regions.setText(
+            f'{n} image(s) with a saved region (batch_rois.json).' if n else ''
+        )
+        self._update_done_count()
+
     def _update_done_count(self, *_):
         """Shows how many files a run with the skip option would leave out."""
         if not self.chk_skip_done.isChecked() or not self.files:
@@ -508,7 +555,12 @@ class BatchTabWidget(QWidget):
             return
         stages = self._batch_ui_settings()['stages']
         out = self._out_dir()
-        n = sum(is_done(f, out, stages) for f in self.files)
+        crop = (
+            None
+            if self._sessions_mode()
+            else self._batch_ui_settings()['crop_to_rois']
+        )
+        n = sum(is_done(f, out, stages, crop) for f in self.files)
         self.lbl_done.setText(
             f'{n} of {len(self.files)} file(s) already processed '
             f'(for the selected stages); {len(self.files) - n} to do.'
@@ -808,6 +860,8 @@ class BatchTabWidget(QWidget):
             },
             'render': self.chk_render_viewer.isChecked(),
             'skip_done': self.chk_skip_done.isChecked(),
+            'crop_to_rois': self.chk_crop.isChecked()
+            and not self._sessions_mode(),
             'input_mode': self.combo_input.currentData(),
             'morph_labels': self.morphology_labels.currentData(),
             'morph_signal': self.morphology_signal.currentData(),
@@ -818,6 +872,8 @@ class BatchTabWidget(QWidget):
         self.btn_select_dir.setEnabled(not running)
         self.combo_input.setEnabled(not running)
         self.group_stages.setEnabled(not running)
+        if running:
+            self.regions.finish()
         for w in (
             self.chk_save_settings,
             self.chk_use_saved,
@@ -841,7 +897,12 @@ class BatchTabWidget(QWidget):
 
         n = 0
         for f in self.files:
-            if ui['skip_done'] and is_done(f, out, stages):
+            if ui['skip_done'] and is_done(
+                f,
+                out,
+                stages,
+                None if self._sessions_mode() else ui['crop_to_rois'],
+            ):
                 continue
             sp = session_path(out, f)
             try:

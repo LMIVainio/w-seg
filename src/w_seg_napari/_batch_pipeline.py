@@ -32,6 +32,7 @@ from w_seg_napari._batch_io import (
     to_model_input_range,
     to_rgb,
 )
+from w_seg_napari._batch_rois import crop_image, load_rois, normalize_roi
 from w_seg_napari._batch_settings import save_settings as save_settings_file
 from w_seg_napari._geometry_fields import geometry_payloads, masked_direction
 from w_seg_napari._session_io import (
@@ -209,12 +210,16 @@ STAGE_RESULTS = {
 }
 
 
-def is_done(image_name, out_dir, stages: dict) -> bool:
+def is_done(
+    image_name, out_dir, stages: dict, crop: bool | None = False
+) -> bool:
     """
     True when the outputs of the selected stages already exist for this
     image: the session holds every result those stages make, and the table is
-    there if the table is exported. (The session is written last, so a run
-    that was interrupted does not count as done.)
+    there if the table is exported, and the region it was made from is the
+    one now wanted (`crop`: the saved regions are used; None: sessions as
+    input, the region does not matter). (The session is
+    written last, so a run that was interrupted does not count as done.)
     """
     sess = session_path(out_dir, image_name)
     if not sess.is_file():
@@ -222,6 +227,10 @@ def is_done(image_name, out_dir, stages: dict) -> bool:
     if stages.get('export') and not table_path(out_dir, image_name).is_file():
         return False
     try:
+        if crop is not None and _stored_roi(sess) != _wanted_roi(
+            out_dir, image_name, crop
+        ):
+            return False  # made from another region of the image
         return all(
             has_dataset(sess, key)
             for stage, key in STAGE_RESULTS.items()
@@ -229,6 +238,16 @@ def is_done(image_name, out_dir, stages: dict) -> bool:
         )
     except OSError:  # unreadable file: process it again
         return False
+
+
+def _wanted_roi(out_dir, image_name, crop):
+    return load_rois(out_dir).get(Path(image_name).name) if crop else None
+
+
+def _stored_roi(sess_path):
+    """The region a session was made from (None: the whole image)."""
+    text = read_attrs(sess_path).get('crop_roi_json')
+    return json.loads(text) if text else None
 
 
 # ---------------------------------------------------------------------
@@ -278,6 +297,7 @@ def process_image(image_path, settings: dict, is_cancelled):
         store.pop('error_type_map', None)
 
     source_name = name
+    roi = file_roi = None  # the region of the image that is processed
     if sessions_mode:
         # the image lives in the session (a hand-made session has no predictions)
         if 'raw' not in store:
@@ -291,6 +311,21 @@ def process_image(image_path, settings: dict, is_cancelled):
             pass
     else:
         rgb = load_image(image_path)
+        if settings.get('crop_to_rois'):
+            file_roi = load_rois(settings['out_dir']).get(name)
+            roi = normalize_roi(file_roi, rgb.shape)
+        if (
+            store
+            and sess_path.is_file()
+            and _stored_roi(sess_path) != file_roi
+        ):
+            raise ValueError(
+                'the saved region of this image is not the one its session '
+                'was made from; run the prediction stage again'
+            )
+        if roi is not None:
+            rgb = crop_image(rgb, roi)
+            notes.append(f'{name}: cropped to the region {roi}.')
     results = {'raw': rgb}
 
     # 1. Prediction ------------------------------------------------------
@@ -497,20 +532,17 @@ def process_image(image_path, settings: dict, is_cancelled):
     # Keep the original image in the session so manual corrections can be made
     # later against the exact input the labels were computed from.
     store['raw'] = rgb
-    save_session(
-        sess_path,
-        store,
-        {
-            'source_file': source_name,
-            'model_config_json': json.dumps(cfg),
-            'fe_config_json': json.dumps(
-                settings['morph_params'], default=str
-            ),
-            'yolo_classes_json': json.dumps(yolo_names)
-            if 'yolo_labels' in store
-            else '',
-        },
-    )
+    attrs = {
+        'source_file': source_name,
+        'model_config_json': json.dumps(cfg),
+        'fe_config_json': json.dumps(settings['morph_params'], default=str),
+        'yolo_classes_json': (
+            json.dumps(yolo_names) if 'yolo_labels' in store else ''
+        ),
+    }
+    if not sessions_mode:  # a session's own image is already the region
+        attrs['crop_roi_json'] = json.dumps(file_roi) if file_roi else ''
+    save_session(sess_path, store, attrs)
     results['table'] = df
     results['notes'] = notes
     return results
@@ -534,6 +566,7 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
         path = save_settings_file(out, settings['settings_doc'])
         yield ('progress', 0, f'Settings saved to {path.name}')
 
+    sessions = settings.get('input_mode') == 'sessions'
     total = len(files)
     n_ok, failed = 0, []
     for i, name in enumerate(files):
@@ -541,7 +574,10 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
             break
         yield ('progress', int(100 * i / total), f'({i + 1}/{total}) {name}')
         if settings.get('skip_done') and is_done(
-            name, out, settings['stages']
+            name,
+            out,
+            settings['stages'],
+            None if sessions else bool(settings.get('crop_to_rois')),
         ):
             yield ('skipped', name)
             continue

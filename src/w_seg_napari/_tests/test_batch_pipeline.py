@@ -76,12 +76,17 @@ def _install_fakes(monkeypatch):
 
     # in-memory session files (the h5 reading/writing is plain h5py)
     sessions = {}
+    saved_attrs = {}
 
     def fake_save(path, arrays, attrs):
         sessions[str(path)] = dict(arrays)
+        saved_attrs[str(path)] = dict(attrs)
         path.write_text('session')  # the file has to exist, like the real one
 
     monkeypatch.setattr(bp, 'save_session', fake_save)
+    monkeypatch.setattr(
+        bp, 'read_attrs', lambda path: dict(saved_attrs.get(str(path), {}))
+    )
     monkeypatch.setattr(
         bp, 'load_session', lambda path: dict(sessions[str(path)])
     )
@@ -728,3 +733,52 @@ def test_virtual_seed_names_the_layer_of_one_image():
 
     assert virtual_seed_layer_name('skeleton', 'a') == 'geo_skel_a'
     assert virtual_seed_layer_name('prediction', 'a') == 'pred_a'
+
+
+# ------------------------------------------------------------------ regions
+def test_crop_to_saved_regions(tmp_path, monkeypatch):
+    from w_seg_napari import _batch_rois as br
+
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif', 'b.tif'])
+    out = tmp_path / 'wseg_batch'
+    br.save_rois(out, {'a.tif': [2, 4, 12, 14]})
+    s = _settings()
+    s['crop_to_rois'] = True
+    events, (n_ok, failed) = _drain(
+        bp.run_batch(['a.tif', 'b.tif'], tmp_path, s, lambda: False)
+    )
+    assert n_ok == 2 and not failed
+    shapes = [c[1] for c in CALLS if c[0] == 'predict']
+    assert shapes == [(3, 10, 10), (3, 16, 20)]  # a cropped, b whole
+    assert any(
+        'cropped to the region' in e[1] for e in events if e[0] == 'note'
+    )
+
+
+def test_crop_is_off_unless_asked_for(tmp_path, monkeypatch):
+    from w_seg_napari import _batch_rois as br
+
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    br.save_rois(tmp_path / 'wseg_batch', {'a.tif': [2, 4, 12, 14]})
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    assert [c[1] for c in CALLS if c[0] == 'predict'] == [(3, 16, 20)]
+
+
+def test_a_changed_region_makes_the_image_not_done(tmp_path, monkeypatch):
+    from w_seg_napari import _batch_rois as br
+
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    out = tmp_path / 'wseg_batch'
+    br.save_rois(out, {'a.tif': [2, 4, 12, 14]})
+    s = _settings()
+    s['crop_to_rois'] = True
+    _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    stages = s['stages']
+    assert bp.is_done('a.tif', out, stages, True)
+    assert not bp.is_done('a.tif', out, stages, False)  # made from a region
+    assert bp.is_done('a.tif', out, stages, None)  # sessions as input
+    br.save_rois(out, {'a.tif': [0, 0, 8, 8]})
+    assert not bp.is_done('a.tif', out, stages, True)
