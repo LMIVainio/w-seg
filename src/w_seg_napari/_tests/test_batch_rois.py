@@ -17,18 +17,19 @@ def test_regions_round_trip_and_bad_files_read_as_empty(tmp_path):
 
 
 def test_regions_are_clipped_and_whole_images_mean_no_region():
-    shape = (20, 30, 3)
-    assert br.normalize_roi([-5, -5, 10, 12], shape) == [0, 0, 10, 12]
-    assert br.normalize_roi([5, 5, 100, 100], shape) == [5, 5, 20, 30]
-    assert br.normalize_roi([12, 20, 4, 6], shape) == [4, 6, 12, 20]
-    assert br.normalize_roi([0, 0, 20, 30], shape) is None
-    assert br.normalize_roi([3, 3, 3, 9], shape) is None  # no area
+    shape = (60, 80, 3)
+    assert br.normalize_roi([-5, -5, 30, 40], shape) == [0, 0, 30, 40]
+    assert br.normalize_roi([5, 5, 100, 200], shape) == [5, 5, 60, 80]
+    assert br.normalize_roi([40, 60, 10, 20], shape) == [10, 20, 40, 60]
+    assert br.normalize_roi([0, 0, 60, 80], shape) is None
+    assert br.normalize_roi([3, 3, 3, 40], shape) is None  # no area
+    assert br.normalize_roi([3, 3, 9, 70], shape) is None  # a slip: 6 px tall
     assert br.normalize_roi(None, shape) is None
 
 
 def test_region_from_a_drawn_rectangle():
-    verts = [[2.4, 3.1], [2.4, 11.2], [9.7, 11.2], [9.7, 3.1]]
-    assert br.roi_from_vertices(verts, (20, 30)) == [2, 3, 10, 12]
+    verts = [[2.4, 3.1], [2.4, 31.2], [29.7, 31.2], [29.7, 3.1]]
+    assert br.roi_from_vertices(verts, (60, 80)) == [2, 3, 30, 32]
 
 
 def test_crop_keeps_channels_and_makes_a_copy():

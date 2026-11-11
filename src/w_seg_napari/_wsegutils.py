@@ -1001,6 +1001,20 @@ def process_large_image(
 
     large_6ch_cpu = large_6ch_cpu.squeeze(0)  # Shape: (6, H, W) on CPU
     _, H, W = large_6ch_cpu.shape
+    H0, W0 = H, W  # the size of the image itself
+
+    # An image (or crop) smaller than a patch is padded up to the patch size
+    # with its edge pixels and cut back at the end. The padding is not
+    # foreground, so it adds nothing to the prediction.
+    pad_h, pad_w = max(0, patch_size - H), max(0, patch_size - W)
+    if pad_h or pad_w:
+        large_6ch_cpu = F.pad(
+            large_6ch_cpu.unsqueeze(0), (0, pad_w, 0, pad_h), mode='replicate'
+        ).squeeze(0)
+        is_foreground_2d = (
+            F.pad(is_foreground_2d.float(), (0, pad_w, 0, pad_h)) > 0.5
+        )
+        H, W = H + pad_h, W + pad_w
 
     # 3. INITIALIZE CANVASES IN SYSTEM RAM (CPU) TO SAVE VRAM
     sem_canvas_cpu = torch.zeros((1, H, W), dtype=torch.float32)
@@ -1200,8 +1214,9 @@ def process_large_image(
     final_sem[:, ~fg_mask_np] = 0.0
     final_aff[:, ~fg_mask_np] = 0.0
     sys.stdout.write('\n')
+    inside = (slice(None), slice(0, H0), slice(0, W0))  # cut off any padding
     if not geometry_name:
-        return final_sem, final_aff
+        return final_sem[inside], final_aff[inside]
 
     # The geometry canvas uses the same blend weights as the affinities.
     if geo_canvas_cpu is None:  # no foreground patch at all
@@ -1210,7 +1225,11 @@ def process_large_image(
         aff_weight_cpu > 0, geo_canvas_cpu / aff_weight_cpu, 0.0
     ).numpy()
     final_geo[:, ~fg_mask_np] = 0.0
-    return final_sem, final_aff, clean_geometry(final_geo)
+    return (
+        final_sem[inside],
+        final_aff[inside],
+        clean_geometry(final_geo[inside]),
+    )
 
 
 # =====================================================================

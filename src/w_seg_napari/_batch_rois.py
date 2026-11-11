@@ -18,6 +18,7 @@ import numpy as np
 
 FILENAME = 'batch_rois.json'
 FORMAT_VERSION = 1
+MIN_SIZE = 16  # a smaller rectangle is a slip of the mouse, not a region
 
 
 def rois_path(out_dir) -> Path:
@@ -55,15 +56,15 @@ def save_rois(out_dir, rois: dict) -> Path:
 
 def normalize_roi(roi, shape):
     """The region clipped to an image of `shape` (rows, columns, ...) as a
-    list of ints, or None if nothing is left of it or it covers the whole
-    image (then there is nothing to crop)."""
+    list of ints, or None if it is smaller than MIN_SIZE pixels on a side
+    (an accidental click) or covers the whole image (nothing to crop)."""
     if roi is None:
         return None
     h, w = int(shape[0]), int(shape[1])
     y0, x0, y1, x1 = (int(round(v)) for v in roi)
     y0, y1 = sorted((max(y0, 0), min(y1, h)))
     x0, x1 = sorted((max(x0, 0), min(x1, w)))
-    if y1 - y0 < 2 or x1 - x0 < 2:
+    if y1 - y0 < MIN_SIZE or x1 - x0 < MIN_SIZE:
         return None
     if (y0, x0, y1, x1) == (0, 0, h, w):
         return None
