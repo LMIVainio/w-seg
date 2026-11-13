@@ -146,6 +146,22 @@ def parse_args(argv=None):
         'cells, found with a morphological opening); 0 switches it off',
     )
     p.add_argument(
+        '--w-cross',
+        type=float,
+        default=0.0,
+        help="weight of the skeleton-on-wall penalty (the geometry head's "
+        'cell skeleton must not lie on a true wall); geometry models only; '
+        '0 switches it off',
+    )
+    p.add_argument(
+        '--skel-boost',
+        type=float,
+        default=0.0,
+        help='extra loss weight on the centre line of the true walls, as a '
+        'multiple of the normal weight (a missed stretch of it is a gap in a '
+        'wall); training data only; 0 switches it off',
+    )
+    p.add_argument(
         '--dot-radius',
         type=int,
         default=2,
@@ -427,6 +443,7 @@ def main(argv=None):
         'interior_margin': args.interior_margin,
         'hard_neg': args.hard_neg,
         'w_dot': args.w_dot,
+        'w_cross': args.w_cross,
         'dot_radius': args.dot_radius,
     }
     n_targets = 1 + len(offsets) + (4 if geometry is not None else 0)
@@ -453,6 +470,7 @@ def main(argv=None):
         samples_per_epoch=args.batch_size * 100,
         scale_range=tuple(args.zoom),
         photometric_strength=args.aug,
+        skel_boost=args.skel_boost,
         **common,
     )
     val_ds = LargeTiffCellDataset(
@@ -538,7 +556,7 @@ def main(argv=None):
             'train_geo', 'val_geo', 'train_interior', 'val_interior',
             'val_dice_best', 'val_thr_best', 'val_precision', 'val_recall',
             'val_dice_img', 'val_dice_img_sd', 'val_tol_f1', 'val_cldice',
-            'val_cell_f1', 'val_score',
+            'val_cell_f1', 'val_score', 'val_skel_on_wall',
         )
     }  # fmt: skip
     log_path = os.path.join(run_dir, 'log.csv')
@@ -564,6 +582,7 @@ def main(argv=None):
                 'val_cldice',
                 'val_cell_f1',
                 'val_score',
+                'val_skel_on_wall',
                 'lr',
                 'minutes',
             ]
@@ -599,7 +618,7 @@ def main(argv=None):
             history[f'val_{k}'].append(val[k])
         for k in (
             'dice_best', 'thr_best', 'precision', 'recall', 'dice_img',
-            'dice_img_sd', 'tol_f1', 'cldice', 'cell_f1',
+            'dice_img_sd', 'tol_f1', 'cldice', 'cell_f1', 'skel_on_wall',
         ):  # fmt: skip
             history[f'val_{k}'].append(val[k])
         history['val_geo'].append(val['geo'])
@@ -651,6 +670,7 @@ def main(argv=None):
                  f'{val["dice_img"]:.4f}', f'{val["dice_img_sd"]:.4f}',
                  f'{val["tol_f1"]:.4f}', f'{val["cldice"]:.4f}',
                  f'{val["cell_f1"]:.4f}', f'{score:.4f}',
+                 f'{val["skel_on_wall"]:.4f}',
                  f'{lr:.2e}', f'{minutes:.1f}']
             )  # fmt: skip
         print(
@@ -662,7 +682,12 @@ def main(argv=None):
             f'| img {val["dice_img"]:.3f}+-{val["dice_img_sd"]:.3f} '
             f'| tol-F1 {val["tol_f1"]:.3f} | clDice {val["cldice"]:.3f} '
             f'| cell-F1 {val["cell_f1"]:.3f} (score {score:.3f}) '
-            f'| best {best_dice:.3f} | {minutes:.1f} min',
+            + (
+                ''
+                if np.isnan(val['skel_on_wall'])
+                else f'| skeleton on wall {val["skel_on_wall"]:.3f} '
+            )
+            + f'| best {best_dice:.3f} | {minutes:.1f} min',
             flush=True,
         )
 

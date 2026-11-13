@@ -237,9 +237,14 @@ def make_progress_figure(
         ('val_tol_f1', 'tab:green', 'tolerance F1'),
         ('val_cldice', 'tab:brown', 'clDice'),
         ('val_cell_f1', 'tab:red', 'cell F1'),
+        ('val_skel_on_wall', 'tab:gray', 'skeleton on wall (low is good)'),
     ):
         values = history.get(key)
-        if values and len(values) == len(history['eval_step']):
+        if (
+            values
+            and len(values) == len(history['eval_step'])
+            and not np.all(np.isnan(values))
+        ):
             ax_dice.plot(
                 history['eval_step'], values, 'o--', color=color, label=label,
                 ms=3,

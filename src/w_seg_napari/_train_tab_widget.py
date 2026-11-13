@@ -267,6 +267,20 @@ class TrainWidget(QGroupBox):
             'morphological opening). 0 = off. Watch "dots" in the log.',
             maximum=1000.0,
         )
+        self.cross_spin = loss_spin(
+            0.0,
+            'Only with a geometry head: penalty when the predicted cell '
+            'skeleton lies on a true wall. Try 0.1-0.5. 0 = off. Watch '
+            '"skeleton on wall" in the log.',
+            maximum=10.0,
+        )
+        self.skel_boost_spin = loss_spin(
+            0.0,
+            'Extra loss weight on the centre line of the true walls, as a '
+            'multiple of the normal weight: a missed stretch of it is a gap '
+            'in a wall. Try 1-2. 0 = off.',
+            maximum=20.0,
+        )
         adv_form.addRow('Learning rate:', self.lr_spin)
         adv_form.addRow('Warm-up steps:', self.warmup_spin)
         adv_form.addRow('Validation crops:', self.val_samples_spin)
@@ -279,6 +293,8 @@ class TrainWidget(QGroupBox):
         adv_form.addRow('Interior penalty:', self.interior_spin)
         adv_form.addRow('Hard-negative weight:', self.hard_neg_spin)
         adv_form.addRow('Dot penalty:', self.dot_spin)
+        adv_form.addRow('Skeleton-on-wall penalty:', self.cross_spin)
+        adv_form.addRow('Wall centre-line weight:', self.skel_boost_spin)
         adv.addRow(self.adv_body)
         self.adv_box.setLayout(adv)
         self.adv_body.setVisible(False)
@@ -412,6 +428,8 @@ class TrainWidget(QGroupBox):
             'w_interior': self.interior_spin.value(),
             'hard_neg': self.hard_neg_spin.value(),
             'w_dot': self.dot_spin.value(),
+            'w_cross': self.cross_spin.value(),
+            'skel_boost': self.skel_boost_spin.value(),
         }
 
     def _update_batch_widgets(self, _checked=None):

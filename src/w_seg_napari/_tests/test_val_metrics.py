@@ -61,3 +61,28 @@ def test_selection_score_smooths_last_evaluations():
     h = {'val_cell_f1': [0.0, 0.3, 0.6, 0.9]}
     assert abs(m.selection_score(h, last=3) - 0.6) < 1e-9
     assert m.selection_score({'val_cell_f1': []}) == 0.0
+
+
+def test_skeleton_on_wall_rate_and_missing_geometry():
+    wall = _walls()
+    skel = np.zeros(wall.shape, np.float32)
+    skel[:, 5] = 1.0  # inside a cell
+    skel[:10, 19] = 1.0  # on the wall
+    v = m.ValidationMetrics()
+    v.add(wall.astype(np.float32), wall, skel)
+    assert abs(v.result()['skel_on_wall'] - 10 / 50) < 1e-9
+    none = m.ValidationMetrics()
+    none.add(wall.astype(np.float32), wall)
+    assert np.isnan(none.result()['skel_on_wall'])
+
+
+def test_centreline_boost_marks_the_middle_of_a_wall_only():
+    from w_seg_napari._training.targets import centreline_boost
+
+    wall = np.zeros((20, 20), bool)
+    wall[:, 8:11] = True  # 3 px wide
+    w = centreline_boost(wall, 2.0)
+    assert w.dtype == np.float32
+    assert w[10, 9] == 3.0 and w[10, 0] == 1.0
+    assert np.all(centreline_boost(wall, 0) == 1)
+    assert np.all(centreline_boost(np.zeros((5, 5), bool), 2.0) == 1)

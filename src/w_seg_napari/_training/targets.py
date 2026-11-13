@@ -33,6 +33,24 @@ def compute_affinities(inst, offsets, crop, pad):
     return out
 
 
+def centreline_boost(wall, factor):
+    """
+    Weight multiplier (float32, 1 everywhere) that is 1 + factor on the centre
+    line of the walls, 3 px wide. A missed stretch of the centre line is a gap
+    in a wall, so this makes gaps cost more. factor 0 returns all ones.
+    """
+    from scipy import ndimage
+    from skimage.morphology import skeletonize
+
+    out = np.ones(np.shape(wall), np.float32)
+    wall = np.asarray(wall, bool)
+    if factor <= 0 or not wall.any():
+        return out
+    line = ndimage.binary_dilation(skeletonize(wall), np.ones((3, 3), bool))
+    out[line] += float(factor)
+    return out
+
+
 def edt_weights(wall, w0=10.0, sigma=5.0):
     """
     Weight map for a boolean wall mask: class balance plus exponential decay

@@ -41,6 +41,7 @@ from torch.utils.data import Dataset
 
 from w_seg_napari._model_config import DEFAULT_RANGES, make_offsets
 from w_seg_napari._training.targets import (
+    centreline_boost,
     compute_affinities,
     compute_geometry,
     edt_weights,
@@ -371,6 +372,7 @@ class LargeTiffCellDataset(Dataset):
         tissue_bias=0.0,
         min_tissue=0.05,
         geometry=None,
+        skel_boost=0.0,
     ):
         if photometric and not enable_lab:
             raise ValueError(
@@ -401,6 +403,8 @@ class LargeTiffCellDataset(Dataset):
         self.scale_range = scale_range
         self.seed = seed
         self.w0, self.sigma = w0, sigma
+        # extra weight (1 + skel_boost) on the centre line of the walls
+        self.skel_boost = skel_boost
         self.tissue_bias = tissue_bias
         # None = no geometry targets; or a dict of compute_geometry options
         # (the 'geometry' block of the model config).
@@ -564,9 +568,10 @@ class LargeTiffCellDataset(Dataset):
                 )
             )
         target = np.concatenate(parts, axis=-1)
-        weights = edt_weights(wall, self.w0, self.sigma)[
-            ..., None
-        ]  # [T, T, 1]
+        weights = edt_weights(wall, self.w0, self.sigma)
+        if self.skel_boost > 0:
+            weights = weights * centreline_boost(wall, self.skel_boost)
+        weights = weights[..., None]  # [T, T, 1]
         return (
             torch.from_numpy(x6),
             torch.from_numpy(target),

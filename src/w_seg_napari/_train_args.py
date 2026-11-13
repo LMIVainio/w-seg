@@ -43,6 +43,8 @@ def build_args(p):
         ('w_interior', '--w-interior'),
         ('hard_neg', '--hard-neg'),
         ('w_dot', '--w-dot'),
+        ('w_cross', '--w-cross'),
+        ('skel_boost', '--skel-boost'),
     ):
         if p.get(key) is not None:
             args += [flag, str(p[key])]

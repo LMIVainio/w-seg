@@ -107,9 +107,13 @@ class ValidationMetrics:
             4
         )  # skeleton of pred on true, n, ... on pred, n
         self.cells = np.zeros(3)
+        self.skel = np.zeros(2)  # predicted skeleton pixels on wall, all
 
-    def add(self, prob, truth):
-        """prob: wall probability (H, W); truth: wall mask (H, W)."""
+    def add(self, prob, truth, skeleton=None):
+        """
+        prob: wall probability (H, W); truth: wall mask (H, W); skeleton: the
+        geometry head's cell skeleton (H, W), if the model has one.
+        """
         prob = np.asarray(prob, np.float32)
         truth = np.asarray(truth) > 0.5
         for k, thr in enumerate(self.thresholds):
@@ -140,6 +144,12 @@ class ValidationMetrics:
                 np.count_nonzero(sk_t),
             )
         self.cells += cell_counts(truth, pred, self.min_cell)
+        if skeleton is not None:
+            skel = np.asarray(skeleton) > 0.5
+            self.skel += (
+                np.count_nonzero(skel & truth),
+                np.count_nonzero(skel),
+            )
 
     def result(self):
         tp, fp, fn = self.sums.T
@@ -165,6 +175,13 @@ class ValidationMetrics:
             'tol_f1': _f1(tol_p, tol_r),
             'cldice': _f1(cl_p, cl_r),
             'cell_f1': 1.0 if no_cells else _f1(cell_p, cell_r),
+            # share of the predicted cell skeleton that lies on a true wall
+            # (0 is perfect); nan when the model has no geometry head
+            'skel_on_wall': (
+                float(self.skel[0] / self.skel[1])
+                if self.skel[1]
+                else float('nan')
+            ),
         }
 
 

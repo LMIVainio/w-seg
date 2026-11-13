@@ -45,6 +45,17 @@ def geometry_loss(pred, target, ftl):
     return total, {'geo_dist': dist, 'geo_dir': direction, 'geo_skel': skel}
 
 
+def skeleton_on_wall(geometry, y_sem):
+    """
+    The cell skeleton must lie inside cells: the mean predicted skeleton value
+    on the true wall pixels (0 for a perfect model). `geometry` is the
+    [B, H, W, 4] geometry output, `y_sem` the [B, H, W, 1] wall mask.
+    """
+    ops = keras.ops
+    skeleton = geometry[..., 3:4]
+    return ops.sum(skeleton * y_sem) / ops.maximum(ops.sum(y_sem), 1.0)
+
+
 def interior_errors(outputs, y, n_aff, margin=3):
     """
     Errors deep inside cells, where the boundary-weighted losses barely look.
@@ -128,6 +139,7 @@ def compute_loss(
     hard_neg=2.0,
     w_dot=10.0,
     dot_radius=2,
+    w_cross=0.0,
 ):
     """
     Total loss = semantic FTL
@@ -186,6 +198,7 @@ def compute_loss(
     }
 
     geo = 0.0
+    cross = 0.0
     if 'geometry_head' in outputs:
         if y.shape[-1] < 1 + n_aff + 4:
             raise ValueError(
@@ -196,7 +209,11 @@ def compute_loss(
         )
         total = total + w_geo * geo
         parts.update(geo_parts)
+        if w_cross > 0:
+            cross = skeleton_on_wall(outputs['geometry_head'], y_sem)
+            total = total + w_cross * cross
     parts['geo'] = geo
+    parts['cross'] = cross
     parts['total'] = total
     return total, parts
 
@@ -285,6 +302,7 @@ def validate(
         'int_wall': 0.0,
         'int_aff': 0.0,
         'int_dots': 0.0,
+        'cross': 0.0,
         'dice': 0.0,
     }
     n = 0
@@ -308,8 +326,13 @@ def validate(
         if metrics is not None:
             probs = outputs['semantic_head'][..., 0].float().cpu().numpy()
             truths = true[..., 0].cpu().numpy()
-            for prob, truth in zip(probs, truths, strict=True):
-                metrics.add(prob, truth)
+            skels = (
+                outputs['geometry_head'][..., 3].float().cpu().numpy()
+                if 'geometry_head' in outputs
+                else [None] * len(probs)
+            )
+            for prob, truth, skel in zip(probs, truths, skels, strict=True):
+                metrics.add(prob, truth, skel)
     out = {k: v / max(n, 1) for k, v in sums.items()}
     if metrics is not None:
         out.update(metrics.result())
