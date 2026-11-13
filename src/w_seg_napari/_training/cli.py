@@ -46,6 +46,7 @@ from w_seg_napari._model_config import (
 from w_seg_napari._training.autobatch import find_max_batch, safe_batch
 from w_seg_napari._training.data import LargeTiffCellDataset
 from w_seg_napari._training.losses import WeightedFocalTverskyLoss
+from w_seg_napari._training.metrics import selection_score
 from w_seg_napari._training.model import (
     Generator,
     add_input_stem,
@@ -155,6 +156,20 @@ def parse_args(argv=None):
         type=int,
         default=3,
         help='pixels from any wall that count as "deep inside a cell"',
+    )
+    p.add_argument(
+        '--select',
+        choices=['cells', 'dice'],
+        default='cells',
+        help="which score picks the best checkpoint: 'cells' = the F1 of the "
+        'cells found between the predicted walls (smoothed over the last '
+        "evaluations), 'dice' = the plain wall Dice at 0.5",
+    )
+    p.add_argument(
+        '--select-smooth',
+        type=int,
+        default=3,
+        help='evaluations averaged for the checkpoint score (1 = no smoothing)',
     )
     p.add_argument(
         '--aug',
@@ -521,6 +536,9 @@ def main(argv=None):
             'eval_step', 'val_total', 'val_sem', 'val_aff', 'val_dice',
             'val_int_wall', 'val_int_aff', 'val_int_dots',
             'train_geo', 'val_geo', 'train_interior', 'val_interior',
+            'val_dice_best', 'val_thr_best', 'val_precision', 'val_recall',
+            'val_dice_img', 'val_dice_img_sd', 'val_tol_f1', 'val_cldice',
+            'val_cell_f1', 'val_score',
         )
     }  # fmt: skip
     log_path = os.path.join(run_dir, 'log.csv')
@@ -536,6 +554,16 @@ def main(argv=None):
                 'val_int_wall',
                 'val_int_aff',
                 'val_int_dots',
+                'val_dice_best',
+                'val_thr_best',
+                'val_precision',
+                'val_recall',
+                'val_dice_img',
+                'val_dice_img_sd',
+                'val_tol_f1',
+                'val_cldice',
+                'val_cell_f1',
+                'val_score',
                 'lr',
                 'minutes',
             ]
@@ -543,10 +571,11 @@ def main(argv=None):
 
     rng = random.Random(args.seed)
     best_dice, best_loss, t0, step = -1.0, float('inf'), time.time(), 0
+    best_score = -1.0
     fig = None
 
     def evaluate_and_draw():
-        nonlocal best_dice, best_loss, fig
+        nonlocal best_dice, best_loss, best_score, fig
         import matplotlib.pyplot as plt
 
         val = validate(
@@ -568,21 +597,34 @@ def main(argv=None):
             'int_dots',
         ):
             history[f'val_{k}'].append(val[k])
+        for k in (
+            'dice_best', 'thr_best', 'precision', 'recall', 'dice_img',
+            'dice_img_sd', 'tol_f1', 'cldice', 'cell_f1',
+        ):  # fmt: skip
+            history[f'val_{k}'].append(val[k])
         history['val_geo'].append(val['geo'])
         history['val_interior'].append(val['int_wall'] + val['int_aff'])
         history['eval_step'].append(step)
 
         recent = float(np.mean(history['train_total'][-args.eval_every :]))
-        # Best = highest Dice; at equal Dice (for example 0 early on) the lower
-        # validation loss wins, so the saved model is never just the step-1 one.
-        if val['dice'] > best_dice or (
-            val['dice'] == best_dice and val['total'] < best_loss
+        # Best = highest score (cell F1 averaged over the last evaluations, or
+        # the plain Dice); at an equal score (for example 0 early on) the
+        # lower validation loss wins, so the saved model is never just the
+        # step-1 one.
+        key = 'val_cell_f1' if args.select == 'cells' else 'val_dice'
+        score = selection_score(history, key, args.select_smooth)
+        history['val_score'].append(score)
+        if score > best_score or (
+            score == best_score and val['total'] < best_loss
         ):
-            best_dice, best_loss = val['dice'], val['total']
+            best_score, best_loss = score, val['total']
+            best_dice = val['dice']
             cfg['training'] = {
                 'steps_done': step,
                 'steps_planned': args.steps,
                 'val_dice': round(float(val['dice']), 4),
+                'val_cell_f1': round(float(val['cell_f1']), 4),
+                'selected_by': args.select,
                 'batch_size': args.batch_size,
                 'learning_rate': args.lr,
                 'loss': dict(loss_kw),
@@ -603,12 +645,23 @@ def main(argv=None):
                 [step, f'{recent:.4f}', f'{val["total"]:.4f}', f'{val["sem"]:.4f}',
                  f'{val["aff"]:.4f}', f'{val["dice"]:.4f}',
                  f'{val["int_wall"]:.4f}', f'{val["int_aff"]:.4f}',
-                 f'{val["int_dots"]:.5f}', f'{lr:.2e}', f'{minutes:.1f}']
+                 f'{val["int_dots"]:.5f}',
+                 f'{val["dice_best"]:.4f}', f'{val["thr_best"]:.2f}',
+                 f'{val["precision"]:.4f}', f'{val["recall"]:.4f}',
+                 f'{val["dice_img"]:.4f}', f'{val["dice_img_sd"]:.4f}',
+                 f'{val["tol_f1"]:.4f}', f'{val["cldice"]:.4f}',
+                 f'{val["cell_f1"]:.4f}', f'{score:.4f}',
+                 f'{lr:.2e}', f'{minutes:.1f}']
             )  # fmt: skip
         print(
             f'step {step:6d} | train {recent:.3f} | val {val["total"]:.3f} '
             f'(wall {val["sem"]:.3f}, aff {val["aff"]:.3f}) | val Dice {val["dice"]:.3f} '
             f'| interior: wall {val["int_wall"]:.4f}, aff-holes {val["int_aff"]:.3f}, dots {val["int_dots"]:.4f} '
+            f'| P {val["precision"]:.3f} R {val["recall"]:.3f} '
+            f'| Dice@{val["thr_best"]:.2f} {val["dice_best"]:.3f} '
+            f'| img {val["dice_img"]:.3f}+-{val["dice_img_sd"]:.3f} '
+            f'| tol-F1 {val["tol_f1"]:.3f} | clDice {val["cldice"]:.3f} '
+            f'| cell-F1 {val["cell_f1"]:.3f} (score {score:.3f}) '
             f'| best {best_dice:.3f} | {minutes:.1f} min',
             flush=True,
         )

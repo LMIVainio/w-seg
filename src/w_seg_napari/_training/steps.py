@@ -13,6 +13,8 @@ The generator returns a dict:
 import keras
 import torch
 
+from w_seg_napari._training.metrics import ValidationMetrics
+
 
 def geometry_loss(pred, target, ftl):
     """
@@ -261,7 +263,14 @@ def train_step(
 
 @torch.no_grad()
 def validate(
-    generator, val_loader, ftl, device, max_batches=20, amp=False, **loss_kw
+    generator,
+    val_loader,
+    ftl,
+    device,
+    max_batches=20,
+    amp=False,
+    extra_metrics=True,
+    **loss_kw,
 ):
     """
     Average loss and Dice (semantic head, threshold 0.5) on a FIXED validation
@@ -279,6 +288,7 @@ def validate(
         'dice': 0.0,
     }
     n = 0
+    metrics = ValidationMetrics() if extra_metrics else None
     for i, batch in enumerate(val_loader):
         if i >= max_batches:
             break
@@ -295,7 +305,15 @@ def validate(
             sums[k] = sums.get(k, 0.0) + float(v)
         sums['dice'] += float(dice)
         n += 1
-    return {k: v / max(n, 1) for k, v in sums.items()}
+        if metrics is not None:
+            probs = outputs['semantic_head'][..., 0].float().cpu().numpy()
+            truths = true[..., 0].cpu().numpy()
+            for prob, truth in zip(probs, truths, strict=True):
+                metrics.add(prob, truth)
+    out = {k: v / max(n, 1) for k, v in sums.items()}
+    if metrics is not None:
+        out.update(metrics.result())
+    return out
 
 
 def overfit_one_batch(generator, optimizer, batch, ftl, device, steps=200):

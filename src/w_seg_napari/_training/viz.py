@@ -230,9 +230,22 @@ def make_progress_figure(
         best = int(np.argmax(history['val_dice']))
         ax_dice.axvline(history['eval_step'][best], color='gray', ls=':')
         ax_dice.set_title(
-            f'validation Dice (best {history["val_dice"][best]:.3f})',
+            f'validation Dice (purple, best {history["val_dice"][best]:.3f}) and others',
             fontsize=11,
         )
+    for key, color, label in (
+        ('val_tol_f1', 'tab:green', 'tolerance F1'),
+        ('val_cldice', 'tab:brown', 'clDice'),
+        ('val_cell_f1', 'tab:red', 'cell F1'),
+    ):
+        values = history.get(key)
+        if values and len(values) == len(history['eval_step']):
+            ax_dice.plot(
+                history['eval_step'], values, 'o--', color=color, label=label,
+                ms=3,
+            )  # fmt: skip
+    if len(ax_dice.lines) > 1:
+        ax_dice.legend(fontsize=8)
     ax_dice.set_ylim(0, 1)
 
     for ax in (ax_loss, ax_parts, ax_dice):
