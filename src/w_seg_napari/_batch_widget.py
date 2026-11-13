@@ -10,6 +10,7 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -20,6 +21,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from w_seg_napari import _batch_summary as bsum
 from w_seg_napari import _session_io as sio
 from w_seg_napari._batch_io import (
     find_session_dir,
@@ -27,7 +29,7 @@ from w_seg_napari._batch_io import (
     list_session_names,
     output_dir,
 )
-from w_seg_napari._batch_pipeline import is_done, run_batch
+from w_seg_napari._batch_pipeline import is_done, run_batch_many
 from w_seg_napari._batch_roi_selector import RegionSelectorWidget
 from w_seg_napari._batch_rois import load_rois
 from w_seg_napari._batch_settings import (
@@ -56,6 +58,9 @@ class BatchTabWidget(QWidget):
         self.main_widget = parent_widget  # the WSegMasterWidget
         self.selected_dir = ''
         self.files = []
+        self.folders = []  # [{'path': str, 'group': str}], all are run
+        self.total_files = 0
+        self.summary_dir = None
         self.worker = None
         self.cancel_event = threading.Event()
         self.failed = []
@@ -84,6 +89,33 @@ class BatchTabWidget(QWidget):
         dir_btn_layout.addWidget(self.btn_select_dir)
         dir_btn_layout.addWidget(self.lbl_selected_dir, stretch=1)
 
+        self.list_folders = QListWidget()
+        self.list_folders.setMaximumHeight(90)
+        self.list_folders.setToolTip(
+            'All folders in this list are processed with the same settings '
+            'when you press Start. A folder is a group (line or treatment) in '
+            'the summary tables. Click one to see its files and set its '
+            'regions.'
+        )
+        self.list_folders.currentRowChanged.connect(self._on_folder_row)
+        folder_btns = QHBoxLayout()
+        self.btn_add_dir = QPushButton('Add folder...')
+        self.btn_add_dir.clicked.connect(self._add_folder)
+        self.btn_remove_dir = QPushButton('Remove')
+        self.btn_remove_dir.clicked.connect(self._remove_folder)
+        self.btn_rename_group = QPushButton('Group name...')
+        self.btn_rename_group.setToolTip(
+            'The name of the selected folder in the summary tables '
+            '(default: the folder name), e.g. the line or the treatment.'
+        )
+        self.btn_rename_group.clicked.connect(self._rename_group)
+        for b in (
+            self.btn_add_dir,
+            self.btn_remove_dir,
+            self.btn_rename_group,
+        ):
+            folder_btns.addWidget(b)
+
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel('Input:'))
         self.combo_input = QComboBox()
@@ -102,6 +134,8 @@ class BatchTabWidget(QWidget):
         self.lbl_output.setWordWrap(True)
 
         io_layout.addLayout(dir_btn_layout)
+        io_layout.addWidget(self.list_folders)
+        io_layout.addLayout(folder_btns)
         io_layout.addLayout(mode_row)
         io_layout.addWidget(self.lbl_file_count)
         io_layout.addWidget(self.lbl_output)
@@ -398,6 +432,7 @@ class BatchTabWidget(QWidget):
         main_layout.addWidget(group_sess)
         main_layout.addWidget(group_summary)
         main_layout.addWidget(group_stages)
+        main_layout.addWidget(self._make_summary_group())
         main_layout.addWidget(group_exec)
         main_layout.addStretch()
 
@@ -413,11 +448,186 @@ class BatchTabWidget(QWidget):
         )
         if not dirpath:
             return
+        self.folders = [{'path': dirpath, 'group': Path(dirpath).name}]
+        self._fill_folder_list(0)
+
+    def _add_folder(self):
+        dirpath = QFileDialog.getExistingDirectory(
+            self,
+            'Add a folder (a line or treatment)',
+            str(Path(self.selected_dir).parent) if self.selected_dir else '',
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not dirpath:
+            return
+        if any(f['path'] == dirpath for f in self.folders):
+            return
+        names = {f['group'] for f in self.folders}
+        group, n = Path(dirpath).name, 2
+        while group in names:  # the same folder name in another place
+            group = f'{Path(dirpath).name}_{n}'
+            n += 1
+        self.folders.append({'path': dirpath, 'group': group})
+        self._fill_folder_list(len(self.folders) - 1)
+
+    def _remove_folder(self):
+        row = self.list_folders.currentRow()
+        if row < 0:
+            return
+        del self.folders[row]
+        if self.folders:
+            self._fill_folder_list(min(row, len(self.folders) - 1))
+        else:
+            self.selected_dir = ''
+            self.files = []
+            self.list_folders.clear()
+            self.lbl_selected_dir.setText('No folder selected.')
+            self.btn_start_batch.setEnabled(False)
+
+    def _rename_group(self):
+        row = self.list_folders.currentRow()
+        if row < 0:
+            return
+        text, ok = QInputDialog.getText(
+            self,
+            'Group name',
+            'Name of this folder in the summary tables:',
+            text=self.folders[row]['group'],
+        )
+        text = text.strip()
+        if not ok or not text:
+            return
+        if any(
+            f['group'] == text for i, f in enumerate(self.folders) if i != row
+        ):
+            QMessageBox.warning(
+                self, 'Group name', 'Another folder already has this name.'
+            )
+            return
+        self.folders[row]['group'] = text
+        self._fill_folder_list(row)
+
+    def _fill_folder_list(self, row):
+        self.list_folders.blockSignals(True)
+        self.list_folders.clear()
+        for f in self.folders:
+            self.list_folders.addItem(f'{f["group"]}   ({f["path"]})')
+        self.list_folders.setCurrentRow(row)
+        self.list_folders.blockSignals(False)
+        self._on_folder_row(row)
+
+    def _on_folder_row(self, row):
+        if not 0 <= row < len(self.folders):
+            return
+        dirpath = self.folders[row]['path']
         self.selected_dir = dirpath
         self.lbl_selected_dir.setText(dirpath)
         self.lbl_selected_dir.setStyleSheet('color: gray; font-style: normal;')
-
         self._refresh_files()
+        self._update_summary_label()
+
+    def _group_dir(self, folder):
+        if self._sessions_mode():
+            return find_session_dir(folder)
+        return output_dir(folder)
+
+    def _job_list(self):
+        """[(folder, files)] of every folder in the list that has files."""
+        jobs = []
+        for f in self.folders:
+            files = (
+                list_session_names(f['path'])
+                if self._sessions_mode()
+                else list_input_files(f['path'])
+            )
+            if files:
+                jobs.append((f['path'], files))
+        return jobs
+
+    # ---------------------------------------------------------- summary
+    def _make_summary_group(self):
+        box = QGroupBox('Summary tables')
+        lay = QVBoxLayout()
+        info = QLabel(
+            'One row per image (the replicate) with mean, median, SD and '
+            'quartiles of every measurement, the cell type shares and the '
+            'cell density, and one row per folder (group) and measurement; '
+            'plus every cell in one table.'
+        )
+        info.setWordWrap(True)
+        self.chk_summary = QCheckBox('Make the summary tables after the run')
+        self.chk_summary.setChecked(True)
+        row = QHBoxLayout()
+        self.btn_summary_dir = QPushButton('Summary folder...')
+        self.btn_summary_dir.clicked.connect(self._pick_summary_dir)
+        self.btn_make_summary = QPushButton('Make summary now')
+        self.btn_make_summary.setToolTip(
+            'Uses the tables that are already in the folders of the list.'
+        )
+        self.btn_make_summary.clicked.connect(self._make_summary)
+        row.addWidget(self.btn_summary_dir)
+        row.addWidget(self.btn_make_summary)
+        self.lbl_summary = QLabel('')
+        self.lbl_summary.setWordWrap(True)
+        self.lbl_summary.setStyleSheet('color: gray;')
+        for w in (info, self.chk_summary):
+            lay.addWidget(w)
+        lay.addLayout(row)
+        lay.addWidget(self.lbl_summary)
+        box.setLayout(lay)
+        return box
+
+    def _default_summary_dir(self):
+        if not self.folders:
+            return None
+        if len(self.folders) == 1:
+            return self._group_dir(self.folders[0]['path']) / 'summary'
+        parents = {Path(f['path']).parent for f in self.folders}
+        base = parents.pop() if len(parents) == 1 else Path.home()
+        return base / 'wseg_summary'
+
+    def _summary_target(self):
+        return self.summary_dir or self._default_summary_dir()
+
+    def _update_summary_label(self):
+        target = self._summary_target()
+        self.lbl_summary.setText(f'Written to: {target}' if target else '')
+
+    def _pick_summary_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, 'Folder for the summary tables'
+        )
+        if d:
+            self.summary_dir = Path(d)
+            self._update_summary_label()
+
+    def _make_summary(self, quiet=False):
+        if not self.folders:
+            return
+        groups = [
+            (f['group'], self._group_dir(f['path'])) for f in self.folders
+        ]
+        try:
+            result = bsum.build_summary(groups, area_of=bsum.session_area)
+            if result['cells'] is None:
+                raise ValueError(
+                    'No cell tables found: run the morphology and export '
+                    'stages first.\n\n' + '\n'.join(result['warnings'])
+                )
+            paths = bsum.write_summary(result, self._summary_target())
+        except Exception as e:
+            QMessageBox.warning(
+                self, 'Summary tables', f'{type(e).__name__}: {e}'
+            )
+            return
+        text = f'Wrote {len(paths)} tables to {self._summary_target()}.'
+        if result['warnings']:
+            text += '\n\nCheck:\n' + '\n'.join(
+                f'- {w}' for w in result['warnings']
+            )
+        self.lbl_summary.setText(f'Written to: {self._summary_target()}')
+        if not quiet or result['warnings']:
+            QMessageBox.information(self, 'Summary tables', text)
 
     def _sessions_mode(self):
         return self.combo_input.currentData() == 'sessions'
@@ -442,7 +652,9 @@ class BatchTabWidget(QWidget):
                 f'Found: {len(self.files)} compatible image file(s)'
             )
         self.lbl_output.setText(f'Results go to: {self._out_dir()}')
-        self.btn_start_batch.setEnabled(len(self.files) > 0)
+        self.btn_start_batch.setEnabled(
+            len(self.files) > 0 or len(self.folders) > 1
+        )
         self.status_label.setText('Ready to start batch process.')
         self._update_regions_label()
         self._update_settings_label()
@@ -872,6 +1084,13 @@ class BatchTabWidget(QWidget):
     def _set_running(self, running: bool):
         """Locks everything except the cancel button while a batch runs."""
         self.btn_select_dir.setEnabled(not running)
+        for w in (
+            self.list_folders,
+            self.btn_add_dir,
+            self.btn_remove_dir,
+            self.btn_rename_group,
+        ):
+            w.setEnabled(not running)
         self.combo_input.setEnabled(not running)
         self.group_stages.setEnabled(not running)
         if running:
@@ -883,7 +1102,9 @@ class BatchTabWidget(QWidget):
         ):
             w.setEnabled(not running)
         self.group_sess.setEnabled(not running)
-        self.btn_start_batch.setEnabled(not running and bool(self.files))
+        self.btn_start_batch.setEnabled(
+            not running and (bool(self.files) or len(self.folders) > 1)
+        )
         self.btn_cancel.setEnabled(running)
         if hasattr(self.main_widget, 'set_batch_running'):
             self.main_widget.set_batch_running(running)
@@ -925,7 +1146,10 @@ class BatchTabWidget(QWidget):
         return answer == QMessageBox.Yes
 
     def _on_start_batch(self):
-        if not self.selected_dir or not self.files or self.worker is not None:
+        if not self.selected_dir or self.worker is not None:
+            return
+        jobs = self._job_list()
+        if not jobs:
             return
 
         try:
@@ -999,14 +1223,12 @@ class BatchTabWidget(QWidget):
         self.progress_bar.setValue(0)
         self._set_running(True)
 
-        files, dirpath = list(self.files), self.selected_dir
+        self.total_files = sum(len(files) for _, files in jobs)
         is_cancelled = self.cancel_event.is_set
 
         @thread_worker
         def _work():
-            return (
-                yield from run_batch(files, dirpath, settings, is_cancelled)
-            )
+            return (yield from run_batch_many(jobs, settings, is_cancelled))
 
         self.worker = _work()
         self.worker.yielded.connect(self._on_event)
@@ -1057,7 +1279,7 @@ class BatchTabWidget(QWidget):
         n_ok, failed = result if result else (0, [])
         self.failed = failed
         cancelled = self.cancel_event.is_set()
-        msg = f'{"Batch cancelled" if cancelled else "Batch finished"}.\nProcessed: {n_ok} of {len(self.files)} file(s).'
+        msg = f'{"Batch cancelled" if cancelled else "Batch finished"}.\nProcessed: {n_ok} of {self.total_files} file(s).'
         if self.n_skipped:
             msg += f'\nSkipped (already processed): {self.n_skipped}.'
         if failed:
@@ -1072,6 +1294,8 @@ class BatchTabWidget(QWidget):
                 msg += f'\n... and {len(self.notes) - 8} more'
         QMessageBox.information(self, 'Batch Execution', msg)
         self.status_label.setText(f'Results are in {self._out_dir()}')
+        if self.chk_summary.isChecked() and not cancelled:
+            self._make_summary(quiet=True)
 
     def _on_error(self, exc):
         print(f'[w-seg] Batch stopped by an error: {exc}')

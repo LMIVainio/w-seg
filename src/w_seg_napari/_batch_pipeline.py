@@ -633,3 +633,36 @@ def run_batch(files, dirpath, settings: dict, is_cancelled):
 
     yield ('progress', 100, 'Done' if not is_cancelled() else 'Cancelled')
     return n_ok, failed
+
+
+def run_batch_many(jobs, settings: dict, is_cancelled):
+    """
+    Run several folders one after the other with the SAME settings, so their
+    results can be compared. jobs: [(folder, [file names])]. Yields the events
+    of run_batch (progress scaled over all folders, file names of a failure
+    prefixed with the folder) and returns (n_ok, failed).
+    """
+    n_ok, failed = 0, []
+    k = len(jobs)
+    for i, (dirpath, files) in enumerate(jobs):
+        if is_cancelled():
+            break
+        label = Path(dirpath).name
+        gen = run_batch(files, dirpath, settings, is_cancelled)
+        try:
+            while True:
+                event = next(gen)
+                if event[0] == 'progress':
+                    _, percent, message = event
+                    prefix = f'[{label}] ' if k > 1 else ''
+                    event = (
+                        'progress',
+                        int((100 * i + percent) / k),
+                        prefix + message,
+                    )
+                yield event
+        except StopIteration as stop:
+            ok, bad = stop.value
+        n_ok += ok
+        failed += [(f'{label}/{name}', err) for name, err in bad]
+    return n_ok, failed

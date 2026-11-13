@@ -815,3 +815,26 @@ def test_border_cells_setting_reaches_the_measurement(tmp_path, monkeypatch):
     saved = next(iter(sessions.values()))
     assert 1 not in np.unique(saved['gasp_labels'])
     assert 2 in np.unique(saved['gasp_labels'])
+
+
+def test_several_folders_use_the_same_settings_and_scale_progress(
+    tmp_path, monkeypatch
+):
+    _install_fakes(monkeypatch)
+    jobs = []
+    for name in ('lineA', 'lineB'):
+        folder = tmp_path / name
+        folder.mkdir()
+        _make_images(folder, ['a.tif', 'b.tif'])
+        jobs.append((folder, ['a.tif', 'b.tif']))
+    events, (n_ok, failed) = _drain(
+        bp.run_batch_many(jobs, _settings(), lambda: False)
+    )
+    assert n_ok == 4 and not failed
+    assert (tmp_path / 'lineA' / 'wseg_batch' / 'a_morphology.csv').is_file()
+    assert (tmp_path / 'lineB' / 'wseg_batch' / 'b_morphology.csv').is_file()
+    percents = [e[1] for e in events if e[0] == 'progress']
+    assert percents == sorted(percents) and percents[-1] <= 100
+    assert any(
+        e[0] == 'progress' and e[2].startswith('[lineB]') for e in events
+    )
