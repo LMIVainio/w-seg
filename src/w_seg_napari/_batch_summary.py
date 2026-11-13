@@ -133,7 +133,7 @@ def per_group(images, numeric, categories):
     measures = [(c, f'{c}__mean') for c in numeric]
     measures += [(c, f'{c}__median') for c in numeric]
     measures += [(c[6:], c) for c in images if c.startswith('share_')]
-    measures += [('n_cells', 'n_cells')]
+    measures += [('n_cells', 'n_cells'), ('n_flagged', 'n_flagged')]
     rows = []
     for group, df in images.groupby('group', sort=False):
         for label, col in measures:

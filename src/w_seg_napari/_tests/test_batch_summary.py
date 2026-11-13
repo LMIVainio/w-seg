@@ -50,6 +50,7 @@ def test_image_is_the_unit_and_groups_are_built_from_images(tmp_path):
     g = res['groups']
     row = g[(g['group'] == 'lineA') & (g['measure'] == 'n_cells')].iloc[0]
     assert row['n_images'] == 3
+    assert (g['measure'] == 'n_flagged').any()
     assert abs(row['mean'] - 25) < 1e-9
     assert abs(row['sem'] - np.std([20, 30, 25], ddof=1) / np.sqrt(3)) < 1e-9
     shares = res['images'].filter(like='share_predicted_class=')
