@@ -324,3 +324,33 @@ def inherit_parent_labels(child, parent, unmatched='keep'):
     hit = (lut_ids[sorter][pos] == child) & (child > 0)
     out[hit] = lut_vals[sorter][pos][hit]
     return out
+
+
+def class_overlap_stats(child, parent, result):
+    """
+    How well the classes of `parent` (painted layer) landed on the cells of
+    `child` in `result` (the output of inherit_parent_labels with unmatched
+    'zero'): {'n_cells', 'n_unpainted', 'n_mixed', 'per_class': {class: n}}.
+    Unpainted cells have no painted pixel and are 0 in the result; mixed
+    cells are covered by more than one class (the majority wins).
+    """
+    ids, first = np.unique(child, return_index=True)
+    keep = ids > 0
+    ids, first = ids[keep], first[keep]
+    values = result.ravel()[first]
+    inside = (child > 0) & (parent > 0)
+    c = child[inside].astype(np.int64)
+    p = parent[inside].astype(np.int64)
+    pairs = np.unique(np.stack([c, p]), axis=1) if c.size else np.empty((2, 0))
+    n_classes = np.bincount(
+        np.searchsorted(ids, pairs[0].astype(np.int64)), minlength=len(ids)
+    )
+    classes, counts = np.unique(values[values > 0], return_counts=True)
+    return {
+        'n_cells': int(len(ids)),
+        'n_unpainted': int(np.count_nonzero(values == 0)),
+        'n_mixed': int(np.count_nonzero(n_classes > 1)),
+        'per_class': {
+            int(k): int(n) for k, n in zip(classes, counts, strict=True)
+        },
+    }

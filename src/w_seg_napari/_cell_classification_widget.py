@@ -385,7 +385,16 @@ class CellClassificationWidget(QWidget):
         self.current_layer_name: str = layer_name
         self.annotation_layer: napari.layers.Labels | None = None
 
+        self.annotation_source: str | None = None
+
         self._init_ui()
+        self._refresh_annot_sources()
+        if self.viewer is not None:
+            for ev in (
+                self.viewer.layers.events.inserted,
+                self.viewer.layers.events.removed,
+            ):
+                ev.connect(lambda *_: self._refresh_annot_sources())
 
         # Bind initial data if provided
         if df is not None and labels_data is not None:
@@ -436,8 +445,26 @@ class CellClassificationWidget(QWidget):
         annot_group = QGroupBox('1. Interactive Annotation')
         annot_layout = QVBoxLayout()
 
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel('Cells from:'))
+        self.combo_annot_source = QComboBox()
+        self.combo_annot_source.setToolTip(
+            'The labels layer the class layer is made from (for example the '
+            'corrected labels). It does not need to be measured yet. For '
+            'training it must be the layer you measure afterwards.'
+        )
+        src_row.addWidget(self.combo_annot_source, stretch=1)
+        self.btn_annot_refresh = QPushButton('Refresh')
+        self.btn_annot_refresh.clicked.connect(self._refresh_annot_sources)
+        src_row.addWidget(self.btn_annot_refresh)
+        annot_layout.addLayout(src_row)
+
         self.btn_create_annot = QPushButton('Create/Reset Manual Class Layer')
-        self.btn_create_annot.setEnabled(False)
+        self.btn_create_annot.setToolTip(
+            'Makes a class layer with the cells separated where they touch, '
+            'so a fill paints one cell. All cells start as class 1. The '
+            'measurements are only needed for training.'
+        )
         self.btn_create_annot.clicked.connect(self._on_create_annotation_layer)
         annot_layout.addWidget(self.btn_create_annot)
 
@@ -537,6 +564,30 @@ class CellClassificationWidget(QWidget):
         self.setLayout(layout)
 
     # Add function to refresh layer choices
+    def _refresh_annot_sources(self, *_):
+        """Fills 'Cells from' with the labels layers (not the class layers)."""
+        if self.viewer is None:
+            self.btn_create_annot.setEnabled(False)
+            return
+        keep = self.combo_annot_source.currentText()
+        self.combo_annot_source.blockSignals(True)
+        self.combo_annot_source.clear()
+        for layer in self.viewer.layers:
+            if isinstance(
+                layer, napari.layers.Labels
+            ) and not layer.name.startswith('[Class Annotations]'):
+                self.combo_annot_source.addItem(layer.name, layer)
+        for name in (keep, self.current_layer_name):
+            i = self.combo_annot_source.findText(name) if name else -1
+            if i >= 0:
+                self.combo_annot_source.setCurrentIndex(i)
+                break
+        self.combo_annot_source.blockSignals(False)
+        self.btn_create_annot.setEnabled(
+            self.combo_annot_source.count() > 0
+            or self.cached_labels_data is not None
+        )
+
     def _refresh_export_layer_choices(self):
         """Populates the export dropdown with all active Napari Labels layers."""
         if self.viewer is None:
@@ -632,6 +683,7 @@ class CellClassificationWidget(QWidget):
             f'<b>Source Layer:</b> {self.current_layer_name}<br/>'
             f'<b>Bound Cells:</b> {n_cells}'
         )
+        self._refresh_annot_sources()
         self.btn_create_annot.setEnabled(True)
         self.btn_export_data.setEnabled(True)
 
@@ -641,20 +693,30 @@ class CellClassificationWidget(QWidget):
             self.btn_predict.setEnabled(True)
 
     def _on_create_annotation_layer(self):
-        if self.cached_labels_data is None:
+        layer = self.combo_annot_source.currentData()
+        if layer is not None:
+            source_name = layer.name
+            source_data = np.asarray(layer.data)
+            transform = self._lookup_source_transform(source_name)
+        elif self.cached_labels_data is not None:
+            if not self._refresh_source_transform():
+                return
+            source_name = self.current_layer_name
+            source_data = self.cached_labels_data
+            transform = getattr(self, '_source_transform', {})
+        else:
             QMessageBox.warning(
-                self, 'Warning', 'No measured labels layer bound.'
+                self, 'Warning', 'Choose a labels layer in "Cells from".'
             )
             return
-
-        if not self._refresh_source_transform():
-            return
+        self._source_transform = transform
+        self.annotation_source = source_name
 
         # Build eroded 0/1 background class template
         annot_data = self.clf_manager.create_annotation_layer_data(
-            self.cached_labels_data, erosion_steps=1
+            source_data, erosion_steps=1
         )
-        annot_layer_name = f'[Class Annotations] {self.current_layer_name}'
+        annot_layer_name = f'[Class Annotations] {source_name}'
 
         # If annotation layer already exists in Napari, replace or select it
         if self.viewer is not None:
@@ -689,8 +751,31 @@ class CellClassificationWidget(QWidget):
             QMessageBox.warning(
                 self,
                 'Warning',
-                'Annotation layer or spatial feature matrix is missing.',
+                'Create the class layer and measure the cells (Cell '
+                'Morphology tab) first.',
             )
+            return
+        if self.annotation_layer.data.shape != self.cached_labels_data.shape:
+            QMessageBox.warning(
+                self,
+                'Warning',
+                'The class layer and the measured labels have different '
+                'sizes. Make the class layer from the layer you measured.',
+            )
+            return
+        if (
+            self.annotation_source
+            and self.annotation_source != self.current_layer_name
+            and QMessageBox.question(
+                self,
+                'Different labels layer',
+                f'The class layer was made from "{self.annotation_source}" '
+                f'but the cells were measured on "{self.current_layer_name}". '
+                'Each cell takes the class painted on its pixels, so this '
+                'only works when both have the same cells.\n\nTrain anyway?',
+            )
+            != QMessageBox.Yes
+        ):
             return
 
         try:

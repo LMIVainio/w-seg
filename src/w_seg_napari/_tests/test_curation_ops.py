@@ -147,3 +147,30 @@ def test_merge_groups_by_border_end_to_end():
     lab2 = _border_scene()
     merge_label_groups(lab2, [[5, 6]], 'Lowest ID', close_gap=0)
     assert (lab2[0:10, 40] == 0).all()
+
+
+def test_class_overlap_stats_reports_unpainted_and_mixed_cells():
+    from w_seg_napari._curation_ops import (
+        class_overlap_stats,
+        inherit_parent_labels,
+    )
+
+    cells = np.zeros((6, 12), np.uint32)
+    cells[1:5, 1:4] = 7  # painted class 1
+    cells[1:5, 4:8] = 9  # painted with two classes
+    cells[1:5, 8:11] = 11  # nothing painted (cut away by the separation)
+    paint = np.zeros_like(cells)
+    paint[1:5, 1:3] = 1
+    paint[1:5, 4:6] = 2
+    paint[1:5, 6:8] = 3
+    paint[2, 4:6] = 3  # more class 2 than class 3 in cell 9 ...
+    paint[1:5, 4:6] = 2
+    paint[1, 6:8] = 3
+    out = inherit_parent_labels(cells, paint, unmatched='zero')
+    assert set(np.unique(out)) == {0, 1, 2}  # no cell ids leak into classes
+    assert np.array_equal(out[cells == 7], np.ones(12, np.uint32))
+    stats = class_overlap_stats(cells, paint, out)
+    assert stats['n_cells'] == 3
+    assert stats['n_unpainted'] == 1
+    assert stats['n_mixed'] == 1
+    assert stats['per_class'] == {1: 1, 2: 1}

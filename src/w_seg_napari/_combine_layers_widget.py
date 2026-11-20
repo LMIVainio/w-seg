@@ -1,12 +1,13 @@
 import napari
 import numpy as np
 from magicgui import magicgui
-from napari.utils.notifications import show_warning
+from napari.utils.notifications import show_info, show_warning
 from scipy import ndimage
 from skimage.measure import regionprops
 
 from w_seg_napari._curation_ops import (
     border_table,
+    class_overlap_stats,
     groups_by_border,
     inherit_parent_labels,
     merge_label_groups,
@@ -407,6 +408,7 @@ def create_cleanup_widget(viewer: napari.Viewer):
 
 INHERIT = 'Inherit parent labels (majority vote)'
 SUBREGIONS = 'Small regions into large labels'
+CLASSES = 'Painted classes onto the cell shapes'
 
 
 def create_label_combine_widget(viewer: napari.Viewer):
@@ -417,8 +419,8 @@ def create_label_combine_widget(viewer: napari.Viewer):
         mode={
             'label': 'Mode',
             'widget_type': 'RadioButtons',
-            'choices': [INHERIT, SUBREGIONS],
-            'value': INHERIT,
+            'choices': [CLASSES, INHERIT, SUBREGIONS],
+            'value': CLASSES,
         },
         child_layer={'label': 'Child labels (gets the new labels)'},
         parent_layer={'label': 'Parent labels (e.g. YOLO classes)'},
@@ -426,19 +428,27 @@ def create_label_combine_widget(viewer: napari.Viewer):
             'label': 'Child without parent',
             'choices': ['Keep own label', 'Set to 0'],
         },
-        output_name={'label': 'Output Name', 'value': 'inherited_labels'},
+        output_name={'label': 'Output Name', 'value': 'classifier_labels'},
     )
     def widget(
-        mode: str = INHERIT,
+        mode: str = CLASSES,
         child_layer: napari.layers.Labels = None,
         parent_layer: napari.layers.Labels = None,
         unmatched: str = 'Keep own label',
-        output_name: str = 'inherited_labels',
+        output_name: str = 'classifier_labels',
     ):
         if child_layer is None or parent_layer is None:
             return
         try:
-            if mode == INHERIT:
+            if mode == CLASSES:
+                result = inherit_parent_labels(
+                    child_layer.data, parent_layer.data, unmatched='zero'
+                )
+                stats = class_overlap_stats(
+                    child_layer.data, parent_layer.data, result
+                )
+                show_info(_class_report(stats))
+            elif mode == INHERIT:
                 result = inherit_parent_labels(
                     child_layer.data,
                     parent_layer.data,
@@ -463,22 +473,53 @@ def create_label_combine_widget(viewer: napari.Viewer):
             )
 
     def _update(value=None):
-        inherit = widget.mode.value == INHERIT
-        widget.unmatched.visible = inherit
-        if inherit:
+        mode = widget.mode.value
+        inherit = mode in (INHERIT, CLASSES)
+        widget.unmatched.visible = mode == INHERIT
+        if mode == CLASSES:
+            widget.child_layer.label = 'Cells (e.g. the corrected labels)'
+            widget.parent_layer.label = 'Painted class layer'
+            if widget.output_name.value in (
+                'inherited_labels',
+                'merged_labels_layer',
+            ):
+                widget.output_name.value = 'classifier_labels'
+        elif inherit:
             widget.child_layer.label = 'Child labels (gets the new labels)'
             widget.parent_layer.label = 'Parent labels (e.g. YOLO classes)'
-            if widget.output_name.value == 'merged_labels_layer':
+            if widget.output_name.value in (
+                'merged_labels_layer',
+                'classifier_labels',
+            ):
                 widget.output_name.value = 'inherited_labels'
         else:
             widget.child_layer.label = 'Small regions (Layer A)'
             widget.parent_layer.label = 'Large labels (Layer B)'
-            if widget.output_name.value == 'inherited_labels':
+            if widget.output_name.value in (
+                'inherited_labels',
+                'classifier_labels',
+            ):
                 widget.output_name.value = 'merged_labels_layer'
 
     widget.mode.changed.connect(_update)
     _update()
     return widget
+
+
+def _class_report(stats):
+    """One notification text for class_overlap_stats."""
+    per = ', '.join(f'class {k}: {n}' for k, n in stats['per_class'].items())
+    text = f'{stats["n_cells"]} cells. {per or "no cell has a class"}.'
+    if stats['n_unpainted']:
+        text += (
+            f' {stats["n_unpainted"]} cells had no painted pixel (set to 0).'
+        )
+    if stats['n_mixed']:
+        text += (
+            f' {stats["n_mixed"]} cells are covered by more than one class '
+            '(the majority wins).'
+        )
+    return text
 
 
 PREVIEW_NAME = '[Preview] border merge'
