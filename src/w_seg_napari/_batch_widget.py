@@ -392,8 +392,30 @@ class BatchTabWidget(QWidget):
         self.btn_open_session.clicked.connect(self._on_open_session)
         self.btn_save_session = QPushButton('Save Session')
         self.btn_save_session.clicked.connect(self._on_save_session)
+        self.btn_prev_session = QPushButton('< Previous')
+        self.btn_next_session = QPushButton('Next >')
+        for b, step in (
+            (self.btn_prev_session, -1),
+            (self.btn_next_session, 1),
+        ):
+            b.setToolTip(
+                'Opens the previous / next *_session.h5 of the same folder '
+                '(alphabetical) and closes all the other layers.'
+            )
+            b.clicked.connect(lambda _=False, st=step: self._step_session(st))
+        self.chk_save_first = QCheckBox('Save the open session first')
+        self.chk_save_first.setChecked(True)
+        self.chk_save_first.setToolTip(
+            'Previous / Next save the open session (labels and the layers '
+            'ticked below) before closing its layers. Switch off to move on '
+            'without saving; you are then asked first.'
+        )
         sess_btns.addWidget(self.btn_open_session)
         sess_btns.addWidget(self.btn_save_session)
+        step_row = QHBoxLayout()
+        step_row.addWidget(self.btn_prev_session)
+        step_row.addWidget(self.btn_next_session)
+        step_row.addWidget(self.chk_save_first)
         self.lbl_session = QLabel('No session open.')
         self.lbl_session.setWordWrap(True)
         self.lbl_session.setStyleSheet('color: gray; font-style: italic;')
@@ -420,6 +442,7 @@ class BatchTabWidget(QWidget):
             'Other layers to keep in the session (class layers, shapes, ...).'
         )
         sess_layout.addLayout(sess_btns)
+        sess_layout.addLayout(step_row)
         sess_layout.addWidget(self.lbl_session)
         sess_layout.addLayout(lab_row)
         sess_layout.addLayout(img_row)
@@ -927,6 +950,67 @@ class BatchTabWidget(QWidget):
                 self, 'Cannot open session', f'{type(e).__name__}: {e}'
             )
 
+    def _session_files(self):
+        """The sessions of the folder of the open session (or of the list)."""
+        if self.session and self.session.get('path'):
+            folder = Path(self.session['path']).parent
+        elif self.selected_dir:
+            folder = self._out_dir()
+        else:
+            return []
+        return sorted(folder.glob(f'*{sio.SESSION_SUFFIX}'))
+
+    def _step_session(self, step):
+        """Open the next (+1) or previous (-1) session, closing the open layers."""
+        files = self._session_files()
+        if not files:
+            self.lbl_session.setText(
+                'No session files found: open one with Open Session or '
+                'select a folder first.'
+            )
+            return
+        current = self.session['path'] if self.session else None
+        current = Path(current) if current else None
+        if current in files:
+            index = files.index(current) + step
+        else:
+            index = 0 if step > 0 else len(files) - 1
+        if not 0 <= index < len(files):
+            self.lbl_session.setText(
+                f'{current.name} is the '
+                f'{"last" if step > 0 else "first"} of {len(files)} sessions '
+                'in this folder.'
+            )
+            return
+        if self.chk_save_first.isChecked():
+            if self.session and not self._on_save_session():
+                return  # not saved: stay where we are
+        elif (
+            len(self.viewer.layers)
+            and QMessageBox.question(
+                self,
+                'Close layers',
+                'Close all layers without saving? Changes since the last '
+                'save are lost.',
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        target = files[index]
+        self.viewer.layers.clear()
+        self._rendered = []
+        self.session = None
+        try:
+            self._open_session(target)
+        except Exception as e:
+            QMessageBox.warning(
+                self, 'Cannot open session', f'{type(e).__name__}: {e}'
+            )
+            return
+        self.lbl_session.setText(
+            self.lbl_session.text() + f'  ({index + 1} of {len(files)})'
+        )
+
     def _open_session(self, path: Path):
         v = self.viewer
         kind = sio.session_kind(path)
@@ -988,7 +1072,7 @@ class BatchTabWidget(QWidget):
                 self, 'Save session', start, 'HDF5 sessions (*.h5)'
             )
             if not chosen:
-                return
+                return False
             path = Path(chosen)
             if not path.name.endswith(sio.SESSION_SUFFIX):
                 path = path.with_name(path.stem + sio.SESSION_SUFFIX)
@@ -1017,7 +1101,7 @@ class BatchTabWidget(QWidget):
                 'Pick a Labels layer for the corrected labels or tick at '
                 'least one other layer. The session file was not changed.',
             )
-            return
+            return False
         if corrected is not None and not np.any(corrected):
             answer = QMessageBox.question(
                 self,
@@ -1027,7 +1111,7 @@ class BatchTabWidget(QWidget):
                 'image. Save anyway?',
             )
             if answer != QMessageBox.Yes:
-                return
+                return False
         try:
             sio.save_edits(
                 path,
@@ -1043,7 +1127,7 @@ class BatchTabWidget(QWidget):
             QMessageBox.warning(
                 self, 'Cannot save session', f'{type(e).__name__}: {e}'
             )
-            return
+            return False
         if self.session is None:
             self.session = {
                 'path': path,
@@ -1056,6 +1140,7 @@ class BatchTabWidget(QWidget):
             + (f'labels "{layer_name}"' if layer_name else 'no labels')
             + f' and {len(payloads)} other layer(s).'
         )
+        return True
 
     # --------------------------------------------------------------------------
     # Running
