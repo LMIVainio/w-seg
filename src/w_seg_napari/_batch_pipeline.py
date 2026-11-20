@@ -40,6 +40,7 @@ from w_seg_napari._session_io import (
     has_dataset,
     load_session,
     read_attrs,
+    read_dataset,
     save_session,
 )
 
@@ -281,16 +282,23 @@ def process_image(image_path, settings: dict, is_cancelled):
         store = load_session(sess_path)  # earlier results of skipped stages
     notes = []
     recompute_labels = bool(stages.get('superpixels') or stages.get('gasp'))
+    # The corrected labels are your work: unless "keep" is switched off, they
+    # stay as they are, whatever is computed (they are put back below).
+    keep = settings.get('keep_corrected', True)
+    kept = None
+    if keep and sess_path.is_file():
+        kept = read_dataset(sess_path, CORRECTED)
     if (
-        sess_path.is_file()
+        not keep
         and recompute_labels
+        and sess_path.is_file()
         and has_dataset(sess_path, CORRECTED)
     ):
         notes.append(
             f'{name}: new labels were computed, so the corrected labels '
             'saved earlier in its session were discarded.'
         )
-    if recompute_labels:
+    if recompute_labels and not keep:
         store.pop(CORRECTED, None)
     if any(stages.get(s) for s in ('predict', 'superpixels', 'gasp')):
         store.pop('error_map', None)  # belongs to the old labels
@@ -326,6 +334,14 @@ def process_image(image_path, settings: dict, is_cancelled):
         if roi is not None:
             rgb = crop_image(rgb, roi)
             notes.append(f'{name}: cropped to the region {roi}.')
+    if kept is not None:
+        if kept.shape != rgb.shape[:2]:
+            raise ValueError(
+                f'its corrected labels are {tuple(kept.shape)} but the image '
+                f'(or region) is {tuple(rgb.shape[:2])}; the region changed. '
+                'Switch off "Keep corrected labels" to replace them'
+            )
+        store[CORRECTED] = kept
     results = {'raw': rgb}
 
     # 1. Prediction ------------------------------------------------------

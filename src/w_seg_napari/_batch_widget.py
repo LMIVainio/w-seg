@@ -276,10 +276,22 @@ class BatchTabWidget(QWidget):
         self.chk_skip_done.toggled.connect(self._update_done_count)
         self.lbl_done = QLabel('')
         self.lbl_done.setContentsMargins(20, 0, 0, 0)
+        self.chk_keep_corrected = QCheckBox(
+            'Keep corrected labels (never replace them)'
+        )
+        self.chk_keep_corrected.setChecked(True)
+        self.chk_keep_corrected.setToolTip(
+            'A session that holds corrected labels keeps them, whichever '
+            'stages run: new superpixel / GASP labels are computed next to '
+            'them, and the corrections stay in the file. Switch off only '
+            'to throw the corrections away on purpose (you are asked '
+            'first).'
+        )
 
         stage_layout.addWidget(self.chk_render_viewer)
         stage_layout.addWidget(self.chk_only_latest)
         stage_layout.addWidget(self.chk_skip_done)
+        stage_layout.addWidget(self.chk_keep_corrected)
         stage_layout.addWidget(self.lbl_done)
 
         self.chk_crop = QCheckBox('Crop to saved regions')
@@ -1159,6 +1171,7 @@ class BatchTabWidget(QWidget):
             },
             'render': self.chk_render_viewer.isChecked(),
             'skip_done': self.chk_skip_done.isChecked(),
+            'keep_corrected': self.chk_keep_corrected.isChecked(),
             'crop_to_rois': self.chk_crop.isChecked()
             and not self._sessions_mode(),
             'input_mode': self.combo_input.currentData(),
@@ -1198,6 +1211,8 @@ class BatchTabWidget(QWidget):
         """Warns when this run would throw away corrected labels."""
         ui = self._batch_ui_settings()
         stages = ui['stages']
+        if ui['keep_corrected']:
+            return True  # corrections are never replaced
         if not (stages.get('superpixels') or stages.get('gasp')):
             return True  # the labels are not recomputed
         out = self._out_dir()
@@ -1224,9 +1239,10 @@ class BatchTabWidget(QWidget):
             self,
             'Corrected labels will be discarded',
             f'{n} session(s) hold corrected labels. This run computes new '
-            'superpixel / GASP labels, which discards those corrections.\n\n'
-            'To keep them, switch off stages 2 and 3 (and choose "Corrected '
-            'labels" for the morphology). Continue anyway?',
+            'superpixel / GASP labels, and "Keep corrected labels" is off, '
+            'so those corrections are DELETED.\n\nContinue and delete them?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         return answer == QMessageBox.Yes
 

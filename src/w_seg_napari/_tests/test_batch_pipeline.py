@@ -95,6 +95,11 @@ def _install_fakes(monkeypatch):
         'has_dataset',
         lambda path, key: key in sessions.get(str(path), {}),
     )
+    monkeypatch.setattr(
+        bp,
+        'read_dataset',
+        lambda path, key: sessions.get(str(path), {}).get(key),
+    )
     return sessions
 
 
@@ -447,16 +452,47 @@ def test_image_without_corrections_falls_back_and_says_so(
     assert list(table['labels_source'].unique()) == ['gasp']
 
 
-def test_recomputing_labels_discards_stale_corrections(tmp_path, monkeypatch):
+def test_recomputing_labels_keeps_corrections_by_default(
+    tmp_path, monkeypatch
+):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, labels = _with_correction(tmp_path, sessions)
+    events, _ = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False)
+    )
+    assert (sessions[key][bp.CORRECTED] == labels).all()
+    assert not any('discarded' in e[1] for e in events if e[0] == 'note')
+
+
+def test_recomputing_labels_discards_corrections_only_when_asked(
+    tmp_path, monkeypatch
+):
     sessions = _install_fakes(monkeypatch)
     _make_images(tmp_path, ['a.tif'])
     _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
     key, _ = _with_correction(tmp_path, sessions)
-    events, _ = _drain(
-        bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False)
-    )
+    s = _settings()
+    s['keep_corrected'] = False
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
     assert bp.CORRECTED not in sessions[key]
     assert any('discarded' in e[1] for e in events if e[0] == 'note')
+
+
+def test_kept_corrections_of_another_size_stop_that_image(
+    tmp_path, monkeypatch
+):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    key, _ = _with_correction(tmp_path, sessions)
+    sessions[key][bp.CORRECTED] = np.ones((3, 3), int)
+    _, (n_ok, failed) = _drain(
+        bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False)
+    )
+    assert n_ok == 0 and 'Keep corrected labels' in failed[0][1]
+    assert sessions[key][bp.CORRECTED].shape == (3, 3)  # nothing was lost
 
 
 def test_morphology_only_run_keeps_corrections(tmp_path, monkeypatch):
@@ -658,7 +694,7 @@ def test_session_without_image_is_a_clear_error(tmp_path, monkeypatch):
     assert n_ok == 0 and 'no image' in failed[0][1]
 
 
-def test_recomputing_labels_of_a_session_discards_corrections(
+def test_recomputing_labels_of_a_session_keeps_corrections_by_default(
     tmp_path, monkeypatch
 ):
     sessions = _install_fakes(monkeypatch)
@@ -668,6 +704,9 @@ def test_recomputing_labels_of_a_session_discards_corrections(
     key, _ = _with_correction(tmp_path, sessions)
     s = _settings()
     s['input_mode'] = 'sessions'
+    _drain(bp.run_batch(['a.h5'], tmp_path, s, lambda: False))
+    assert bp.CORRECTED in sessions[key]
+    s['keep_corrected'] = False
     events, _ = _drain(bp.run_batch(['a.h5'], tmp_path, s, lambda: False))
     assert bp.CORRECTED not in sessions[key]
     assert any('discarded' in e[1] for e in events if e[0] == 'note')

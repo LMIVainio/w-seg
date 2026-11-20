@@ -62,6 +62,14 @@ def load_session(path) -> dict:
         }
 
 
+def read_dataset(path, key):
+    """One top-level dataset of the file as an array (None if it is not there)."""
+    import h5py
+
+    with h5py.File(path, 'r') as f:
+        return f[key][()] if key in f else None
+
+
 def has_dataset(path, key) -> bool:
     import h5py
 
