@@ -532,6 +532,14 @@ def save_error_model(bundle, path):
     joblib.dump(bundle, path)
 
 
+def default_error_model_path():
+    """The error model shipped with the package, or None if there is none."""
+    from pathlib import Path
+
+    path = Path(__file__).parent / 'models' / 'error_model.joblib'
+    return path if path.is_file() else None
+
+
 def load_error_model(path):
     import joblib
 

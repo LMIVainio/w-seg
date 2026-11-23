@@ -260,6 +260,15 @@ class BatchTabWidget(QWidget):
         err_row.addWidget(self.btn_error_model)
         err_row.addWidget(self.lbl_error_model, stretch=1)
         self.error_model_path = ''
+        from w_seg_napari._segmentation_errors import (
+            default_error_model_path,
+        )
+
+        default_model = default_error_model_path()
+        if default_model:
+            self.error_model_path = str(default_model)
+            self.lbl_error_model.setText(f'{default_model.name} (built in)')
+            self.lbl_error_model.setStyleSheet('font-style: normal;')
         self._toggle_error_options(False)
         self.chk_export_table = QCheckBox('6. Export Morphology Table (.csv)')
         self.chk_export_table.setChecked(True)
@@ -373,13 +382,13 @@ class BatchTabWidget(QWidget):
         stage_layout.addWidget(self.chk_predict)
         stage_layout.addWidget(self.chk_superpixels)
         stage_layout.addWidget(self.chk_gasp)
-        stage_layout.addLayout(fix_row)
-        self._update_error_model_enabled()
         stage_layout.addWidget(self.chk_morphology)
         stage_layout.addLayout(morph_opts)
         stage_layout.addWidget(self.chk_classification)
         stage_layout.addWidget(self.chk_errors)
+        stage_layout.addLayout(fix_row)
         stage_layout.addLayout(err_row)
+        self._update_error_model_enabled()
         stage_layout.addWidget(self.chk_export_table)
         box_settings.setLayout(settings_layout)
         box_initial.setLayout(initial_layout)
@@ -836,6 +845,13 @@ class BatchTabWidget(QWidget):
         self.chk_errors.setChecked(
             bool(cleanup.get('flag_errors', bool(path)))
         )
+        if not path:  # the settings used no model: back to the built-in one
+            from w_seg_napari._segmentation_errors import (
+                default_error_model_path,
+            )
+
+            default = default_error_model_path()
+            path = str(default) if default else ''
         self.error_model_path = path or ''
         self.lbl_error_model.setText(
             Path(path).name if path else 'No model selected.'
