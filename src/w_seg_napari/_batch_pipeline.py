@@ -24,6 +24,7 @@ import numpy as np
 
 from w_seg_napari._affinity import gather, layer_payloads
 from w_seg_napari._batch_io import (
+    cleanup_path,
     find_session_dir,
     load_image,
     output_dir,
@@ -35,6 +36,7 @@ from w_seg_napari._batch_io import (
 from w_seg_napari._batch_rois import crop_image, load_rois, normalize_roi
 from w_seg_napari._batch_settings import save_settings as save_settings_file
 from w_seg_napari._geometry_fields import geometry_payloads, masked_direction
+from w_seg_napari._label_cleanup import cleanup_labels, summarize
 from w_seg_napari._session_io import (
     CORRECTED,
     has_dataset,
@@ -418,6 +420,29 @@ def process_image(image_path, settings: dict, is_cancelled):
             settings['gasp_params'], aset, store['sp_labels']
         )
         done += 1
+    # 3b. Clean-up: border cells, and the cells the error model is sure about
+    cl = settings.get('cleanup') or {}
+    mode = cl.get('mode', 'off')
+    if (cl.get('borders') or mode != 'off') and 'gasp_labels' in store:
+        fresh = bool(stages.get('gasp'))  # only new labels are fixed
+        if mode != 'off' and not fresh:
+            notes.append(
+                f'{name}: flagged cells were not fixed, because only newly '
+                'computed GASP labels are cleaned (switch GASP on).'
+            )
+            mode = 'off'
+        cleaned, log = cleanup_labels(
+            store['gasp_labels'],
+            sem,
+            settings.get('cleanup_bundle'),
+            settings['morph_params'].get('pixel_spacing') or 1.0,
+            borders=bool(cl.get('borders')),
+            mode=mode,
+            min_p=float(cl.get('min_p', 0.8)),
+        )
+        store['gasp_labels'] = cleaned
+        log.to_csv(cleanup_path(settings['out_dir'], name), index=False)
+        notes.append(f'{name}: clean-up: {summarize(log)}.')
     if 'gasp_labels' in store:
         results['gasp_labels'] = store['gasp_labels']
 

@@ -7,6 +7,7 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -166,7 +167,16 @@ class BatchTabWidget(QWidget):
         group_summary.setLayout(summary_layout)
 
         # --- Section 3: stages ------------------------------------------------
-        group_stages = QGroupBox('Execution Stages')
+        group_stages = (
+            QWidget()
+        )  # three boxes: Settings, Initial processing, Stages
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        box_settings = QGroupBox('Settings')
+        settings_layout = QVBoxLayout()
+        box_initial = QGroupBox('Initial processing')
+        initial_layout = QVBoxLayout()
+        box_stages = QGroupBox('Execution Stages')
         stage_layout = QVBoxLayout()
 
         self.chk_render_viewer = QCheckBox(
@@ -288,11 +298,11 @@ class BatchTabWidget(QWidget):
             'first).'
         )
 
-        stage_layout.addWidget(self.chk_render_viewer)
-        stage_layout.addWidget(self.chk_only_latest)
-        stage_layout.addWidget(self.chk_skip_done)
-        stage_layout.addWidget(self.chk_keep_corrected)
-        stage_layout.addWidget(self.lbl_done)
+        settings_layout.addWidget(self.chk_render_viewer)
+        settings_layout.addWidget(self.chk_only_latest)
+        settings_layout.addWidget(self.chk_skip_done)
+        settings_layout.addWidget(self.chk_keep_corrected)
+        settings_layout.addWidget(self.lbl_done)
 
         self.chk_crop = QCheckBox('Crop to saved regions')
         self.chk_crop.setToolTip(
@@ -312,20 +322,71 @@ class BatchTabWidget(QWidget):
         self.lbl_regions = QLabel('')
         self.regions = RegionSelectorWidget(self.main_widget.viewer)
         self.regions.closed.connect(self._update_regions_label)
-        stage_layout.addWidget(self.chk_crop)
-        stage_layout.addWidget(self.btn_regions)
-        stage_layout.addWidget(self.lbl_regions)
-        stage_layout.addWidget(self.regions)
+        self.chk_borders = QCheckBox('Remove cells touching the image border')
+        self.chk_borders.setToolTip(
+            'Right after GASP, before anything is measured: every cell that '
+            'touches the edge of the image (or of its saved region) is '
+            'removed from the GASP labels, so it is not measured, '
+            'classified or flagged. A cell cut by the edge is not a whole '
+            'cell. What was removed is written to <image>_cleanup.csv.'
+        )
+        initial_layout.addWidget(self.chk_crop)
+        initial_layout.addWidget(self.btn_regions)
+        initial_layout.addWidget(self.lbl_regions)
+        initial_layout.addWidget(self.regions)
+        initial_layout.addWidget(self.chk_borders)
+
+        fix_row = QHBoxLayout()
+        fix_row.setContentsMargins(20, 0, 0, 0)
+        fix_row.addWidget(QLabel('Fix flagged cells:'))
+        self.combo_fix = QComboBox()
+        for text, key in (
+            ('Off', 'off'),
+            ('Merge fragments', 'merge'),
+            ('Delete not-a-cell', 'delete'),
+            ('Merge and delete', 'both'),
+        ):
+            self.combo_fix.addItem(text, key)
+        self.combo_fix.setToolTip(
+            'After GASP, before the measurement, the error model (chosen '
+            'below) scores every cell. Cells it is sure about are fixed: '
+            '"fragment" cells are merged into the touching cell they share '
+            'the longest border with, "not a cell" cells are deleted. Too '
+            'large (merged) cells are left alone. Only newly computed GASP '
+            'labels are fixed, never your corrected labels. Every change is '
+            'written to <image>_cleanup.csv.'
+        )
+        self.spin_fix_p = QDoubleSpinBox()
+        self.spin_fix_p.setRange(0.5, 1.0)
+        self.spin_fix_p.setSingleStep(0.05)
+        self.spin_fix_p.setValue(0.8)
+        self.spin_fix_p.setToolTip(
+            'Only cells with an error probability of at least this are '
+            'changed. Higher is safer.'
+        )
+        fix_row.addWidget(self.combo_fix, stretch=1)
+        fix_row.addWidget(QLabel('if p >='))
+        fix_row.addWidget(self.spin_fix_p)
+        self.combo_fix.currentIndexChanged.connect(
+            self._update_error_model_enabled
+        )
         stage_layout.addWidget(self.chk_predict)
         stage_layout.addWidget(self.chk_superpixels)
         stage_layout.addWidget(self.chk_gasp)
+        stage_layout.addLayout(fix_row)
+        self._update_error_model_enabled()
         stage_layout.addWidget(self.chk_morphology)
         stage_layout.addLayout(morph_opts)
         stage_layout.addWidget(self.chk_classification)
         stage_layout.addWidget(self.chk_errors)
         stage_layout.addLayout(err_row)
         stage_layout.addWidget(self.chk_export_table)
-        group_stages.setLayout(stage_layout)
+        box_settings.setLayout(settings_layout)
+        box_initial.setLayout(initial_layout)
+        box_stages.setLayout(stage_layout)
+        for box in (box_settings, box_initial, box_stages):
+            outer_layout.addWidget(box)
+        group_stages.setLayout(outer_layout)
         self.group_stages = group_stages
 
         # --- Section 4: run control -------------------------------------------
@@ -767,7 +828,14 @@ class BatchTabWidget(QWidget):
             if i >= 0:
                 combo.setCurrentIndex(i)
         path = doc.get('error_model')
-        self.chk_errors.setChecked(bool(path))
+        cleanup = doc.get('cleanup') or {}
+        self.chk_borders.setChecked(bool(cleanup.get('borders')))
+        i = self.combo_fix.findData(cleanup.get('mode', 'off'))
+        self.combo_fix.setCurrentIndex(max(i, 0))
+        self.spin_fix_p.setValue(float(cleanup.get('min_p', 0.8)))
+        self.chk_errors.setChecked(
+            bool(cleanup.get('flag_errors', bool(path)))
+        )
         self.error_model_path = path or ''
         self.lbl_error_model.setText(
             Path(path).name if path else 'No model selected.'
@@ -817,8 +885,15 @@ class BatchTabWidget(QWidget):
         self.morphology_labels.setEnabled(enabled)
         self.morphology_signal.setEnabled(enabled)
 
-    def _toggle_error_options(self, enabled):
-        self.btn_error_model.setEnabled(enabled)
+    def _toggle_error_options(self, enabled=None):
+        self._update_error_model_enabled()
+
+    def _update_error_model_enabled(self, *_):
+        # the error model is used for flagging and for the clean-up
+        fix = hasattr(self, 'combo_fix') and self.combo_fix.currentData()
+        self.btn_error_model.setEnabled(
+            self.chk_errors.isChecked() or bool(fix and fix != 'off')
+        )
 
     def _select_error_model(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1177,6 +1252,12 @@ class BatchTabWidget(QWidget):
             'input_mode': self.combo_input.currentData(),
             'morph_labels': self.morphology_labels.currentData(),
             'morph_signal': self.morphology_signal.currentData(),
+            'cleanup': {
+                'borders': self.chk_borders.isChecked(),
+                'mode': self.combo_fix.currentData(),
+                'min_p': float(self.spin_fix_p.value()),
+                'flag_errors': self.chk_errors.isChecked(),
+            },
         }
 
     def _set_running(self, running: bool):
@@ -1292,6 +1373,18 @@ class BatchTabWidget(QWidget):
                 settings['error_bundle'] = load_error_model(
                     self.error_model_path
                 )
+            cleanup = settings.get('cleanup') or {}
+            if cleanup.get('mode', 'off') != 'off':
+                if not self.error_model_path:
+                    raise ValueError(
+                        'Choose an error model for "Fix flagged cells", or '
+                        'set it to Off.'
+                    )
+                from w_seg_napari._segmentation_errors import load_error_model
+
+                settings['cleanup_bundle'] = load_error_model(
+                    self.error_model_path
+                )
             # the file that goes with the results (built now, so that a value
             # that cannot be saved is found before the run starts)
             settings['settings_doc'] = settings_document(
@@ -1301,6 +1394,7 @@ class BatchTabWidget(QWidget):
                 error_model_path=(
                     self.error_model_path
                     if settings.get('error_bundle')
+                    or settings.get('cleanup_bundle')
                     else None
                 ),
             )

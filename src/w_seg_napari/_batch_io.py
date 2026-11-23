@@ -70,6 +70,11 @@ def session_path(out_dir, image_name: str) -> Path:
     return Path(out_dir) / f'{Path(image_name).stem}_session.h5'
 
 
+def cleanup_path(out_dir, image_name: str) -> Path:
+    """The log of what the clean-up after GASP changed in this image."""
+    return Path(out_dir) / f'{Path(image_name).stem}_cleanup.csv'
+
+
 def table_path(out_dir, image_name: str) -> Path:
     return Path(out_dir) / f'{Path(image_name).stem}_morphology.csv'
 

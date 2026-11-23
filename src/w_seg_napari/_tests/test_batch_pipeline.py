@@ -877,3 +877,27 @@ def test_several_folders_use_the_same_settings_and_scale_progress(
     assert any(
         e[0] == 'progress' and e[2].startswith('[lineB]') for e in events
     )
+
+
+def test_cleanup_removes_border_cells_and_writes_a_log(tmp_path, monkeypatch):
+    sessions = _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    s = _settings()
+    s['cleanup'] = {'borders': True, 'mode': 'off'}
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    saved = sessions[str(tmp_path / 'wseg_batch' / 'a_session.h5')]
+    assert not saved['gasp_labels'].any()  # both fake cells touch the border
+    log = pd.read_csv(tmp_path / 'wseg_batch' / 'a_cleanup.csv')
+    assert list(log['action']) == ['border', 'border']
+    assert any('clean-up: 2 border' in e[1] for e in events if e[0] == 'note')
+
+
+def test_flagged_fixes_wait_for_fresh_gasp_labels(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    s = _morph_only()
+    s['cleanup'] = {'borders': False, 'mode': 'both', 'min_p': 0.8}
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    notes = [e[1] for e in events if e[0] == 'note']
+    assert any('only newly computed GASP labels' in n for n in notes)

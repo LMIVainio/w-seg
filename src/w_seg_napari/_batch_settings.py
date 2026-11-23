@@ -73,6 +73,7 @@ def settings_document(
         'classifier': str(classifier),
         'error_model': str(error_model_path) if error_model_path else None,
         'device': str(settings.get('device', '')),
+        'cleanup': copy.deepcopy(settings.get('cleanup')),
     }
     for key in OVERRIDE_KEYS:
         doc[key] = copy.deepcopy(settings[key])
@@ -157,6 +158,8 @@ def apply_loaded(settings: dict, doc: dict) -> dict:
     out = dict(settings)
     for key in OVERRIDE_KEYS:
         out[key] = copy.deepcopy(doc[key])
+    if doc.get('cleanup') is not None:  # older files have none
+        out['cleanup'] = copy.deepcopy(doc['cleanup'])
     return out
 
 
