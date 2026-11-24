@@ -473,7 +473,19 @@ BUNDLE_DIR = Path.home() / '.wseg_models'
 # model.keras, config.json and optionally the paired YOLO file. Add one line
 # per released model, e.g.
 #   'aspen_tolblue_v1': 'https://github.com/LMIVainio/w-seg/releases/download/w-seg/aspen_tolblue_v1.zip',
-MODEL_ZIP_URL_MAP = {}
+_RELEASE_BASE = 'https://github.com/LMIVainio/w-seg/releases/download/w-seg/'
+MODEL_ZIP_URL_MAP = {
+    'At_RuR_ToBlu_yolo_2026_11': _RELEASE_BASE
+    + 'At_RuR_ToBlu_yolo_2026_11.zip',
+    'At_stomata_2026-11': _RELEASE_BASE + 'At_stomata_2026-11.zip',
+    'Populus_ToBlu2026_11': _RELEASE_BASE + 'Populus_ToBlu2026_11.zip',
+}
+# What the user sees in the model dropdown (the zip name is the key)
+MODEL_ZIP_LABELS = {
+    'Populus_ToBlu2026_11': 'Aspen shoot (Populus, ToBlu)',
+    'At_RuR_ToBlu_yolo_2026_11': 'Arabidopsis root (RuR + ToBlu)',
+    'At_stomata_2026-11': 'Arabidopsis leaf epidermis',
+}
 
 # Old-style weights files do not carry a config, so what travels with them
 # (paired YOLO classifier, radial symmetry preset) is listed here.

@@ -92,9 +92,6 @@ class Tab1Pipeline(QScrollArea):
         model_group = QGroupBox('Model & Weights Selection')
         layout = QVBoxLayout()
 
-        self.combo_generator = QComboBox()
-        self.combo_generator.addItems(['W-seg'])
-
         self.combo_weights = QComboBox()
         self._populate_weights()
 
@@ -120,9 +117,7 @@ class Tab1Pipeline(QScrollArea):
 
         self.btn_reload.clicked.connect(self._on_reload_clicked)
 
-        layout.addWidget(QLabel('Generator Architecture:'))
-        layout.addWidget(self.combo_generator)
-        layout.addWidget(QLabel('Staining Weights:'))
+        layout.addWidget(QLabel('Model:'))
         layout.addWidget(self.combo_weights)
         layout.addWidget(self.btn_browse)
         layout.addWidget(self.btn_zip)
@@ -130,25 +125,39 @@ class Tab1Pipeline(QScrollArea):
         layout.addWidget(self.status_label)
         model_group.setLayout(layout)
 
-        # Trigger default model load on init
-        self._on_reload_clicked()
+        self._load_default_model()
         return model_group
 
+    @staticmethod
+    def _model_label(name):
+        return w.MODEL_ZIP_LABELS.get(name, name)
+
     def _populate_weights(self):
-        """Old-style weights (downloaded by name) plus bundles found in ~/.wseg_models."""
+        """Models installed in ~/.wseg_models, then released models not yet downloaded."""
         self.combo_weights.blockSignals(True)
         self.combo_weights.clear()
-        for w_name in w.WEIGHT_URL_MAP:
-            self.combo_weights.addItem(w_name, userData=w_name)
         installed = {name for name, _ in w.list_local_bundles()}
         for name, folder in w.list_local_bundles():
-            self.combo_weights.addItem(f'[bundle] {name}', userData=folder)
+            self.combo_weights.addItem(
+                self._model_label(name), userData=folder
+            )
         for name in w.MODEL_ZIP_URL_MAP:
-            if name not in installed:  # downloaded on first use
+            if name not in installed:  # downloaded when it is first loaded
                 self.combo_weights.addItem(
-                    f'[download] {name}', userData=f'zip:{name}'
+                    f'{self._model_label(name)} [download]',
+                    userData=f'zip:{name}',
                 )
         self.combo_weights.blockSignals(False)
+
+    def _load_default_model(self):
+        """Loads the first installed model; never downloads on its own."""
+        if str(self.combo_weights.currentData()).startswith('zip:'):
+            self.status_label.setText(
+                f'Device: {self.device.type.upper()} | No model installed. '
+                'Pick one and press Load (it is downloaded first, ~200 MB).'
+            )
+            return
+        self._on_reload_clicked()
 
     def _on_browse_bundle(self):
         start = w.BUNDLE_DIR if w.BUNDLE_DIR.is_dir() else Path.home()
@@ -187,11 +196,12 @@ class Tab1Pipeline(QScrollArea):
     def _select_bundle(self, folder):
         """Selects a bundle folder in the dropdown (adding it if needed) and loads it."""
         self._populate_weights()
-        label = f'[bundle] {Path(folder).name}'
-        index = self.combo_weights.findText(label)
+        index = self.combo_weights.findData(str(folder))
         if index == -1:
-            self.combo_weights.addItem(label, userData=str(folder))
-            index = self.combo_weights.findText(label)
+            self.combo_weights.addItem(
+                self._model_label(Path(folder).name), userData=str(folder)
+            )
+            index = self.combo_weights.findData(str(folder))
         self.combo_weights.setCurrentIndex(index)
         self._on_reload_clicked()
 
