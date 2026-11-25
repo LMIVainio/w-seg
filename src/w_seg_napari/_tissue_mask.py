@@ -117,6 +117,52 @@ def make_target(wall, size=STORE, close=8, min_area=0.002):
     return mask
 
 
+def make_target_from_labels(labels, size=STORE, grow=1.0, min_area=0.002):
+    """Tissue target (size, size) bool from CORRECTED cell labels.
+
+    Tissue = where the cells you kept are: every labelled pixel counts, the
+    gaps between neighbouring cells and the holes left by deleted cells are
+    closed, the rest stays "not tissue" (peeling layer, debris, cells you
+    deleted or did not count). So the network learns your in/out decision.
+
+    The closing radius follows the cell size of the image: `grow` x the median
+    cell diameter (at least 2 px of the size x size picture), so it is the same
+    for a 20x and a 40x image. A deleted cell inside the tissue is filled; a
+    peeling layer that is separated from the tissue by more than about one cell
+    stays out.
+    """
+    import cv2
+    from scipy import ndimage as ndi
+
+    labels = np.asarray(labels)
+    H, W = labels.shape
+    block = max(1, int(np.ceil(max(H, W) / size)))
+    coarse = _block_any(labels, block).astype(np.float32)
+    mask = (
+        cv2.resize(coarse, (size, size), interpolation=cv2.INTER_AREA) > 0.25
+    )
+    if not mask.any():
+        return mask
+
+    areas = np.bincount(labels.ravel().astype(np.int64))[1:]
+    areas = areas[areas > 0]
+    diameter = 2.0 * np.sqrt(np.median(areas) / np.pi)  # full-image pixels
+    px = diameter / block * (coarse.shape[0] / size)  # pixels of the target
+    r = int(np.clip(round(grow * px), 2, 40))
+    yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
+    disk = (xx * xx + yy * yy) <= r * r
+    padded = np.pad(mask, r)  # so that the closing does not eat the edge
+    mask = ndi.binary_closing(padded, structure=disk)[r:-r, r:-r]
+    mask = ndi.binary_fill_holes(mask)
+    lab, n = ndi.label(mask)
+    if n:
+        sizes = np.bincount(lab.ravel())
+        small = sizes < min_area * size * size
+        small[0] = False
+        mask = mask & ~small[lab]
+    return mask
+
+
 # =====================================================================
 # The mask in use
 # =====================================================================

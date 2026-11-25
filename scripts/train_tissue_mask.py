@@ -1,14 +1,22 @@
 """Train the coarse tissue mask model (whole image at 512 x 512 -> tissue).
 
-    python scripts/train_tissue_mask.py TRAIN_FOLDER [TRAIN_FOLDER ...] \
-        --out tissue_mask_run [--masks PAINTED_DIR] [--epochs 60]
+    python scripts/train_tissue_mask.py --sessions SESSIONS [SESSIONS ...] \
+        --out tissue_mask_run [--epochs 60]
 
-TRAIN_FOLDER  folders of the 5-plane training tifs (planes 0-2 = RGB, 3 = wall
-              mask), the same files the cell-wall model is trained on.
+--sessions  batch session files (*_session.h5) or folders of them (the batch's
+            wseg_batch folder, or the image folder that contains it). Only
+            sessions with CORRECTED labels are used.
 
-The target is made automatically: tissue = "contains cell walls", with the
-gaps between cells closed (--close, in pixels of a 1024 px picture). To keep a
-peeling layer or debris OUT of the tissue, paint those images by hand:
+The target is your own decision: tissue = where the corrected cells are. The
+gaps between cells and the holes of deleted cells are closed (the radius
+follows the cell size, --grow), and everything else is "not tissue": the
+peeling layer, debris, cells you deleted or did not count. The network
+learns to leave these out. Only review the images fully before training on
+them: a cell you did not look at counts as one you kept.
+
+Folders of 5-plane training tifs (planes 0-2 = RGB, 3 = wall mask) can be
+given as plain arguments; their target is "contains cell walls", which cannot
+tell a peeling layer from the tissue. To correct a slide, paint it by hand:
 
     --masks DIR   binary pictures named <slide name>.png / .tif (any non-zero
                   pixel = tissue). They replace the automatic target of the
@@ -36,7 +44,7 @@ import tifffile  # noqa: E402
 from w_seg_napari import _tissue_mask as tm  # noqa: E402
 
 
-def load_slide(path, close, masks_dir):
+def load_slide(path, close, masks_dir):  # 5-plane tif
     """(rgb [STORE, STORE, 3] float16 in -1..1, target [STORE, STORE] bool)."""
     try:
         stack = tifffile.memmap(path)
@@ -73,6 +81,39 @@ def load_slide(path, close, masks_dir):
     else:
         y = tm.make_target(stack[3], tm.STORE, close=close)
     return x, y, painted is not None
+
+
+def load_session_slide(path, grow):
+    """Same as load_slide, from a session with corrected labels."""
+    from w_seg_napari._batch_io import to_rgb
+    from w_seg_napari._session_training_data import read_session_sample
+
+    sample, why = read_session_sample(path, require_corrected=True)
+    if sample is None:
+        raise ValueError(why)
+    labels = np.squeeze(sample['labels'])
+    rgb = to_rgb(sample['raw'])
+    H, W = labels.shape
+    if rgb.shape[:2] != (H, W):
+        raise ValueError(
+            f'image {rgb.shape[:2]} and labels {(H, W)} differ in size'
+        )
+    step = max(1, int(max(H, W) // (2 * tm.STORE)))
+    x = tm.prepare_input(rgb[::step, ::step], tm.STORE).astype(np.float16)
+    y = tm.make_target_from_labels(labels, tm.STORE, grow=grow)
+    return x, y
+
+
+def session_files(paths):
+    files = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            sub = p / 'wseg_batch'
+            files += sorted((sub if sub.is_dir() else p).glob('*_session.h5'))
+        elif p.is_file():
+            files.append(p)
+    return [str(f) for f in files]
 
 
 def augment(x, y, rng, out=tm.SIZE):
@@ -116,7 +157,9 @@ def dice_iou(prob_bool, truth_bool):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    p.add_argument('folders', nargs='+')
+    p.add_argument('folders', nargs='*', help='folders of 5-plane tifs')
+    p.add_argument('--sessions', nargs='+', default=[])
+    p.add_argument('--grow', type=float, default=1.0)
     p.add_argument('--out', default='tissue_mask')
     p.add_argument('--masks', default=None)
     p.add_argument('--close', type=int, default=8)
@@ -141,10 +184,20 @@ def main():
             for q in Path(f).iterdir()
             if q.suffix.lower() in ('.tif', '.tiff')
         )
-    if not paths:
-        sys.exit('No tif files found.')
-    print(f'{len(paths)} slides')
+    sessions = session_files(a.sessions)
+    if not paths and not sessions:
+        sys.exit('Nothing to train on: give --sessions or tif folders.')
+    print(f'{len(sessions)} session(s), {len(paths)} tif slide(s)')
     slides, painted_n = [], 0
+    for i, path in enumerate(sessions, 1):
+        name = Path(path).name.removesuffix('_session.h5')
+        try:
+            x, y = load_session_slide(path, a.grow)
+        except Exception as e:
+            print(f'  skipped {name}: {e}')
+            continue
+        slides.append((name, x, y))
+        print(f'  session {i}/{len(sessions)} {name}  tissue {y.mean():.0%}')
     for i, path in enumerate(paths, 1):
         try:
             x, y, painted = load_slide(path, a.close, a.masks)

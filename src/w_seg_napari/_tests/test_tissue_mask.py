@@ -85,3 +85,38 @@ def test_split_roots_joins_overlapping_and_ignores_specks():
     )
     empty = tm.TissueLookup(np.zeros((50, 50)), (300, 300))
     assert tm.split_roots(empty) == [(0, 0, 300, 300)]
+
+
+def test_target_from_corrected_labels_keeps_your_decision():
+    labels = np.zeros((2000, 3000), dtype=np.int32)
+    n = 1
+    # kept cells: a block of 40 x 40 px cells with 3 px walls, rows 200-1000
+    for y in range(200, 1000, 43):
+        for x in range(300, 1500, 43):
+            labels[y : y + 40, x : x + 40] = n
+            n += 1
+    inner = labels[600:640, 700:740].copy()
+    labels[600:640, 700:740] = 0  # a cell deleted inside the tissue
+    # a peeling layer far below, which was deleted: no labels at all there
+    target = tm.make_target_from_labels(labels, size=500)
+    assert target[60:240, 60:240].mean() > 0.95  # the kept block is tissue
+    assert (
+        target[150, 175] and target[400:, :].sum() == 0
+    )  # hole filled, peel out
+    assert inner.any()
+
+
+def test_target_from_labels_radius_follows_the_cell_size():
+    # the same tissue at two magnifications gives about the same target
+    def tissue(scale):
+        h, w, cell = 1000 * scale, 1500 * scale, 40 * scale
+        lab = np.zeros((h, w), dtype=np.int32)
+        n = 1
+        for y in range(100 * scale, 700 * scale, cell + 3 * scale):
+            for x in range(150 * scale, 1000 * scale, cell + 3 * scale):
+                lab[y : y + cell, x : x + cell] = n
+                n += 1
+        return tm.make_target_from_labels(lab, size=300)
+
+    a, b = tissue(1), tissue(2)
+    assert (a & b).sum() / (a | b).sum() > 0.9
