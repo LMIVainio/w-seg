@@ -39,3 +39,43 @@ def test_crop_keeps_channels_and_makes_a_copy():
     out[0, 0, 0] = -1
     assert img[2, 3, 0] != -1
     assert br.crop_image(img, None) is img
+
+
+def test_union_box_and_suggest(tmp_path, monkeypatch):
+    import numpy as np
+
+    from w_seg_napari import _batch_io
+    from w_seg_napari import _batch_rois as br
+    from w_seg_napari import _tissue_mask as tm
+
+    assert br.union_box([], (100, 100)) is None
+    assert br.union_box([(10, 10, 40, 50), (20, 5, 90, 60)], (100, 100)) == [
+        10,
+        5,
+        90,
+        60,
+    ]
+    assert br.union_box([(0, 0, 100, 100)], (100, 100)) is None
+
+    img = np.zeros((100, 100, 3), np.uint8)
+    monkeypatch.setattr(_batch_io, 'load_image', lambda p: img)
+    monkeypatch.setattr(tm, 'tissue_lookup', lambda *a, **k: object())
+    monkeypatch.setattr(
+        tm, 'split_roots', lambda lk: [(10, 10, 40, 50), (20, 5, 90, 60)]
+    )
+    gen = br.suggest_rois(
+        ['a.tif', 'b.tif'],
+        tmp_path,
+        (None, {}),
+        keep={'b.tif': [1, 2, 30, 40]},
+    )
+    events = []
+    try:
+        while True:
+            events.append(next(gen))
+    except StopIteration as stop:
+        result = stop.value
+    assert result == {'a.tif': [10, 5, 90, 60], 'b.tif': [1, 2, 30, 40]}
+    assert [e for e in events if e[0] == 'roi'] == [
+        ('roi', 'a.tif', [10, 5, 90, 60], 2)
+    ]

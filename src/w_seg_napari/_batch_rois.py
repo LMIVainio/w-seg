@@ -92,3 +92,59 @@ def crop_image(image, roi):
         return image
     y0, x0, y1, x1 = roi
     return np.ascontiguousarray(image[y0:y1, x0:x1])
+
+
+def union_box(boxes, shape):
+    """One normalized region around all the boxes (None if there are none,
+    or if it would be the whole image)."""
+    boxes = [b for b in boxes if b is not None]
+    if not boxes:
+        return None
+    a = np.asarray(boxes, dtype=float)
+    return normalize_roi(
+        [a[:, 0].min(), a[:, 1].min(), a[:, 2].max(), a[:, 3].max()], shape
+    )
+
+
+def suggest_rois(
+    files,
+    folder,
+    tissue_model,
+    device=None,
+    keep=None,
+    threshold=None,
+    convex=False,
+    is_cancelled=None,
+):
+    """Regions from the tissue mask model, one per image (generator).
+
+    Yields ('progress', percent, message) and ('roi', name, roi, n_pieces)
+    for each image; returns {name: roi} for the images that got a region.
+    Images in `keep` (name -> region) are left as they are. An image whose
+    tissue fills (nearly) all of it gets no region. When the mask has
+    several separate pieces of tissue the region contains all of them.
+    """
+    from w_seg_napari import _tissue_mask as tm
+    from w_seg_napari._batch_io import load_image
+
+    model, cfg = tissue_model
+    keep = dict(keep or {})
+    result = dict(keep)
+    todo = [f for f in files if f not in keep]
+    for i, name in enumerate(todo):
+        if is_cancelled is not None and is_cancelled():
+            break
+        yield ('progress', 100 * i / max(len(todo), 1), f'Mask: {name}')
+        try:
+            rgb = load_image(Path(folder) / name)
+        except (OSError, ValueError):
+            continue
+        lookup = tm.tissue_lookup(model, cfg, rgb, device, threshold, convex)
+        boxes = tm.split_roots(lookup)
+        roi = union_box(boxes, rgb.shape)
+        if roi is None:
+            result.pop(name, None)
+        else:
+            result[name] = roi
+        yield ('roi', name, roi, len(boxes))
+    return result

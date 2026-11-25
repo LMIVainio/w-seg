@@ -328,6 +328,16 @@ class BatchTabWidget(QWidget):
             'Saved in batch_rois.json in the results folder.'
         )
         self.btn_regions.clicked.connect(self._on_select_regions)
+        self.btn_suggest = QPushButton('Suggest regions from tissue mask')
+        self.btn_suggest.setToolTip(
+            'Uses the tissue mask model of the loaded model to propose a '
+            'rectangle around the tissue of every image (peeling layers and '
+            'background are left out). The suggestions are saved and opened '
+            'for review: correct any of them, then Finish. If an image has '
+            'several separate pieces of tissue the rectangle covers all of '
+            'them.'
+        )
+        self.btn_suggest.clicked.connect(self._on_suggest_regions)
         self.lbl_regions = QLabel('')
         self.regions = RegionSelectorWidget(self.main_widget.viewer)
         self.regions.closed.connect(self._update_regions_label)
@@ -341,6 +351,7 @@ class BatchTabWidget(QWidget):
         )
         initial_layout.addWidget(self.chk_crop)
         initial_layout.addWidget(self.btn_regions)
+        initial_layout.addWidget(self.btn_suggest)
         initial_layout.addWidget(self.lbl_regions)
         initial_layout.addWidget(self.regions)
         initial_layout.addWidget(self.chk_borders)
@@ -921,6 +932,98 @@ class BatchTabWidget(QWidget):
             return
         self.regions.start(self.files, self.selected_dir, self._out_dir())
         self._update_regions_label()
+
+    def _on_suggest_regions(self):
+        if self._sessions_mode() or not self.files:
+            QMessageBox.information(
+                self,
+                'Suggest regions',
+                'Choose a folder of image files first (regions are not used '
+                'with sessions as input).',
+            )
+            return
+        from w_seg_napari import _tissue_mask as tm
+        from w_seg_napari._wsegutils import get_active_model_info
+
+        folder = tm.find_tissue_mask(get_active_model_info().get('folder'))
+        if folder is None:
+            QMessageBox.information(
+                self,
+                'Suggest regions',
+                'The loaded model has no tissue mask model '
+                '(tissue_mask.keras + tissue_mask.json in its folder).',
+            )
+            return
+        existing = load_rois(self._out_dir())
+        keep = {}
+        if existing:
+            answer = QMessageBox.question(
+                self,
+                'Suggest regions',
+                f'{len(existing)} image(s) already have a saved region. '
+                'Replace them with new suggestions?\n\nYes: replace all. '
+                'No: keep the saved regions, suggest only for the others.',
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.No,
+            )
+            if answer == QMessageBox.Cancel:
+                return
+            if answer == QMessageBox.No:
+                keep = existing
+        tissue = self._batch_ui_settings().get('tissue') or {}
+        convex = bool(tissue.get('convex'))
+        threshold = tissue.get('threshold')
+        device = self.main_widget.tab1.device
+        try:
+            model = tm.load_tissue_mask(folder, device)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, 'Suggest regions', str(e))
+            return
+        from w_seg_napari._batch_rois import save_rois, suggest_rois
+
+        files, sel, out = list(self.files), self.selected_dir, self._out_dir()
+        self.btn_suggest.setEnabled(False)
+        self.stats = {'pieces': 0, 'multi': 0, 'none': 0}
+
+        @thread_worker
+        def _work():
+            return (
+                yield from suggest_rois(
+                    files, sel, model, device, keep, threshold, convex
+                )
+            )
+
+        def _on_event(ev):
+            if ev[0] == 'progress':
+                self.progress_bar.setValue(int(ev[1]))
+                self.status_label.setText(ev[2])
+            elif ev[0] == 'roi':
+                if ev[2] is None:
+                    self.stats['none'] += 1
+                if ev[3] > 1:
+                    self.stats['multi'] += 1
+
+        def _on_done(rois):
+            save_rois(out, rois)
+            self.progress_bar.setValue(0)
+            self.status_label.setText(
+                f'Suggested regions for {len(rois)} image(s); '
+                f'{self.stats["multi"]} with several pieces of tissue, '
+                f'{self.stats["none"]} left whole. Review them.'
+            )
+            self._update_regions_label()
+            self.regions.start(files, sel, out)
+
+        def _on_error(e):
+            QMessageBox.warning(self, 'Suggest regions', str(e))
+
+        worker = _work()
+        worker.yielded.connect(_on_event)
+        worker.returned.connect(_on_done)
+        worker.errored.connect(_on_error)
+        worker.finished.connect(lambda: self.btn_suggest.setEnabled(True))
+        self._suggest_worker = worker
+        worker.start()
 
     def _update_regions_label(self):
         if not self.selected_dir or self._sessions_mode():
