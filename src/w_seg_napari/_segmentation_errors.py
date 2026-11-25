@@ -345,6 +345,7 @@ def train_error_model(
     Returns (bundle, report): bundle goes to save_error_model; report holds
     the cross-validated scores (whole slides held out when there are 2+).
     """
+    import sklearn
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import average_precision_score
     from sklearn.model_selection import GroupKFold, StratifiedKFold
@@ -426,6 +427,8 @@ def train_error_model(
         'threshold': thr,
         'report': report,
         'created': datetime.now().isoformat(timespec='seconds'),
+        'sklearn_version': sklearn.__version__,
+        'numpy_version': np.__version__,
     }
     return bundle, report
 
@@ -546,11 +549,30 @@ def load_error_model(path):
     try:
         bundle = joblib.load(path)
     except Exception as e:  # unreadable or not a joblib file
-        raise ValueError(f'Cannot read the error model {path}: {e}') from e
+        import numpy
+        import sklearn
+
+        raise ValueError(
+            f'Cannot read the error model {path}: {e}\n'
+            'If the file is fine, this is most likely a version mismatch: '
+            'scikit-learn models can only be read by the scikit-learn '
+            'version that saved them. Installed here: scikit-learn '
+            f'{sklearn.__version__}, numpy {numpy.__version__}. Install the '
+            'versions the model was trained with, or train it again here.'
+        ) from e
     if not isinstance(bundle, dict) or bundle.get('version') != MODEL_VERSION:
         raise ValueError(
             'This is not a w-seg error model (or a different version).'
         )
+    saved = bundle.get('sklearn_version')
+    if saved:
+        import sklearn
+
+        if saved != sklearn.__version__:
+            print(
+                f'[w-seg] Error model was saved with scikit-learn {saved}; '
+                f'this is {sklearn.__version__}. It may give wrong results.'
+            )
     missing = [f for f in bundle['features'] if f not in FEATURES]
     if missing:
         raise ValueError(f'The error model needs unknown features: {missing}')
