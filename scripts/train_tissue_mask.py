@@ -4,8 +4,9 @@
         --out tissue_mask_run [--epochs 60]
 
 --sessions  batch session files (*_session.h5) or folders of them (the batch's
-            wseg_batch folder, or the image folder that contains it). Only
-            sessions with CORRECTED labels are used.
+            wseg_batch folder, or the image folder that contains it). A session
+            is used if it has a painted `tissue_mask` layer (see
+            scripts/make_tissue_mask.py), or else corrected labels.
 
 The target is your own decision: tissue = where the corrected cells are. The
 gaps between cells and the holes of deleted cells are closed (the radius
@@ -84,24 +85,39 @@ def load_slide(path, close, masks_dir):  # 5-plane tif
 
 
 def load_session_slide(path, grow):
-    """Same as load_slide, from a session with corrected labels."""
+    """Same as load_slide, from a session. Returns (x, y, how): the target is
+    the `tissue_mask` layer you painted in the session if there is one, else
+    it is made from the corrected labels."""
+    import h5py
+
     from w_seg_napari._batch_io import to_rgb
     from w_seg_napari._session_training_data import read_session_sample
 
-    sample, why = read_session_sample(path, require_corrected=True)
-    if sample is None:
-        raise ValueError(why)
-    labels = np.squeeze(sample['labels'])
-    rgb = to_rgb(sample['raw'])
-    H, W = labels.shape
-    if rgb.shape[:2] != (H, W):
-        raise ValueError(
-            f'image {rgb.shape[:2]} and labels {(H, W)} differ in size'
-        )
+    painted = tm.read_tissue_layer(path)
+    if painted is not None:
+        with h5py.File(path, 'r') as f:
+            if 'raw' not in f:
+                raise ValueError('it holds no image (raw)')
+            raw = f['raw'][()]
+        rgb = to_rgb(raw)
+        y = tm.layer_to_target(painted, tm.STORE)
+        how = 'painted tissue_mask layer'
+    else:
+        sample, why = read_session_sample(path, require_corrected=True)
+        if sample is None:
+            raise ValueError(why)
+        labels = np.squeeze(sample['labels'])
+        rgb = to_rgb(sample['raw'])
+        if rgb.shape[:2] != labels.shape:
+            raise ValueError(
+                f'image {rgb.shape[:2]} and labels {labels.shape} differ'
+            )
+        y = tm.make_target_from_labels(labels, tm.STORE, grow=grow)
+        how = 'corrected labels'
+    H, W = rgb.shape[:2]
     step = max(1, int(max(H, W) // (2 * tm.STORE)))
     x = tm.prepare_input(rgb[::step, ::step], tm.STORE).astype(np.float16)
-    y = tm.make_target_from_labels(labels, tm.STORE, grow=grow)
-    return x, y
+    return x, y, how
 
 
 def session_files(paths):
@@ -192,12 +208,15 @@ def main():
     for i, path in enumerate(sessions, 1):
         name = Path(path).name.removesuffix('_session.h5')
         try:
-            x, y = load_session_slide(path, a.grow)
+            x, y, how = load_session_slide(path, a.grow)
         except Exception as e:
             print(f'  skipped {name}: {e}')
             continue
         slides.append((name, x, y))
-        print(f'  session {i}/{len(sessions)} {name}  tissue {y.mean():.0%}')
+        print(
+            f'  session {i}/{len(sessions)} {name}  tissue {y.mean():.0%}'
+            f'  ({how})'
+        )
     for i, path in enumerate(paths, 1):
         try:
             x, y, painted = load_slide(path, a.close, a.masks)

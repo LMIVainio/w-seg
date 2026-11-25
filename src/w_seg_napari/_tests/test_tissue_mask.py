@@ -120,3 +120,21 @@ def test_target_from_labels_radius_follows_the_cell_size():
 
     a, b = tissue(1), tissue(2)
     assert (a & b).sum() / (a | b).sum() > 0.9
+
+
+def test_target_from_labels_non_square_and_layer_round_trip():
+    labels = np.zeros((1000, 3000), dtype=np.int32)
+    n = 1
+    for y in range(100, 900, 43):
+        for x in range(200, 2800, 43):
+            labels[y : y + 40, x : x + 40] = n
+            n += 1
+    sq = tm.make_target_from_labels(labels, size=300, squash=True)
+    asp = tm.make_target_from_labels(labels, size=600, squash=False)
+    assert sq.shape == (300, 300) and asp.shape == (200, 600)
+    assert asp[40:160, 80:520].mean() > 0.95 and not asp[:5].any()
+    layer = tm.mask_to_layer(asp, labels.shape)
+    assert layer['name'] == 'tissue_mask' and layer['data'].dtype == np.uint8
+    assert layer['scale'] == [5.0, 5.0]
+    back = tm.layer_to_target(layer['data'], size=300)
+    assert (back & sq).sum() / (back | sq).sum() > 0.9

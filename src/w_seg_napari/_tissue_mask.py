@@ -27,6 +27,7 @@ SIZE = 512  # what the network sees
 STORE = 1024  # what the training keeps in memory (random crops come from it)
 MODEL_FILE = 'tissue_mask.keras'
 CONFIG_FILE = 'tissue_mask.json'
+LAYER_NAME = 'tissue_mask'  # the napari layer in a session (extra/)
 
 
 # =====================================================================
@@ -117,8 +118,10 @@ def make_target(wall, size=STORE, close=8, min_area=0.002):
     return mask
 
 
-def make_target_from_labels(labels, size=STORE, grow=1.0, min_area=0.002):
-    """Tissue target (size, size) bool from CORRECTED cell labels.
+def make_target_from_labels(
+    labels, size=STORE, grow=1.0, min_area=0.002, squash=True
+):
+    """Tissue target bool from CORRECTED cell labels.
 
     Tissue = where the cells you kept are: every labelled pixel counts, the
     gaps between neighbouring cells and the holes left by deleted cells are
@@ -126,28 +129,36 @@ def make_target_from_labels(labels, size=STORE, grow=1.0, min_area=0.002):
     deleted or did not count). So the network learns your in/out decision.
 
     The closing radius follows the cell size of the image: `grow` x the median
-    cell diameter (at least 2 px of the size x size picture), so it is the same
-    for a 20x and a 40x image. A deleted cell inside the tissue is filled; a
-    peeling layer that is separated from the tissue by more than about one cell
-    stays out.
+    cell diameter (at least 2 px of the picture), so it is the same for a 20x
+    and a 40x image. A deleted cell inside the tissue is filled; a peeling
+    layer that is separated from the tissue by more than about one cell stays
+    out.
+
+    squash=True gives a (size, size) picture (the training squashes the image
+    the same way); squash=False keeps the aspect ratio, the longer side being
+    `size` (this is the picture to paint on in napari).
     """
     import cv2
     from scipy import ndimage as ndi
 
     labels = np.asarray(labels)
     H, W = labels.shape
+    if squash:
+        th = tw = int(size)
+    else:
+        scale = size / max(H, W)
+        th, tw = max(1, round(H * scale)), max(1, round(W * scale))
     block = max(1, int(np.ceil(max(H, W) / size)))
     coarse = _block_any(labels, block).astype(np.float32)
-    mask = (
-        cv2.resize(coarse, (size, size), interpolation=cv2.INTER_AREA) > 0.25
-    )
+    mask = cv2.resize(coarse, (tw, th), interpolation=cv2.INTER_AREA) > 0.25
     if not mask.any():
         return mask
 
     areas = np.bincount(labels.ravel().astype(np.int64))[1:]
     areas = areas[areas > 0]
     diameter = 2.0 * np.sqrt(np.median(areas) / np.pi)  # full-image pixels
-    px = diameter / block * (coarse.shape[0] / size)  # pixels of the target
+    # the same length in pixels of the target (which may be squashed)
+    px = diameter * np.sqrt(th / H * tw / W)
     r = int(np.clip(round(grow * px), 2, 40))
     yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
     disk = (xx * xx + yy * yy) <= r * r
@@ -157,10 +168,58 @@ def make_target_from_labels(labels, size=STORE, grow=1.0, min_area=0.002):
     lab, n = ndi.label(mask)
     if n:
         sizes = np.bincount(lab.ravel())
-        small = sizes < min_area * size * size
+        small = sizes < min_area * th * tw
         small[0] = False
         mask = mask & ~small[lab]
     return mask
+
+
+def mask_to_layer(mask, full_shape):
+    """napari Labels payload for a tissue mask picture that covers the whole
+    image: uint8 0/1, with the scale that puts it over the full image."""
+    H, W = full_shape
+    return {
+        'name': LAYER_NAME,
+        'layer_type': 'labels',
+        'order': 0,
+        'opacity': 0.5,
+        'scale': [H / mask.shape[0], W / mask.shape[1]],
+        'translate': [0.0, 0.0],
+        'visible': True,
+        'blending': 'translucent',
+        'data': np.ascontiguousarray(np.asarray(mask) > 0, dtype=np.uint8),
+        'colormap': 'label_colormap',
+    }
+
+
+def layer_to_target(data, size=STORE):
+    """A painted tissue mask (any size, covering the whole image) -> the
+    (size, size) bool target of the training (squashed like the image)."""
+    import cv2
+
+    data = np.squeeze(np.asarray(data)) > 0
+    return cv2.resize(
+        data.astype(np.uint8), (size, size), interpolation=cv2.INTER_NEAREST
+    ).astype(bool)
+
+
+def read_tissue_layer(path):
+    """The painted `tissue_mask` layer of a session file (extra/), or None.
+    Returns the uint8 picture; it covers the whole image, at any resolution."""
+    import h5py
+
+    with h5py.File(path, 'r') as f:
+        group = f.get('extra')
+        if group is None:
+            return None
+        for key in group:
+            item = group[key]
+            name = item.attrs.get('layer_name', key)
+            if isinstance(name, bytes):
+                name = name.decode()
+            if str(name) == LAYER_NAME and isinstance(item, h5py.Dataset):
+                return item[()]
+    return None
 
 
 # =====================================================================
