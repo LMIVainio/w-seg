@@ -18,6 +18,7 @@ LOG_COLUMNS = [
     'p_error',
     'merged_with',
     'area_px',
+    'inside_fraction',
 ]
 
 
@@ -28,7 +29,15 @@ def border_ids(labels):
     return ids[ids > 0]
 
 
-def _row(action, label_id, area, error_type='', p_error=np.nan, merged=''):
+def _row(
+    action,
+    label_id,
+    area,
+    error_type='',
+    p_error=np.nan,
+    merged='',
+    inside=np.nan,
+):
     return {
         'action': action,
         'label_id': int(label_id),
@@ -36,6 +45,7 @@ def _row(action, label_id, area, error_type='', p_error=np.nan, merged=''):
         'p_error': p_error,
         'merged_with': merged,
         'area_px': int(area),
+        'inside_fraction': inside,
     }
 
 
@@ -47,6 +57,8 @@ def cleanup_labels(
     borders=False,
     mode='off',
     min_p=0.8,
+    tissue=None,
+    min_inside=0.5,
 ):
     """
     Returns (cleaned labels, log DataFrame with one row per change).
@@ -56,6 +68,10 @@ def cleanup_labels(
     mode     'off', 'merge' (fragments), 'delete' (spurious cells) or 'both';
              needs `bundle` (the error model) and `wall` (the prediction)
     min_p    only cells with an error probability of at least this are changed
+    tissue   a _tissue_mask.TissueLookup: cells of which less than
+             `min_inside` of the area lies in the tissue are removed (the
+             peeling layer, debris). Done first, so that the error model does
+             not see them.
     """
     from w_seg_napari._flagged_cells import merge_many
     from w_seg_napari._segmentation_errors import flag_labels
@@ -64,6 +80,18 @@ def cleanup_labels(
         raise ValueError(f'Unknown clean-up mode {mode!r}.')
     labels = np.array(labels, copy=True)
     rows = []
+
+    if tissue is not None:
+        ids, frac = tissue.outside_cells(labels, min_inside)
+        if ids:
+            areas = dict(
+                zip(*np.unique(labels, return_counts=True), strict=True)
+            )
+            labels[np.isin(labels, ids)] = 0
+            rows += [
+                _row('outside_tissue', i, areas[i], inside=frac[i])
+                for i in ids
+            ]
 
     if borders:
         ids = border_ids(labels)
@@ -118,6 +146,7 @@ def summarize(log):
     """'12 border cells removed, 3 merged, 1 deleted' (empty log: nothing)."""
     counts = log['action'].value_counts()
     names = {
+        'outside_tissue': 'cell(s) outside the tissue removed',
         'border': 'border cell(s) removed',
         'merge': 'fragment(s) merged',
         'delete': 'not-a-cell(s) deleted',

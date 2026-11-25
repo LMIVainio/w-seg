@@ -13,6 +13,7 @@ from w_seg_napari._model_config import legacy_config, make_config
 CALLS = []
 SEED_ARGS = {}
 SEED_KEYS = ('seed_data', 'edge_distance', 'direction')
+TILE_FILTER = []
 
 
 def _install_fakes(monkeypatch):
@@ -20,6 +21,7 @@ def _install_fakes(monkeypatch):
 
     def process_large_image(image, model, is_cancelled=None, **kw):
         CALLS.append(('predict', image.shape))
+        TILE_FILTER[:] = [kw.get('tile_filter')]
         geometry = kw.get('geometry_name')
         if is_cancelled and is_cancelled():
             return (None, None, None) if geometry else (None, None)
@@ -901,3 +903,43 @@ def test_flagged_fixes_wait_for_fresh_gasp_labels(tmp_path, monkeypatch):
     events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
     notes = [e[1] for e in events if e[0] == 'note']
     assert any('only newly computed GASP labels' in n for n in notes)
+
+
+def test_tissue_mask_skips_tiles_and_drops_cells_outside(
+    tmp_path, monkeypatch
+):
+    from w_seg_napari import _tissue_mask as tm
+
+    sessions = _install_fakes(monkeypatch)
+
+    def fake_lookup(model, cfg, rgb, device=None, threshold=None):
+        prob = np.zeros((20, 20), np.float32)
+        prob[:, :10] = 0.9  # the left half is tissue
+        return tm.TissueLookup(prob, rgb.shape[:2], 0.5)
+
+    monkeypatch.setattr(tm, 'tissue_lookup', fake_lookup)
+    _make_images(tmp_path, ['a.tif'])
+    s = _settings()
+    s['tissue'] = {
+        'model': (object(), {'size': 512}),
+        'drop_outside': True,
+        'min_inside': 0.5,
+        'skip_tiles': True,
+        'min_tile': 0.01,
+    }
+    events, _ = _drain(bp.run_batch(['a.tif'], tmp_path, s, lambda: False))
+    keep = TILE_FILTER[0]
+    h, w = CALLS[0][1][1:]
+    assert keep(0, 0, 4) and not keep(0, w - 4, 4)
+    saved = sessions[str(tmp_path / 'wseg_batch' / 'a_session.h5')]
+    assert set(np.unique(saved['gasp_labels'])) == {0, 1}  # right cell gone
+    log = pd.read_csv(tmp_path / 'wseg_batch' / 'a_cleanup.csv')
+    assert list(log['action']) == ['outside_tissue']
+    assert log['inside_fraction'].iloc[0] < 0.1
+
+
+def test_without_a_tissue_model_nothing_changes(tmp_path, monkeypatch):
+    _install_fakes(monkeypatch)
+    _make_images(tmp_path, ['a.tif'])
+    _drain(bp.run_batch(['a.tif'], tmp_path, _settings(), lambda: False))
+    assert TILE_FILTER[0] is None

@@ -967,9 +967,14 @@ def process_large_image(
     enable_lab=True,
     output_names=('semantic_head', 'affinity_head'),
     geometry_name=None,
+    tile_filter=None,
 ):
     """
     Memory-safe inference pipeline for Napari.
+
+    tile_filter: optional function (y, x, patch_size) -> bool; a tile for
+    which it returns False is skipped like an empty background tile (the
+    tissue mask uses this).
 
     Works with old models (output: (semantic, affinity) tuple, 2 affinity
     channels) and new models (output: dict, any number of affinity channels).
@@ -1077,7 +1082,10 @@ def process_large_image(
                 ]
 
                 # --- BRANCH A: EMPTY BACKGROUND PATCH ---
-                if not patch_fg_mask.any():
+                if not patch_fg_mask.any() or (
+                    tile_filter is not None
+                    and not tile_filter(y, x, patch_size)
+                ):
                     # Completely skip inference, masking, canvas accumulation, and live updates
                     continue
                 # Slice 6-channel patch on CPU -> (6, 256, 256)

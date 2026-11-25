@@ -77,6 +77,16 @@ class _AbortShim:
 # Session files live in _session_io (save_session / load_session).
 
 
+def _tile_filter(lookup, settings):
+    """Function that tells the prediction which tiles to skip (the tissue
+    mask), or None."""
+    t = settings.get('tissue') or {}
+    if lookup is None or not t.get('skip_tiles', True):
+        return None
+    min_tile = float(t.get('min_tile', 0.01))
+    return lambda y, x, size: lookup.keep_tile(y, x, size, min_tile)
+
+
 def _require(store: dict, *keys, stage: str):
     missing = [k for k in keys if k not in store]
     if missing:
@@ -345,6 +355,22 @@ def process_image(image_path, settings: dict, is_cancelled):
             )
         store[CORRECTED] = kept
     results = {'raw': rgb}
+    tissue_cache = {}
+
+    def tissue_of():
+        """The tissue mask of this image (made once), or None when no mask
+        model is in use."""
+        t = settings.get('tissue') or {}
+        if not t.get('model'):
+            return None
+        if 'lookup' not in tissue_cache:
+            from w_seg_napari._tissue_mask import tissue_lookup
+
+            model, tcfg = t['model']
+            tissue_cache['lookup'] = tissue_lookup(
+                model, tcfg, rgb, settings.get('device'), t.get('threshold')
+            )
+        return tissue_cache['lookup']
 
     # 1. Prediction ------------------------------------------------------
     if stages.get('predict'):
@@ -367,6 +393,7 @@ def process_image(image_path, settings: dict, is_cancelled):
             enable_lab=pre['enable_lab'],
             output_names=(cfg['outputs']['wall'], cfg['outputs']['affinity']),
             geometry_name=geometry_name,
+            tile_filter=_tile_filter(tissue_of(), settings),
         )
         sem, aff, geo = out if geometry_name else (*out, None)
         if sem is None:
@@ -423,7 +450,13 @@ def process_image(image_path, settings: dict, is_cancelled):
     # 3b. Clean-up: border cells, and the cells the error model is sure about
     cl = settings.get('cleanup') or {}
     mode = cl.get('mode', 'off')
-    if (cl.get('borders') or mode != 'off') and 'gasp_labels' in store:
+    tissue_cfg = settings.get('tissue') or {}
+    drop_outside = bool(tissue_cfg.get('drop_outside')) and bool(
+        tissue_cfg.get('model')
+    )
+    if (
+        cl.get('borders') or mode != 'off' or drop_outside
+    ) and 'gasp_labels' in store:
         fresh = bool(stages.get('gasp'))  # only new labels are fixed
         if mode != 'off' and not fresh:
             notes.append(
@@ -439,6 +472,8 @@ def process_image(image_path, settings: dict, is_cancelled):
             borders=bool(cl.get('borders')),
             mode=mode,
             min_p=float(cl.get('min_p', 0.8)),
+            tissue=tissue_of() if drop_outside else None,
+            min_inside=float(tissue_cfg.get('min_inside', 0.5)),
         )
         store['gasp_labels'] = cleaned
         log.to_csv(cleanup_path(settings['out_dir'], name), index=False)
