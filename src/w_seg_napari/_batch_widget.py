@@ -338,6 +338,15 @@ class BatchTabWidget(QWidget):
             'them.'
         )
         self.btn_suggest.clicked.connect(self._on_suggest_regions)
+        self.combo_pieces = QComboBox()
+        self.combo_pieces.addItem('Around all pieces of tissue', False)
+        self.combo_pieces.addItem('Largest piece only', True)
+        self.combo_pieces.setToolTip(
+            'What to do when the mask finds several separate pieces of '
+            'tissue (several roots) in one image. A region is one rectangle: '
+            'either around all of them, or around the piece with the most '
+            'tissue only.'
+        )
         self.lbl_regions = QLabel('')
         self.regions = RegionSelectorWidget(self.main_widget.viewer)
         self.regions.closed.connect(self._update_regions_label)
@@ -352,6 +361,7 @@ class BatchTabWidget(QWidget):
         initial_layout.addWidget(self.chk_crop)
         initial_layout.addWidget(self.btn_regions)
         initial_layout.addWidget(self.btn_suggest)
+        initial_layout.addWidget(self.combo_pieces)
         initial_layout.addWidget(self.lbl_regions)
         initial_layout.addWidget(self.regions)
         initial_layout.addWidget(self.chk_borders)
@@ -981,6 +991,7 @@ class BatchTabWidget(QWidget):
             return
         from w_seg_napari._batch_rois import save_rois, suggest_rois
 
+        largest = bool(self.combo_pieces.currentData())
         files, sel, out = list(self.files), self.selected_dir, self._out_dir()
         self.btn_suggest.setEnabled(False)
         self.stats = {'pieces': 0, 'multi': 0, 'none': 0}
@@ -989,7 +1000,15 @@ class BatchTabWidget(QWidget):
         def _work():
             return (
                 yield from suggest_rois(
-                    files, sel, model, device, keep, threshold, convex
+                    files,
+                    sel,
+                    model,
+                    device,
+                    keep,
+                    threshold,
+                    convex,
+                    None,
+                    largest,
                 )
             )
 

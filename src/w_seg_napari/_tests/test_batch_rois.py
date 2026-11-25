@@ -79,3 +79,15 @@ def test_union_box_and_suggest(tmp_path, monkeypatch):
     assert [e for e in events if e[0] == 'roi'] == [
         ('roi', 'a.tif', [10, 5, 90, 60], 2)
     ]
+
+
+def test_largest_box():
+    import numpy as np
+
+    from w_seg_napari import _batch_rois as br
+
+    m = np.zeros((100, 100), bool)
+    m[10:20, 10:20] = True  # 100 px
+    m[50:90, 50:90] = True  # 1600 px
+    boxes = [(5, 5, 25, 25), (45, 45, 95, 95)]
+    assert br.largest_box(boxes, m) == (45, 45, 95, 95)

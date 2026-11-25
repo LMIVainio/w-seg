@@ -106,6 +106,16 @@ def union_box(boxes, shape):
     )
 
 
+def largest_box(boxes, mask):
+    """The box with the most tissue pixels of `mask` (bool, full image)."""
+    best, best_n = None, -1
+    for y0, x0, y1, x1 in boxes:
+        n = int(np.count_nonzero(mask[y0:y1, x0:x1]))
+        if n > best_n:
+            best, best_n = (y0, x0, y1, x1), n
+    return best
+
+
 def suggest_rois(
     files,
     folder,
@@ -115,6 +125,7 @@ def suggest_rois(
     threshold=None,
     convex=False,
     is_cancelled=None,
+    largest_only=False,
 ):
     """Regions from the tissue mask model, one per image (generator).
 
@@ -122,7 +133,8 @@ def suggest_rois(
     for each image; returns {name: roi} for the images that got a region.
     Images in `keep` (name -> region) are left as they are. An image whose
     tissue fills (nearly) all of it gets no region. When the mask has
-    several separate pieces of tissue the region contains all of them.
+    several separate pieces of tissue the region contains all of them, or
+    only the one with the most tissue if `largest_only`.
     """
     from w_seg_napari import _tissue_mask as tm
     from w_seg_napari._batch_io import load_image
@@ -141,6 +153,8 @@ def suggest_rois(
             continue
         lookup = tm.tissue_lookup(model, cfg, rgb, device, threshold, convex)
         boxes = tm.split_roots(lookup)
+        if largest_only and len(boxes) > 1:
+            boxes = [largest_box(boxes, lookup.full_mask())]
         roi = union_box(boxes, rgb.shape)
         if roi is None:
             result.pop(name, None)
