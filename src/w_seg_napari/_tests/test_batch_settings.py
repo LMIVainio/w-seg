@@ -110,3 +110,19 @@ def test_model_differences():
 def test_describe_mentions_the_main_choices():
     text = bs.describe(bs.settings_document(_settings(), 'a'))
     assert 'Seeded Mutex' in text and 'average' in text and '0.5' in text
+
+
+def test_tissue_options_are_saved_without_the_model_and_restored():
+    tissue = {
+        'model': (object(), {'size': 512}),  # cannot be saved, not needed
+        'skip_tiles': True,
+        'drop_outside': True,
+        'threshold': 0.4,
+        'min_inside': 0.6,
+    }
+    doc = bs.settings_document(_settings(tissue=tissue), 'w')
+    assert 'model' not in doc['tissue'] and doc['tissue']['threshold'] == 0.4
+    loaded = bs.apply_loaded(_settings(tissue=tissue), doc)
+    assert loaded['tissue']['min_inside'] == 0.6
+    assert loaded['tissue']['model'] is tissue['model']  # the loaded one stays
+    assert bs.settings_document(_settings(), 'w')['tissue'] is None

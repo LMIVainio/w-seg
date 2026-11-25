@@ -74,6 +74,13 @@ def settings_document(
         'error_model': str(error_model_path) if error_model_path else None,
         'device': str(settings.get('device', '')),
         'cleanup': copy.deepcopy(settings.get('cleanup')),
+        # the tissue mask model itself is not saved, only how it is used
+        'tissue': {
+            k: v
+            for k, v in (settings.get('tissue') or {}).items()
+            if k != 'model'
+        }
+        or None,
     }
     for key in OVERRIDE_KEYS:
         doc[key] = copy.deepcopy(settings[key])
@@ -160,6 +167,16 @@ def apply_loaded(settings: dict, doc: dict) -> dict:
         out[key] = copy.deepcopy(doc[key])
     if doc.get('cleanup') is not None:  # older files have none
         out['cleanup'] = copy.deepcopy(doc['cleanup'])
+    if doc.get('tissue') is not None:
+        # keep the model that is loaded now; the file says how to use it
+        out['tissue'] = {
+            **copy.deepcopy(doc['tissue']),
+            **{
+                k: v
+                for k, v in (settings.get('tissue') or {}).items()
+                if k == 'model'
+            },
+        }
     return out
 
 

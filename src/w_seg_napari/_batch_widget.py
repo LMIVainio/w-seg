@@ -345,6 +345,48 @@ class BatchTabWidget(QWidget):
         initial_layout.addWidget(self.regions)
         initial_layout.addWidget(self.chk_borders)
 
+        self.chk_tissue_tiles = QCheckBox(
+            'Skip background tiles (tissue mask)'
+        )
+        self.chk_tissue_tiles.setToolTip(
+            'Needs a model that comes with a tissue mask model. The mask '
+            '(the whole image at 512 x 512) is made first; tiles of the '
+            'prediction that lie outside the tissue are skipped. Faster, '
+            'and nothing is predicted in the empty area.'
+        )
+        self.chk_tissue_cells = QCheckBox(
+            'Remove cells outside the tissue (tissue mask)'
+        )
+        self.chk_tissue_cells.setToolTip(
+            'Right after GASP, cells of which less than the set share lies '
+            'in the tissue are removed from the GASP labels (peeling layer, '
+            'debris). They are listed in <image>_cleanup.csv.'
+        )
+        self.spin_tissue_thr = QDoubleSpinBox()
+        self.spin_tissue_thr.setRange(0.05, 0.95)
+        self.spin_tissue_thr.setSingleStep(0.05)
+        self.spin_tissue_thr.setValue(0.5)
+        self.spin_tissue_thr.setToolTip(
+            'Tissue where the mask model is at least this sure. Lower keeps '
+            'more, higher cuts closer to the tissue.'
+        )
+        self.spin_tissue_inside = QDoubleSpinBox()
+        self.spin_tissue_inside.setRange(0.05, 1.0)
+        self.spin_tissue_inside.setSingleStep(0.05)
+        self.spin_tissue_inside.setValue(0.5)
+        self.spin_tissue_inside.setToolTip(
+            'A cell is kept when at least this share of its area is tissue.'
+        )
+        tissue_row = QHBoxLayout()
+        tissue_row.setContentsMargins(20, 0, 0, 0)
+        tissue_row.addWidget(QLabel('tissue if p >='))
+        tissue_row.addWidget(self.spin_tissue_thr)
+        tissue_row.addWidget(QLabel('cell inside >='))
+        tissue_row.addWidget(self.spin_tissue_inside)
+        initial_layout.addWidget(self.chk_tissue_tiles)
+        initial_layout.addWidget(self.chk_tissue_cells)
+        initial_layout.addLayout(tissue_row)
+
         fix_row = QHBoxLayout()
         fix_row.setContentsMargins(20, 0, 0, 0)
         fix_row.addWidget(QLabel('Fix flagged cells:'))
@@ -837,6 +879,11 @@ class BatchTabWidget(QWidget):
             if i >= 0:
                 combo.setCurrentIndex(i)
         path = doc.get('error_model')
+        tissue = doc.get('tissue') or {}
+        self.chk_tissue_tiles.setChecked(bool(tissue.get('skip_tiles')))
+        self.chk_tissue_cells.setChecked(bool(tissue.get('drop_outside')))
+        self.spin_tissue_thr.setValue(float(tissue.get('threshold', 0.5)))
+        self.spin_tissue_inside.setValue(float(tissue.get('min_inside', 0.5)))
         cleanup = doc.get('cleanup') or {}
         self.chk_borders.setChecked(bool(cleanup.get('borders')))
         i = self.combo_fix.findData(cleanup.get('mode', 'off'))
@@ -1274,6 +1321,13 @@ class BatchTabWidget(QWidget):
                 'min_p': float(self.spin_fix_p.value()),
                 'flag_errors': self.chk_errors.isChecked(),
             },
+            'tissue': {
+                'skip_tiles': self.chk_tissue_tiles.isChecked(),
+                'drop_outside': self.chk_tissue_cells.isChecked(),
+                'threshold': float(self.spin_tissue_thr.value()),
+                'min_inside': float(self.spin_tissue_inside.value()),
+                'min_tile': 0.01,
+            },
         }
 
     def _set_running(self, running: bool):
@@ -1388,6 +1442,24 @@ class BatchTabWidget(QWidget):
 
                 settings['error_bundle'] = load_error_model(
                     self.error_model_path
+                )
+            tissue = settings.get('tissue') or {}
+            if tissue.get('skip_tiles') or tissue.get('drop_outside'):
+                from w_seg_napari import _tissue_mask as tm
+                from w_seg_napari._wsegutils import get_active_model_info
+
+                folder = tm.find_tissue_mask(
+                    get_active_model_info().get('folder')
+                )
+                if folder is None:
+                    raise ValueError(
+                        'The loaded model has no tissue mask model '
+                        '(tissue_mask.keras + tissue_mask.json in its '
+                        'folder). Switch the tissue mask options off, or load '
+                        'a model that comes with one.'
+                    )
+                tissue['model'] = tm.load_tissue_mask(
+                    folder, settings.get('device')
                 )
             cleanup = settings.get('cleanup') or {}
             if cleanup.get('mode', 'off') != 'off':

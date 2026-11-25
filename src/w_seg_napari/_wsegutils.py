@@ -507,6 +507,7 @@ _ACTIVE_MODEL_INFO = {
     'yolo': None,
     'radial_symmetry': None,
     'yolo_crop': None,
+    'folder': None,  # the bundle folder (None for an old weights file)
 }
 
 
@@ -516,7 +517,9 @@ def get_active_model_info() -> dict:
     return dict(_ACTIVE_MODEL_INFO)
 
 
-def _set_active_model_info(name, yolo, radial_symmetry, yolo_crop=None):
+def _set_active_model_info(
+    name, yolo, radial_symmetry, yolo_crop=None, folder=None
+):
     """yolo_crop: crop settings of the paired YOLO classifier (None = the
     plugin defaults, see _model_config.DEFAULT_YOLO_CROP)."""
     _ACTIVE_MODEL_INFO.update(
@@ -524,6 +527,7 @@ def _set_active_model_info(name, yolo, radial_symmetry, yolo_crop=None):
         yolo=yolo,
         radial_symmetry=radial_symmetry,
         yolo_crop=yolo_crop,
+        folder=folder,
     )
 
 
@@ -643,6 +647,7 @@ def load_my_generator(
             str(yolo_file) if yolo_file else None,
             comp['radial_symmetry'],
             get_yolo_crop(cfg),
+            folder=str(bundle),
         )
         print(f'Model bundle loaded on device: {device}')
         info = ', '.join(
