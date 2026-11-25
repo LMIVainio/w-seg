@@ -368,7 +368,12 @@ def process_image(image_path, settings: dict, is_cancelled):
 
             model, tcfg = t['model']
             tissue_cache['lookup'] = tissue_lookup(
-                model, tcfg, rgb, settings.get('device'), t.get('threshold')
+                model,
+                tcfg,
+                rgb,
+                settings.get('device'),
+                t.get('threshold'),
+                bool(t.get('convex')),
             )
         return tissue_cache['lookup']
 

@@ -912,7 +912,9 @@ def test_tissue_mask_skips_tiles_and_drops_cells_outside(
 
     sessions = _install_fakes(monkeypatch)
 
-    def fake_lookup(model, cfg, rgb, device=None, threshold=None):
+    def fake_lookup(
+        model, cfg, rgb, device=None, threshold=None, convex=False
+    ):
         prob = np.zeros((20, 20), np.float32)
         prob[:, :10] = 0.9  # the left half is tissue
         return tm.TissueLookup(prob, rgb.shape[:2], 0.5)

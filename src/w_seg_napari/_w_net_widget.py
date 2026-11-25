@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from napari.qt.threading import thread_worker
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -32,11 +33,12 @@ class WNetWidget(QGroupBox):
     ):
         super().__init__('W-Net Model Inference', parent)
         self.viewer = viewer
-        self.generator = generator
+        self._generator = generator
         self.device = device or (
             'cuda' if torch.cuda.is_available() else 'cpu'
         )
 
+        self._tissue = None  # (folder, model, config) of the mask model
         self.live_update_layer = None
         self.output_layer = None
         self.worker = None
@@ -60,6 +62,83 @@ class WNetWidget(QGroupBox):
             )
 
         self.refresh_layer_choices()
+
+    @property
+    def generator(self):
+        return self._generator
+
+    @generator.setter
+    def generator(self, value):
+        # a new model may or may not come with a tissue mask model
+        self._generator = value
+        if hasattr(self, 'chk_tissue'):
+            self.refresh_tissue_option()
+
+    def _tissue_folder(self):
+        """Folder of the tissue mask model of the loaded model, or None."""
+        from w_seg_napari import _tissue_mask as tm
+        from w_seg_napari._wsegutils import get_active_model_info
+
+        if self._generator is None:
+            return None
+        return tm.find_tissue_mask(get_active_model_info().get('folder'))
+
+    def refresh_tissue_option(self):
+        """The tissue mask checkboxes: on and usable when the loaded model
+        comes with a tissue mask model, off and greyed out when not."""
+        has = self._tissue_folder() is not None
+        self.chk_tissue.setEnabled(has)
+        self.chk_tissue_convex.setEnabled(has)
+        self.chk_tissue.setChecked(has)
+        self.chk_tissue.setToolTip(
+            'The tissue mask model of the loaded model finds the tissue on '
+            'the whole image first (512 x 512); tiles of the prediction '
+            'outside it are skipped. The mask is shown as a layer.'
+            if has
+            else 'The loaded model has no tissue mask model '
+            '(tissue_mask.keras + tissue_mask.json in its folder).'
+        )
+
+    def _tissue_lookup_for(self, rgb01):
+        """TissueLookup of the image, or None when the option is off."""
+        if not (self.chk_tissue.isEnabled() and self.chk_tissue.isChecked()):
+            return None
+        from w_seg_napari import _tissue_mask as tm
+
+        folder = self._tissue_folder()
+        if folder is None:
+            return None
+        if self._tissue is None or self._tissue[0] != str(folder):
+            model, cfg = tm.load_tissue_mask(folder, self.device)
+            self._tissue = (str(folder), model, cfg)
+        _, model, cfg = self._tissue
+        return tm.tissue_lookup(
+            model,
+            cfg,
+            rgb01,
+            self.device,
+            convex=self.chk_tissue_convex.isChecked(),
+        )
+
+    def _show_tissue_layer(self, look, scale, translate):
+        """The mask as a Labels layer on top of the image."""
+        h, w = look.mask.shape
+        H, W = look.shape
+        data = look.mask.astype(np.uint8)
+        sc = (scale[-2] * H / h, scale[-1] * W / w)
+        if 'tissue_mask' in self.viewer.layers:
+            layer = self.viewer.layers['tissue_mask']
+            layer.data = data
+            layer.scale = sc
+            layer.translate = translate
+        else:
+            self.viewer.add_labels(
+                data,
+                name='tissue_mask',
+                scale=sc,
+                translate=translate,
+                opacity=0.35,
+            )
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -95,6 +174,19 @@ class WNetWidget(QGroupBox):
         mode_layout.addWidget(self.radio_normal)
         mode_layout.addWidget(self.radio_live)
         form_layout.addRow('Execution Mode:', mode_layout)
+
+        # 4b. Tissue mask (only when the loaded model has one)
+        tissue_layout = QHBoxLayout()
+        self.chk_tissue = QCheckBox('Skip background (tissue mask)')
+        self.chk_tissue_convex = QCheckBox('Convex')
+        self.chk_tissue_convex.setToolTip(
+            'Use the convex hull of every piece of tissue: no notches, so '
+            'a thin edge of the tissue is not cut off.'
+        )
+        tissue_layout.addWidget(self.chk_tissue)
+        tissue_layout.addWidget(self.chk_tissue_convex)
+        form_layout.addRow('Tissue:', tissue_layout)
+        self.refresh_tissue_option()
 
         # 5. Action Buttons (Predict & Cancel)
         btn_layout = QHBoxLayout()
@@ -212,6 +304,22 @@ class WNetWidget(QGroupBox):
 
         input_tensor = torch.from_numpy(raw_data).permute(2, 0, 1).float()
 
+        tile_filter = None
+        try:
+            look = self._tissue_lookup_for(raw_data)
+        except Exception as e:  # a broken mask model must not stop the run
+            look = None
+            print(f'[w-seg] Tissue mask not used: {e}')
+        if look is not None:
+            self._show_tissue_layer(
+                look, image_layer.scale, image_layer.translate
+            )
+            tile_filter = lambda y, x, size: look.keep_tile(y, x, size, 0.01)  # noqa: E731
+            print(
+                f'[w-seg] Tissue mask: {look.mask.mean():.0%} of the image '
+                'is tissue.'
+            )
+
         # Capture spatial metadata from cropped input layer
         layer_scale = image_layer.scale
         layer_translate = image_layer.translate
@@ -268,6 +376,7 @@ class WNetWidget(QGroupBox):
                     enable_lab=pre['enable_lab'],
                     output_names=output_names,
                     geometry_name=geometry_name,
+                    tile_filter=tile_filter,
                 )
             )
 

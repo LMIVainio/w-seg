@@ -225,19 +225,40 @@ def read_tissue_layer(path):
 # =====================================================================
 # The mask in use
 # =====================================================================
+def convex_mask(mask):
+    """Every separate piece of the mask replaced by its convex hull: no
+    notches, so a thin edge of the tissue is not cut off (a bit more of the
+    background is kept)."""
+    import cv2
+    from scipy import ndimage as ndi
+
+    mask = np.asarray(mask, dtype=bool)
+    out = np.zeros(mask.shape, dtype=np.uint8)
+    lab, n = ndi.label(mask)
+    for i in range(1, n + 1):
+        pts = cv2.findNonZero((lab == i).astype(np.uint8))
+        hull = cv2.convexHull(pts)
+        cv2.fillConvexPoly(out, hull, 1)
+    return out.astype(bool)
+
+
 class TissueLookup:
     """The mask of one image, answering questions in full-image coordinates.
 
     prob: (h, w) tissue probabilities from the network (low resolution).
     shape: (H, W) of the image the mask belongs to.
+    convex: use the convex hull of every piece of tissue instead.
     """
 
-    def __init__(self, prob, shape, threshold=0.5):
+    def __init__(self, prob, shape, threshold=0.5, convex=False):
         prob = np.asarray(prob, dtype=np.float32)
         self.prob = prob
         self.shape = (int(shape[0]), int(shape[1]))
         self.threshold = float(threshold)
+        self.convex = bool(convex)
         self.mask = prob >= self.threshold
+        if self.convex and self.mask.any():
+            self.mask = convex_mask(self.mask)
         ii = np.zeros(
             (self.mask.shape[0] + 1, self.mask.shape[1] + 1), dtype=np.int64
         )
@@ -266,9 +287,11 @@ class TissueLookup:
 
         H, W = self.shape
         up = cv2.resize(
-            self.prob, (W, H), interpolation=cv2.INTER_LINEAR
-        )  # smooth edge, then the same threshold
-        return up >= self.threshold
+            self.mask.astype(np.float32),
+            (W, H),
+            interpolation=cv2.INTER_LINEAR,
+        )  # smooth edge
+        return up >= 0.5
 
     def outside_cells(self, labels, min_inside=0.5):
         """Ids of the cells of which less than `min_inside` of the area lies
@@ -456,8 +479,8 @@ def predict_tissue(model, cfg, rgb, device=None):
     return 1.0 / (1.0 + np.exp(-logits[0, ..., 0]))
 
 
-def tissue_lookup(model, cfg, rgb, device=None, threshold=None):
+def tissue_lookup(model, cfg, rgb, device=None, threshold=None, convex=False):
     """TissueLookup of an image, ready to use."""
     prob = predict_tissue(model, cfg, rgb, device)
     thr = cfg.get('threshold', 0.5) if threshold is None else threshold
-    return TissueLookup(prob, rgb.shape[:2], thr)
+    return TissueLookup(prob, rgb.shape[:2], thr, convex)

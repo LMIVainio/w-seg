@@ -362,6 +362,10 @@ class BatchTabWidget(QWidget):
             'in the tissue are removed from the GASP labels (peeling layer, '
             'debris). They are listed in <image>_cleanup.csv.'
         )
+        self.chk_tissue_convex = QCheckBox('Convex')
+        self.chk_tissue_convex.setToolTip(
+            'Use the convex hull of every piece of tissue: no notches.'
+        )
         self.spin_tissue_thr = QDoubleSpinBox()
         self.spin_tissue_thr.setRange(0.05, 0.95)
         self.spin_tissue_thr.setSingleStep(0.05)
@@ -383,6 +387,7 @@ class BatchTabWidget(QWidget):
         tissue_row.addWidget(self.spin_tissue_thr)
         tissue_row.addWidget(QLabel('cell inside >='))
         tissue_row.addWidget(self.spin_tissue_inside)
+        tissue_row.addWidget(self.chk_tissue_convex)
         initial_layout.addWidget(self.chk_tissue_tiles)
         initial_layout.addWidget(self.chk_tissue_cells)
         initial_layout.addLayout(tissue_row)
@@ -884,6 +889,7 @@ class BatchTabWidget(QWidget):
         self.chk_tissue_cells.setChecked(bool(tissue.get('drop_outside')))
         self.spin_tissue_thr.setValue(float(tissue.get('threshold', 0.5)))
         self.spin_tissue_inside.setValue(float(tissue.get('min_inside', 0.5)))
+        self.chk_tissue_convex.setChecked(bool(tissue.get('convex')))
         cleanup = doc.get('cleanup') or {}
         self.chk_borders.setChecked(bool(cleanup.get('borders')))
         i = self.combo_fix.findData(cleanup.get('mode', 'off'))
@@ -1326,6 +1332,7 @@ class BatchTabWidget(QWidget):
                 'drop_outside': self.chk_tissue_cells.isChecked(),
                 'threshold': float(self.spin_tissue_thr.value()),
                 'min_inside': float(self.spin_tissue_inside.value()),
+                'convex': self.chk_tissue_convex.isChecked(),
                 'min_tile': 0.01,
             },
         }

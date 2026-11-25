@@ -138,3 +138,19 @@ def test_target_from_labels_non_square_and_layer_round_trip():
     assert layer['scale'] == [5.0, 5.0]
     back = tm.layer_to_target(layer['data'], size=300)
     assert (back & sq).sum() / (back | sq).sum() > 0.9
+
+
+def test_convex_fills_notches_and_keeps_pieces_apart():
+    prob = np.zeros((100, 200), np.float32)
+    prob[10:90, 10:60] = 0.9
+    prob[10:90, 60:90] = 0.9
+    prob[40:60, 40:90] = 0.0  # a notch cut into the right side
+    plain = tm.TissueLookup(prob, (100, 200), 0.5)
+    convex = tm.TissueLookup(prob, (100, 200), 0.5, convex=True)
+    assert not plain.mask[50, 80] and convex.mask[50, 80]
+    assert convex.mask.sum() > plain.mask.sum()
+    prob[:, 120:180] = 0.9  # a second piece far away
+    two = tm.TissueLookup(prob, (100, 200), 0.5, convex=True)
+    assert not two.mask[50, 100]  # no hull around both
+    assert len(tm.split_roots(two, pad=0.0)) == 2
+    assert two.full_mask().shape == (100, 200)
