@@ -11,6 +11,10 @@ Per image:
   1. take the cells of the phloem class(es)
   2. k-means with 2 groups on their centroids -> the two phloem poles
   3. distance between the two pole centres
+Phloem poles can be looked for in steps ("levels"): first only the most
+reliably detected class (e.g. phloem pole parenchyma), and only if those do not
+form two clear clusters, that class plus the next one, and so on (see
+`pooling_levels` and `clear_poles`).
 With xylem cells as well (two xylem poles by the same method) the measuring
 line is made perpendicular to the xylem axis instead of simply joining the two
 phloem centres. In a diarch root the two axes are at right angles, so this
@@ -153,18 +157,69 @@ def two_poles(xy, trim=0.0, seed=0):
 
 
 # ---------------------------------------------------------- measurement
+def pooling_levels(order):
+    """Cumulative class lists from classes in order of reliability:
+    ['a', 'b', 'c'] -> [['a'], ['a', 'b'], ['a', 'b', 'c']]."""
+    order = list(order)
+    return [order[: i + 1] for i in range(len(order))]
+
+
+def clear_poles(xy, trim=3.0, min_cells=4, min_pole_cells=2, min_sep=4.0):
+    """
+    Do the points form two clear clusters? Returns (ok, separation, poles)
+    where separation = distance between the two centres / mean distance of the
+    cells to their own centre (about 2-2.5 when one round blob is cut in two,
+    well above 4 for two real groups) and poles is two_poles()'s result (None
+    if there were too few cells). Clear = enough cells, every pole has at
+    least `min_pole_cells` of them after trimming, and separation >= min_sep.
+    """
+    xy = np.asarray(xy, dtype=float)
+    if len(xy) < min_cells:
+        return False, np.nan, None
+    pp = two_poles(xy, trim=trim)
+    c = pp['centres']
+    dist = float(np.linalg.norm(c[1] - c[0]))
+    sep = dist / pp['spread'] if pp['spread'] > 0 else np.inf
+    ok = bool(pp['sizes'].min() >= min_pole_cells and sep >= min_sep)
+    return ok, float(sep), pp
+
+
+def _level_name(classes):
+    return '+'.join(str(c) for c in classes)
+
+
+def _describe_levels(tried):
+    """'a: 5 cells, sep 6.1; a+b: 11 cells, sep 2.3' for the log."""
+    parts = []
+    for lv, cells, _, sep in tried:
+        text = f'{_level_name(lv)}: {len(cells)} cells'
+        if np.isfinite(sep):
+            text += f', sep {sep:.1f}'
+        parts.append(text)
+    return '; '.join(parts)
+
+
 def measure_image(
     df,
-    phloem_classes,
+    phloem_classes=None,
     class_col='predicted_class',
     xylem_classes=None,
     y_col='centroid-0',
     x_col='centroid-1',
     trim=3.0,
     min_cells=4,
+    phloem_levels=None,
+    min_sep=4.0,
+    min_pole_cells=2,
 ):
     """
     One result dict for one image's table (coordinates in pixels, as (x, y)).
+
+    The phloem cells come from `phloem_classes`, or, to look in steps, from
+    `phloem_levels` (a list of class lists, most reliable first, e.g. from
+    pooling_levels). The first level whose cells form two clear clusters
+    (clear_poles) is used. If none does, the best separated level is measured
+    but marked: phloem_level = 'unclear' and the flag 'phloem poles unclear'.
 
     distance_px         between the two phloem pole centres
     distance_xylem_px   along the line perpendicular to the xylem axis (only
@@ -174,6 +229,8 @@ def measure_image(
     plus the pole / cell counts and centres for plotting.
     """
     res = {
+        'phloem_level': '',
+        'phloem_levels_tried': '',
         'n_phloem_cells': 0,
         'distance_px': np.nan,
         'distance_xylem_px': np.nan,
@@ -187,7 +244,45 @@ def measure_image(
                 f'Column {col!r} not found (have: {list(df.columns)})'
             )
 
-    ph = select_cells(df, class_col, phloem_classes)
+    stepwise = phloem_levels is not None and len(phloem_levels) > 0
+    if stepwise:
+        levels = [list(lv) for lv in phloem_levels]
+    elif phloem_classes is not None:
+        levels = [list(phloem_classes)]
+    else:
+        raise ValueError('give phloem_classes or phloem_levels')
+    tried, chosen = [], None
+    for lv in levels:
+        cells = select_cells(df, class_col, lv)
+        ok, sep, _ = clear_poles(
+            cells[[x_col, y_col]].to_numpy(float),
+            trim=trim,
+            min_cells=min_cells,
+            min_pole_cells=min_pole_cells,
+            min_sep=min_sep,
+        )
+        tried.append((lv, cells, ok, sep))
+        if ok:
+            chosen = tried[-1]
+            break
+    unclear = chosen is None
+    if unclear:
+        usable = [t for t in tried if len(t[1]) >= min_cells]
+        if not usable:
+            ph = tried[-1][1]
+            res['n_phloem_cells'] = len(ph)
+            res['phloem_levels_tried'] = _describe_levels(tried)
+            res['flags'] = f'only {len(ph)} phloem cells'
+            return res
+        chosen = max(usable, key=lambda t: np.nan_to_num(t[3], nan=-1))
+    ph = chosen[1]
+    res['phloem_level'] = (
+        'unclear' if unclear and stepwise else _level_name(chosen[0])
+    )
+    if stepwise:
+        res['phloem_levels_tried'] = _describe_levels(tried)
+        if unclear:
+            flags.append('phloem poles unclear')
     res['n_phloem_cells'] = len(ph)
     if len(ph) < min_cells:
         res['flags'] = f'only {len(ph)} phloem cells'
@@ -207,6 +302,10 @@ def measure_image(
     if res['distance_px'] < 2.0 * pp['spread']:
         flags.append('poles poorly separated')
     res['_phloem_xy'] = ph_xy
+    all_classes = [c for lv in levels for c in lv]
+    res['_phloem_all_xy'] = select_cells(df, class_col, all_classes)[
+        [x_col, y_col]
+    ].to_numpy(float)
     res['_phloem_labels'] = pp['labels']
 
     if xylem_classes:
@@ -336,6 +435,95 @@ def plot_image(name, res_row, details, path):
         fontsize=7,
     )
     ax.legend(fontsize=6)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
+def find_sessions(path):
+    """{image key: session file} from a batch results folder (or the folder
+    above it, which holds a wseg_batch folder)."""
+    path = Path(path)
+    files = list(path.glob('*_session.h5'))
+    if not files and (path / 'wseg_batch').is_dir():
+        files = list((path / 'wseg_batch').glob('*_session.h5'))
+    return {image_key(f.name[: -len('_session.h5')]): f for f in files}
+
+
+def session_image(path):
+    """The RGB image of a batch session (H, W, 3), uint8 for display."""
+    import h5py
+
+    with h5py.File(path, 'r') as f:
+        raw = f['raw'][()]
+    img = np.asarray(raw)
+    if img.ndim == 2:
+        img = np.repeat(img[..., None], 3, axis=-1)
+    img = img[..., :3]
+    if img.dtype != np.uint8:
+        img = img.astype(float)
+        lo, hi = np.percentile(img, (1, 99))
+        img = np.clip((img - lo) / max(hi - lo, 1e-9), 0, 1)
+        img = (img * 255).astype(np.uint8)
+    return img
+
+
+def plot_overlay(name, res_row, details, image, path):
+    """The batch's RGB image with the cells used, the pole centroids, the
+    line between the phloem poles and the line through the xylem poles, to
+    check a measurement by eye. Cells of the phloem classes that were not
+    used are shown as grey rings."""
+    import matplotlib
+
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    h, w = image.shape[:2]
+    fig, ax = plt.subplots(figsize=(7, 7 * h / max(w, 1)))
+    ax.imshow(image)
+    if '_phloem_all_xy' in details:
+        ax.scatter(
+            *details['_phloem_all_xy'].T, s=40, facecolors='none',
+            edgecolors='#bbbbbb', linewidths=0.8, label='other phloem-type',
+        )  # fmt: skip
+    if '_phloem_xy' in details:
+        xy, lab = details['_phloem_xy'], details['_phloem_labels']
+        for i, col in ((0, '#e41a1c'), (1, '#ff7f00')):
+            ax.scatter(
+                *xy[lab == i].T, s=18, color=col, label=f'phloem pole {i + 1}'
+            )
+        if (lab < 0).any():
+            ax.scatter(*xy[lab < 0].T, s=18, color='k', marker='x')
+        p = [
+            (res_row['pole1_x'], res_row['pole1_y']),
+            (res_row['pole2_x'], res_row['pole2_y']),
+        ]
+        ax.plot(*zip(*p), color='yellow', lw=1.5)
+        ax.scatter(
+            *zip(*p), s=140, marker='*', color='yellow', ec='k', zorder=5
+        )
+    if '_xylem_xy' in details:
+        ax.scatter(
+            *details['_xylem_xy'].T, s=18, color='#1f78b4', label='xylem'
+        )
+        if np.isfinite(res_row.get('xylem1_x', np.nan)):
+            a = np.array([res_row['xylem1_x'], res_row['xylem1_y']])
+            b = np.array([res_row['xylem2_x'], res_row['xylem2_y']])
+            d = b - a
+            ext = 0.5 * np.linalg.norm(d)  # line goes on past the poles
+            u = d / (np.linalg.norm(d) + 1e-12)
+            ax.plot(*zip(a - u * ext, b + u * ext), '--', color='cyan', lw=1.2)
+            ax.scatter(*zip(a, b), s=140, marker='*', color='cyan', ec='k',
+                       zorder=5)  # fmt: skip
+    ax.set_xlim(0, w)
+    ax.set_ylim(h, 0)
+    ax.axis('off')
+    ax.set_title(
+        f'{name}  level: {res_row.get("phloem_level", "")}  '
+        f'{res_row["distance_px"]:.1f} px  {res_row["flags"]}',
+        fontsize=7,
+    )
+    ax.legend(fontsize=6, loc='lower right')
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)

@@ -151,3 +151,68 @@ def test_compare_with_manual():
     assert stats['mean_abs_error'] == pytest.approx(1.5)
     assert set(unmatched) == {'c', 'zzz'}
     assert image_key('Folder/B_morphology.csv') == 'b'
+
+
+def _stepwise_root(rng, pppp_poles=2, pp_poles=2, se_poles=2):
+    """Phloem-type cells: class 'pppp' on `pppp_poles` poles (0, 1 or 2),
+    'pp' (primary phloem) on `pp_poles`, 'se' on `se_poles`; other cells."""
+    c0 = np.array([300.0, 300.0])
+    pts, cls = [], []
+    for name, n_poles in (
+        ('pppp', pppp_poles),
+        ('pp', pp_poles),
+        ('se', se_poles),
+    ):
+        for sign in (-1, 1)[:n_poles]:
+            pole = c0 + np.array([sign * 60.0, 0.0])
+            pts += list(pole + rng.normal(0, 3.0, (5, 2)))
+            cls += [name] * 5
+    pts += list(c0 + rng.uniform(-150, 150, (40, 2)))
+    cls += ['other'] * 40
+    pts = np.array(pts)
+    return pd.DataFrame(
+        {'label_id': range(len(pts)), 'centroid-0': pts[:, 1],
+         'centroid-1': pts[:, 0], 'predicted_class': cls}
+    )  # fmt: skip
+
+
+def test_levels_use_first_level_when_clear():
+    from w_seg_napari._phloem_distance import pooling_levels
+
+    df = _stepwise_root(np.random.default_rng(1))
+    r = measure_image(df, phloem_levels=pooling_levels(['pppp', 'pp', 'se']))
+    assert r['phloem_level'] == 'pppp'
+    assert r['distance_px'] == pytest.approx(120.0, abs=3.0)
+    assert 'unclear' not in r['flags']
+
+
+def test_levels_add_next_class_when_first_has_one_pole():
+    from w_seg_napari._phloem_distance import pooling_levels
+
+    # pppp found on one side only; adding pp (both sides) gives two poles
+    df = _stepwise_root(np.random.default_rng(2), pppp_poles=1, se_poles=0)
+    r = measure_image(df, phloem_levels=pooling_levels(['pppp', 'pp', 'se']))
+    assert r['phloem_level'] == 'pppp+pp'
+    assert r['distance_px'] == pytest.approx(120.0, abs=5.0)
+
+
+def test_levels_unclear_when_nothing_clusters():
+    from w_seg_napari._phloem_distance import pooling_levels
+
+    df = _stepwise_root(
+        np.random.default_rng(3), pppp_poles=1, pp_poles=1, se_poles=1
+    )
+    r = measure_image(df, phloem_levels=pooling_levels(['pppp', 'pp', 'se']))
+    assert r['phloem_level'] == 'unclear'
+    assert 'phloem poles unclear' in r['flags']
+    assert 'pppp:' in r['phloem_levels_tried']
+
+
+def test_overlay_plot_runs(tmp_path):
+    from w_seg_napari._phloem_distance import plot_overlay
+
+    df = _root(np.random.default_rng(4))
+    res, det = measure_all({'a': df}, phloem_classes=[3], xylem_classes=[4])
+    img = np.zeros((600, 600, 3), np.uint8)
+    plot_overlay('a', res.iloc[0], det['a'], img, tmp_path / 'a.png')
+    assert (tmp_path / 'a.png').stat().st_size > 1000
