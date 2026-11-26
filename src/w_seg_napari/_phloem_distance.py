@@ -94,8 +94,27 @@ def select_cells(df, class_col, classes):
         raise KeyError(
             f'Column {class_col!r} not found (have: {list(df.columns)})'
         )
+    return df[_class_mask(df[class_col], classes)]
+
+
+def _class_mask(values, classes):
+    """Bool mask: value equals a wanted class, or starts with it followed by
+    '_' (so '10' finds '10_primary_phloem_pole')."""
     want = {_class_key(c) for c in classes}
-    return df[df[class_col].map(_class_key).isin(want)]
+    keys = values.map(_class_key)
+    mask = keys.isin(want)
+    for w in want:
+        mask |= keys.str.startswith(w + '_')
+    return mask
+
+
+def unmatched_classes(tables, class_col, classes):
+    """The wanted classes that no cell of any table has."""
+    found = [t[class_col] for t in tables.values() if class_col in t.columns]
+    if not found:
+        return list(classes)
+    values = pd.concat(found)
+    return [c for c in classes if not _class_mask(values, [c]).any()]
 
 
 def two_poles(xy, trim=0.0, seed=0):

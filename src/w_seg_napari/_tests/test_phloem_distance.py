@@ -216,3 +216,16 @@ def test_overlay_plot_runs(tmp_path):
     img = np.zeros((600, 600, 3), np.uint8)
     plot_overlay('a', res.iloc[0], det['a'], img, tmp_path / 'a.png')
     assert (tmp_path / 'a.png').stat().st_size > 1000
+
+
+def test_class_prefix_and_unmatched():
+    from w_seg_napari._phloem_distance import select_cells, unmatched_classes
+
+    df = pd.DataFrame(
+        {'c': ['10_primary_phloem_pole', '04_primary_phloem', '07_periderm']}
+    )
+    assert len(select_cells(df, 'c', ['10'])) == 1
+    assert len(select_cells(df, 'c', ['04_primary_phloem'])) == 1
+    assert unmatched_classes({'a': df}, 'c', ['10', '10_phloem pole']) == [
+        '10_phloem pole'
+    ]

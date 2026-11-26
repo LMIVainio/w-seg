@@ -44,6 +44,7 @@ from w_seg_napari._phloem_distance import (
     plot_overlay,
     pooling_levels,
     session_image,
+    unmatched_classes,
 )
 
 
@@ -151,6 +152,17 @@ def main():
         ).value_counts()
         print(counts.to_string())
         return
+    wanted = (a.phloem_class or a.phloem_order) + (a.xylem_class or [])
+    missing = unmatched_classes(tables, a.class_col, wanted)
+    if missing:
+        have = pd.concat(
+            [t[a.class_col] for t in tables.values() if a.class_col in t]
+        ).value_counts()
+        raise SystemExit(
+            f'No cell has the class {missing} in column {a.class_col!r}. '
+            f'The column holds:\n{have.to_string()}\n'
+            'Use these names exactly (or just their number, e.g. 10).'
+        )
     scales = None
     if a.scales:
         sc = read_table(a.scales)
