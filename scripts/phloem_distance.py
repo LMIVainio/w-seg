@@ -43,6 +43,7 @@ from w_seg_napari._phloem_distance import (
     plot_image,
     plot_overlay,
     pooling_levels,
+    read_manual_poles,
     session_image,
     unmatched_classes,
 )
@@ -163,6 +164,16 @@ def main():
             f'The column holds:\n{have.to_string()}\n'
             'Use these names exactly (or just their number, e.g. 10).'
         )
+    manual_poles = {}
+    sessions = find_sessions(a.sessions) if a.sessions else {}
+    for name in tables:
+        session = sessions.get(image_key(name))
+        if session is not None:
+            poles = read_manual_poles(session)
+            if poles is not None:
+                manual_poles[name] = poles
+    if manual_poles:
+        print(f'hand-placed phloem poles used for: {sorted(manual_poles)}')
     scales = None
     if a.scales:
         sc = read_table(a.scales)
@@ -171,6 +182,7 @@ def main():
         tables,
         um_per_px=a.pixel_size,
         scales=scales,
+        manual=manual_poles,
         phloem_classes=a.phloem_class,
         phloem_levels=pooling_levels(a.phloem_order)
         if a.phloem_order
@@ -224,7 +236,6 @@ def main():
             df.to_excel(w, sheet_name=name, index=False)
     if a.plots_dir:
         os.makedirs(a.plots_dir, exist_ok=True)
-        sessions = find_sessions(a.sessions) if a.sessions else {}
         no_image = []
         for _, row in results.iterrows():
             if not np.isfinite(row['distance_px']):

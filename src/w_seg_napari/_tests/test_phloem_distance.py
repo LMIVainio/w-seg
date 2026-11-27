@@ -236,3 +236,45 @@ def test_load_tables_ignores_cleanup_logs(tmp_path):
     cells.to_csv(tmp_path / 'a_morphology.csv', index=False)
     pd.DataFrame({'label_id': [1]}).to_csv(tmp_path / 'a_cleanup.csv')
     assert list(load_tables(tmp_path)) == ['a_morphology']
+
+
+def test_manual_poles_replace_clustering():
+    from w_seg_napari._phloem_distance import poles_from_vertices
+
+    # napari vertices are (row, column); the line goes right to left
+    poles = poles_from_vertices([[300, 360], [300, 240]])
+    assert poles == ((360.0, 300.0), (240.0, 300.0))
+    assert poles_from_vertices([[1, 1]]) is None
+    assert poles_from_vertices([[5, 5], [5, 5]]) is None
+
+    df = _root(np.random.default_rng(0), ph_dist=120.0)
+    res, det = measure_all(
+        {'a': df},
+        manual={'a': poles},
+        phloem_classes=[3],
+        xylem_classes=[4],
+    )
+    r = res.iloc[0]
+    assert r['phloem_level'] == 'manual'
+    assert r['distance_px'] == pytest.approx(120.0)
+    assert r['pole1_x'] == 240.0  # left pole first
+    assert 'manual poles' in r['flags']
+    assert r['distance_xylem_px'] == pytest.approx(120.0, abs=4.0)
+    assert len(det['a']['_phloem_xy']) == 0
+
+
+def test_manual_overlay_runs(tmp_path):
+    from w_seg_napari._phloem_distance import plot_overlay
+
+    df = _root(np.random.default_rng(1))
+    res, det = measure_all(
+        {'a': df},
+        manual={'a': ((240.0, 300.0), (360.0, 300.0))},
+        phloem_classes=[3],
+        xylem_classes=[4],
+    )
+    plot_overlay(
+        'a', res.iloc[0], det['a'], np.zeros((600, 600, 3), np.uint8),
+        tmp_path / 'a.png',
+    )  # fmt: skip
+    assert (tmp_path / 'a.png').exists()

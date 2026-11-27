@@ -183,6 +183,45 @@ def two_poles(xy, trim=0.0, seed=0):
 
 
 # ---------------------------------------------------------- measurement
+def _xylem_step(
+    res,
+    flags,
+    df,
+    xylem_classes,
+    class_col,
+    x_col,
+    y_col,
+    trim,
+    min_cells,
+    axis,
+):
+    """Xylem axis, the perpendicular distance and the angle (adds to res)."""
+    xy_cells = select_cells(df, class_col, xylem_classes)
+    if len(xy_cells) < min_cells:
+        flags.append(f'only {len(xy_cells)} xylem cells')
+    else:
+        x_xy = xy_cells[[x_col, y_col]].to_numpy(float)
+        xp = two_poles(x_xy, trim=trim)
+        xc = xp['centres']
+        xaxis = xc[1] - xc[0]
+        n = np.linalg.norm(xaxis)
+        if n > 0:
+            perp = np.array([-xaxis[1], xaxis[0]]) / n
+            res['distance_xylem_px'] = float(abs(axis @ perp))
+            cosang = abs(axis @ xaxis) / (np.linalg.norm(axis) * n + 1e-12)
+            res['angle_deg'] = float(
+                np.degrees(np.arccos(np.clip(cosang, 0, 1)))
+            )
+            if abs(res['angle_deg'] - 90) > 20:
+                flags.append('axes not perpendicular')
+        res.update(
+            xylem1_x=xc[0, 0], xylem1_y=xc[0, 1],
+            xylem2_x=xc[1, 0], xylem2_y=xc[1, 1],
+        )  # fmt: skip
+        res['_xylem_xy'] = x_xy
+        res['_xylem_labels'] = xp['labels']
+
+
 def pooling_levels(order):
     """Cumulative class lists from classes in order of reliability:
     ['a', 'b', 'c'] -> [['a'], ['a', 'b'], ['a', 'b', 'c']]."""
@@ -237,6 +276,7 @@ def measure_image(
     phloem_levels=None,
     min_sep=4.0,
     min_pole_cells=2,
+    manual_poles=None,
 ):
     """
     One result dict for one image's table (coordinates in pixels, as (x, y)).
@@ -246,6 +286,8 @@ def measure_image(
     pooling_levels). The first level whose cells form two clear clusters
     (clear_poles) is used. If none does, the best separated level is measured
     but marked: phloem_level = 'unclear' and the flag 'phloem poles unclear'.
+    `manual_poles` = ((x, y), (x, y)), the two phloem pole centres placed by
+    hand: they replace the clustering (phloem_level = 'manual').
 
     distance_px         between the two phloem pole centres
     distance_xylem_px   along the line perpendicular to the xylem axis (only
@@ -269,6 +311,35 @@ def measure_image(
             raise KeyError(
                 f'Column {col!r} not found (have: {list(df.columns)})'
             )
+
+    if manual_poles is not None:
+        c = np.array(sorted(manual_poles, key=lambda p: p[0]), dtype=float)
+        axis = c[1] - c[0]
+        res.update(
+            phloem_level='manual',
+            n_phloem_cells=0,
+            pole1_x=c[0, 0], pole1_y=c[0, 1], pole2_x=c[1, 0], pole2_y=c[1, 1],
+            pole1_cells=0, pole2_cells=0, n_dropped=0,
+            distance_px=float(np.linalg.norm(axis)),
+        )  # fmt: skip
+        flags.append('manual poles')
+        wanted = [c for lv in (phloem_levels or []) for c in lv] or list(
+            phloem_classes or []
+        )
+        res['_phloem_xy'] = np.zeros((0, 2))
+        res['_phloem_labels'] = np.zeros(0, dtype=int)
+        res['_phloem_all_xy'] = (
+            select_cells(df, class_col, wanted)[[x_col, y_col]].to_numpy(float)
+            if wanted
+            else np.zeros((0, 2))
+        )
+        if xylem_classes:
+            _xylem_step(
+                res, flags, df, xylem_classes, class_col, x_col, y_col, trim,
+                min_cells, axis,
+            )  # fmt: skip
+        res['flags'] = '; '.join(flags)
+        return res
 
     stepwise = phloem_levels is not None and len(phloem_levels) > 0
     if stepwise:
@@ -335,45 +406,27 @@ def measure_image(
     res['_phloem_labels'] = pp['labels']
 
     if xylem_classes:
-        xy_cells = select_cells(df, class_col, xylem_classes)
-        if len(xy_cells) < min_cells:
-            flags.append(f'only {len(xy_cells)} xylem cells')
-        else:
-            x_xy = xy_cells[[x_col, y_col]].to_numpy(float)
-            xp = two_poles(x_xy, trim=trim)
-            xc = xp['centres']
-            xaxis = xc[1] - xc[0]
-            n = np.linalg.norm(xaxis)
-            if n > 0:
-                perp = np.array([-xaxis[1], xaxis[0]]) / n
-                res['distance_xylem_px'] = float(abs(axis @ perp))
-                cosang = abs(axis @ xaxis) / (np.linalg.norm(axis) * n + 1e-12)
-                res['angle_deg'] = float(
-                    np.degrees(np.arccos(np.clip(cosang, 0, 1)))
-                )
-                if abs(res['angle_deg'] - 90) > 20:
-                    flags.append('axes not perpendicular')
-            res.update(
-                xylem1_x=xc[0, 0], xylem1_y=xc[0, 1],
-                xylem2_x=xc[1, 0], xylem2_y=xc[1, 1],
-            )  # fmt: skip
-            res['_xylem_xy'] = x_xy
-            res['_xylem_labels'] = xp['labels']
+        _xylem_step(
+            res, flags, df, xylem_classes, class_col, x_col, y_col, trim,
+            min_cells, axis,
+        )  # fmt: skip
     res['flags'] = '; '.join(flags)
     return res
 
 
-def measure_all(tables, um_per_px=None, scales=None, **kw):
+def measure_all(tables, um_per_px=None, scales=None, manual=None, **kw):
     """
     DataFrame with one row per image. um_per_px: one pixel size for all images;
     scales: {image key: um per pixel} overriding it per image (mixed
-    magnifications). Columns ending in _um are added when a size is known.
+    magnifications). manual: {image name: ((x, y), (x, y))} hand-placed
+    phloem poles (see read_manual_poles). Columns ending in _um are added when a size is known.
     Returns (results DataFrame, {image: arrays for plot_image}).
     """
     rows, details = [], {}
     scales = {image_key(k): v for k, v in (scales or {}).items()}
+    manual = {image_key(k): v for k, v in (manual or {}).items()}
     for name, df in tables.items():
-        r = measure_image(df, **kw)
+        r = measure_image(df, manual_poles=manual.get(image_key(name)), **kw)
         details[name] = {k: r.pop(k) for k in list(r) if k.startswith('_')}
         size = scales.get(image_key(name), um_per_px)
         r = {'image': name, **r, 'um_per_px': size if size else np.nan}
@@ -464,6 +517,48 @@ def plot_image(name, res_row, details, path):
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
+
+
+MANUAL_LAYER = 'phloem_line'
+
+
+def poles_from_vertices(vertices):
+    """((x, y), (x, y)) from the first and last vertex of a line drawn in
+    napari (vertices are (row, column)); None if there are fewer than two."""
+    v = np.asarray(vertices, dtype=float)
+    if v.ndim != 2 or len(v) < 2:
+        return None
+    a, b = v[0][-2:], v[-1][-2:]
+    if np.allclose(a, b):
+        return None
+    return ((float(a[1]), float(a[0])), (float(b[1]), float(b[0])))
+
+
+def read_manual_poles(session_path, layer=MANUAL_LAYER):
+    """The hand-placed phloem poles of a batch session: the line shape in the
+    saved extra layer `layer` (draw a line from one phloem pole to the other
+    with a Shapes layer of that name). None if there is none."""
+    import h5py
+
+    with h5py.File(session_path, 'r') as f:
+        if 'extra' not in f:
+            return None
+        for key in f['extra']:
+            item = f['extra'][key]
+            name = item.attrs.get('layer_name', key)
+            if isinstance(name, bytes):
+                name = name.decode()
+            if name != layer or not isinstance(item, h5py.Group):
+                continue
+            if 'shapes_data' not in item:
+                return None
+            sg = item['shapes_data']
+            keys = sorted(
+                sg.keys(),
+                key=lambda x: int(x.split('_')[-1]) if '_' in x else 0,
+            )
+            return poles_from_vertices(sg[keys[0]][()]) if keys else None
+    return None
 
 
 def find_sessions(path):
