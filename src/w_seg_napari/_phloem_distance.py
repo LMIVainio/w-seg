@@ -58,11 +58,18 @@ def load_tables(path, sheet=None):
     one image, named after the file.
     """
     path = Path(path)
-    files = (
-        sorted(p for p in path.iterdir() if p.suffix.lower() in TABLE_SUFFIXES)
-        if path.is_dir()
-        else [path]
-    )
+    if path.is_dir():
+        files = sorted(
+            p for p in path.iterdir() if p.suffix.lower() in TABLE_SUFFIXES
+        )
+        # a batch folder also holds <image>_cleanup.csv and similar logs:
+        # when there are morphology tables, only those are cells tables
+        morph = [
+            p for p in files if p.name.lower().endswith('_morphology.csv')
+        ]
+        files = morph or files
+    else:
+        files = [path]
     if not files:
         raise ValueError(f'No csv / xlsx tables found in {path}')
     out = {}

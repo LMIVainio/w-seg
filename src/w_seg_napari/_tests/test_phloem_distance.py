@@ -229,3 +229,10 @@ def test_class_prefix_and_unmatched():
     assert unmatched_classes({'a': df}, 'c', ['10', '10_phloem pole']) == [
         '10_phloem pole'
     ]
+
+
+def test_load_tables_ignores_cleanup_logs(tmp_path):
+    cells = pd.DataFrame({'centroid-0': [1.0], 'centroid-1': [2.0]})
+    cells.to_csv(tmp_path / 'a_morphology.csv', index=False)
+    pd.DataFrame({'label_id': [1]}).to_csv(tmp_path / 'a_cleanup.csv')
+    assert list(load_tables(tmp_path)) == ['a_morphology']
