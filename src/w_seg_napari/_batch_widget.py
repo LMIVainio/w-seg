@@ -1,3 +1,4 @@
+import shutil
 import threading
 from pathlib import Path
 
@@ -540,8 +541,25 @@ class BatchTabWidget(QWidget):
             'Old "Export Napari Layers" files open too (layers only).'
         )
         self.btn_open_session.clicked.connect(self._on_open_session)
+        self.btn_close_session = QPushButton('Close and save Session')
+        self.btn_close_session.setToolTip(
+            'Saves the open session (labels and the layers ticked below) '
+            'and closes all layers. Nothing is closed if saving fails.'
+        )
+        self.btn_close_session.clicked.connect(self._on_close_session)
         self.btn_save_session = QPushButton('Save Session')
-        self.btn_save_session.clicked.connect(self._on_save_session)
+        self.btn_save_session.clicked.connect(
+            lambda _=False: self._on_save_session()
+        )
+        self.btn_save_session_as = QPushButton('Save session as...')
+        self.btn_save_session_as.setToolTip(
+            'Saves a copy of the session under a new name or in another '
+            'folder (the image and predictions are copied along). The '
+            'viewer then continues with the new file.'
+        )
+        self.btn_save_session_as.clicked.connect(
+            lambda _=False: self._on_save_session(save_as=True)
+        )
         self.btn_prev_session = QPushButton('< Previous')
         self.btn_next_session = QPushButton('Next >')
         for b, step in (
@@ -561,7 +579,10 @@ class BatchTabWidget(QWidget):
             'without saving; you are then asked first.'
         )
         sess_btns.addWidget(self.btn_open_session)
-        sess_btns.addWidget(self.btn_save_session)
+        sess_btns.addWidget(self.btn_close_session)
+        save_row = QHBoxLayout()
+        save_row.addWidget(self.btn_save_session)
+        save_row.addWidget(self.btn_save_session_as)
         step_row = QHBoxLayout()
         step_row.addWidget(self.btn_prev_session)
         step_row.addWidget(self.btn_next_session)
@@ -592,6 +613,7 @@ class BatchTabWidget(QWidget):
             'Other layers to keep in the session (class layers, shapes, ...).'
         )
         sess_layout.addLayout(sess_btns)
+        sess_layout.addLayout(save_row)
         sess_layout.addLayout(step_row)
         sess_layout.addWidget(self.lbl_session)
         sess_layout.addLayout(lab_row)
@@ -1333,9 +1355,36 @@ class BatchTabWidget(QWidget):
         self.lbl_session.setStyleSheet('font-style: normal;')
         self.refresh_layer_choices()
 
-    def _on_save_session(self):
+    def _on_close_session(self):
+        """Save the open session, then close all layers."""
+        if not len(self.viewer.layers) and self.session is None:
+            self.lbl_session.setText('Nothing to close.')
+            return
+        if not self._on_save_session():
+            return  # not saved: keep everything open
+        name = Path(self.session['path']).name if self.session else 'session'
+        self.viewer.layers.clear()
+        self._rendered = []
+        self.session = None
+        self.refresh_layer_choices()
+        self.lbl_session.setText(f'Saved and closed {name}.')
+        self.lbl_session.setStyleSheet('color: gray; font-style: italic;')
+
+    def _on_save_session(self, save_as=False):
         v = self.viewer
         path = self.session['path'] if self.session else None
+        copy_from = None
+        if save_as and path is not None:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, 'Save session as', str(path), 'HDF5 sessions (*.h5)'
+            )
+            if not chosen:
+                return False
+            new = Path(chosen)
+            if not new.name.endswith(sio.SESSION_SUFFIX):
+                new = new.with_name(new.stem + sio.SESSION_SUFFIX)
+            if new != Path(path):
+                copy_from, path = Path(path), new
         raw, source_name = None, None
         if path is None:  # a session made by hand: the image goes in too
             image_name = self.combo_save_image.currentText()
@@ -1391,6 +1440,9 @@ class BatchTabWidget(QWidget):
             if answer != QMessageBox.Yes:
                 return False
         try:
+            if copy_from is not None:  # the image and predictions come along
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(copy_from, path)
             sio.save_edits(
                 path,
                 corrected=corrected,
@@ -1406,6 +1458,8 @@ class BatchTabWidget(QWidget):
                 self, 'Cannot save session', f'{type(e).__name__}: {e}'
             )
             return False
+        if copy_from is not None:
+            self.session['path'] = path
         if self.session is None:
             self.session = {
                 'path': path,

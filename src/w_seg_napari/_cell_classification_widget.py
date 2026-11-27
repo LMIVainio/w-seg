@@ -9,11 +9,13 @@ import sklearn
 import tifffile
 from qtpy.QtCore import QStandardPaths
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -25,6 +27,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 
 import w_seg_napari._wsegutils as w
+from w_seg_napari._class_copy import copy_classes, parse_class_list
 from w_seg_napari._classifiers import SUPPORTED_CLASSIFIERS
 
 # Version of the classifier file written by CellClassifierManager.save_model
@@ -459,6 +462,37 @@ class CellClassificationWidget(QWidget):
         src_row.addWidget(self.btn_annot_refresh)
         annot_layout.addLayout(src_row)
 
+        copy_row = QHBoxLayout()
+        self.chk_copy_classes = QCheckBox('Copy classes from:')
+        self.chk_copy_classes.setToolTip(
+            'Start the class layer from the classes of an existing labels '
+            'layer (for example the YOLO classes or an earlier prediction) '
+            'instead of class 1 everywhere. The layer must have the same '
+            'size as the cells. The cells are still separated where they '
+            'touch, so the fill tool paints one cell.'
+        )
+        copy_row.addWidget(self.chk_copy_classes)
+        self.combo_copy_classes = QComboBox()
+        self.combo_copy_classes.setEnabled(False)
+        copy_row.addWidget(self.combo_copy_classes, stretch=1)
+        annot_layout.addLayout(copy_row)
+
+        keep_row = QHBoxLayout()
+        keep_row.addWidget(QLabel('Keep classes:'))
+        self.edit_keep_classes = QLineEdit()
+        self.edit_keep_classes.setPlaceholderText(
+            'all, or e.g. 1,2,4 or 3-5 (other cells become unannotated)'
+        )
+        self.edit_keep_classes.setEnabled(False)
+        keep_row.addWidget(self.edit_keep_classes, stretch=1)
+        annot_layout.addLayout(keep_row)
+        self.chk_copy_classes.toggled.connect(
+            self.combo_copy_classes.setEnabled
+        )
+        self.chk_copy_classes.toggled.connect(
+            self.edit_keep_classes.setEnabled
+        )
+
         self.btn_create_annot = QPushButton('Create/Reset Manual Class Layer')
         self.btn_create_annot.setToolTip(
             'Makes a class layer with the cells separated where they touch, '
@@ -477,6 +511,17 @@ class CellClassificationWidget(QWidget):
         # --- 4. Model Training ---
         train_group = QGroupBox('2. Classifier Training')
         train_layout = QVBoxLayout()
+
+        train_src = QHBoxLayout()
+        train_src.addWidget(QLabel('Train on layer:'))
+        self.combo_train_layer = QComboBox()
+        self.combo_train_layer.setToolTip(
+            'The labels layer with the painted classes (0 = not annotated). '
+            'Each measured cell takes the majority class painted on it. The '
+            'class layer you made above is chosen automatically.'
+        )
+        train_src.addWidget(self.combo_train_layer, stretch=1)
+        train_layout.addLayout(train_src)
 
         self.btn_train = QPushButton('Train Classifier')
         self.btn_train.setEnabled(False)
@@ -587,6 +632,31 @@ class CellClassificationWidget(QWidget):
             self.combo_annot_source.count() > 0
             or self.cached_labels_data is not None
         )
+        self._refresh_class_layer_combos()
+
+    def _refresh_class_layer_combos(self):
+        """Fills 'Copy classes from' and 'Train on layer' with the labels
+        layers (the training one defaults to the class layer made here)."""
+        for combo, prefer in (
+            (self.combo_copy_classes, None),
+            (
+                self.combo_train_layer,
+                self.annotation_layer.name if self.annotation_layer else None,
+            ),
+        ):
+            keep = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            for layer in self.viewer.layers:
+                if isinstance(layer, napari.layers.Labels):
+                    combo.addItem(layer.name, layer)
+            for name in (keep, prefer):
+                i = combo.findText(name) if name else -1
+                if i >= 0:
+                    combo.setCurrentIndex(i)
+                    break
+            combo.blockSignals(False)
+        self.btn_train.setEnabled(self.combo_train_layer.count() > 0)
 
     def _refresh_export_layer_choices(self):
         """Populates the export dropdown with all active Napari Labels layers."""
@@ -716,6 +786,21 @@ class CellClassificationWidget(QWidget):
         annot_data = self.clf_manager.create_annotation_layer_data(
             source_data, erosion_steps=1
         )
+        if self.chk_copy_classes.isChecked():
+            src = self.combo_copy_classes.currentData()
+            if src is None:
+                QMessageBox.warning(
+                    self, 'Warning', 'Choose the layer to copy classes from.'
+                )
+                return
+            try:
+                keep = parse_class_list(self.edit_keep_classes.text())
+                annot_data = copy_classes(
+                    annot_data, np.asarray(src.data), keep
+                )
+            except ValueError as e:
+                QMessageBox.warning(self, 'Copy classes', str(e))
+                return
         annot_layer_name = f'[Class Annotations] {source_name}'
 
         # If annotation layer already exists in Napari, replace or select it
@@ -740,31 +825,37 @@ class CellClassificationWidget(QWidget):
             self.lbl_annot_status.setText(
                 f'Class Layer: <i>{annot_layer_name}</i>'
             )
-            self.btn_train.setEnabled(True)
+            self._refresh_class_layer_combos()
+            i = self.combo_train_layer.findText(annot_layer_name)
+            if i >= 0:
+                self.combo_train_layer.setCurrentIndex(i)
 
     def _on_train_model(self):
+        train_layer = self.combo_train_layer.currentData()
         if (
-            self.annotation_layer is None
+            train_layer is None
             or self.cached_labels_data is None
             or self.cached_df is None
         ):
             QMessageBox.warning(
                 self,
                 'Warning',
-                'Create the class layer and measure the cells (Cell '
-                'Morphology tab) first.',
+                'Choose the layer with the painted classes and measure the '
+                'cells (Cell Morphology tab) first.',
             )
             return
-        if self.annotation_layer.data.shape != self.cached_labels_data.shape:
+        if np.shape(train_layer.data) != self.cached_labels_data.shape:
             QMessageBox.warning(
                 self,
                 'Warning',
                 'The class layer and the measured labels have different '
-                'sizes. Make the class layer from the layer you measured.',
+                'sizes. Use a layer made from the layer you measured.',
             )
             return
         if (
-            self.annotation_source
+            self.annotation_layer is not None
+            and train_layer.name == self.annotation_layer.name
+            and self.annotation_source
             and self.annotation_source != self.current_layer_name
             and QMessageBox.question(
                 self,
@@ -788,7 +879,7 @@ class CellClassificationWidget(QWidget):
 
             X, y, _ = self.clf_manager.extract_training_data(
                 labels_layer=self.cached_labels_data,
-                annotation_layer=self.annotation_layer.data,
+                annotation_layer=np.asarray(train_layer.data),
                 df_spatial_features=self.cached_df,
             )
 
