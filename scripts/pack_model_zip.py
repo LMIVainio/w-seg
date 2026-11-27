@@ -7,6 +7,9 @@ Pack a trained model into one zip for the plugin (GitHub release asset).
 The zip holds model.keras, config.json (with the paired YOLO file and the
 radial-symmetry preset written into its "companions" section), the YOLO file
 and, with --tissue-mask, the tissue mask model (tissue_mask.keras/.json).
+The two companions are independent. Whatever the bundle folder already holds
+(a YOLO file attached in the plugin, a tissue mask copied in) is packed too,
+so --yolo / --tissue-mask are only needed to add or replace one.
 Upload the zip to a release, then add one line to MODEL_ZIP_URL_MAP in
 _wsegutils.py:   'aspen_tolblue_v1': 'https://github.com/.../aspen_tolblue_v1.zip'
 
@@ -54,7 +57,27 @@ def main():
     if args.radial_symmetry != 'keep':
         comp['radial_symmetry'] = args.radial_symmetry == 'yes'
 
+    # companions already in the bundle folder are kept unless replaced
+    yolo_file = Path(args.yolo) if args.yolo else None
+    if yolo_file is None:
+        named = comp.get('yolo')
+        if named and (src / named).is_file():
+            yolo_file = src / named
+        elif named:
+            raise SystemExit(
+                f'config.json names the YOLO file {named!r} but it is not in '
+                f'{src}; add it there or give --yolo'
+            )
+        else:
+            pts = sorted(src.glob('*.pt'))
+            if len(pts) == 1:
+                yolo_file = pts[0]
+                comp['yolo'] = yolo_file.name
     mask_dir = Path(args.tissue_mask) if args.tissue_mask else None
+    if mask_dir is None and all(
+        (src / f).is_file() for f in ('tissue_mask.keras', 'tissue_mask.json')
+    ):
+        mask_dir = src
     if mask_dir is not None:
         for f in ('tissue_mask.keras', 'tissue_mask.json'):
             if not (mask_dir / f).is_file():
@@ -66,9 +89,9 @@ def main():
         shutil.copy(src / 'model.keras', tmp / 'model.keras')
         (tmp / 'config.json').write_text(json.dumps(cfg, indent=2))
         files = ['model.keras', 'config.json']
-        if args.yolo:
-            shutil.copy(args.yolo, tmp / Path(args.yolo).name)
-            files.append(Path(args.yolo).name)
+        if yolo_file is not None:
+            shutil.copy(yolo_file, tmp / yolo_file.name)
+            files.append(yolo_file.name)
         if mask_dir is not None:
             for f in ('tissue_mask.keras', 'tissue_mask.json'):
                 shutil.copy(mask_dir / f, tmp / f)
@@ -76,7 +99,10 @@ def main():
         with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
             for f in files:
                 zf.write(tmp / f, f)
-    print(f'Wrote {out}  (companions: {comp}; tissue mask: {bool(mask_dir)})')
+    print(
+        f'Wrote {out}  (YOLO: {yolo_file.name if yolo_file else "none"}; '
+        f'tissue mask: {"yes" if mask_dir else "none"}; companions: {comp})'
+    )
 
 
 if __name__ == '__main__':
